@@ -118,15 +118,18 @@ secretos: `.env`, `settings.json`, `curl-env.json`, `repo-config.json`.
 
 ## Skills
 
-El flujo de Ronin se orquesta con la skill de Claude Code **`tmux-worker-loop`**, vendorizada en
-[`skills/`](skills/). Instálala para que el botón **▷ Lanzar** funcione en modo live:
+El flujo de Ronin se orquesta con skills de Claude Code vendorizadas en [`skills/`](skills/):
+**`tmux-worker-loop`** (el loop driver↔worker detrás de ▷ Lanzar) y **`liebre-commit-workflow`**
+(Conventional Commits + versionado AgileFlow al cerrar un ticket). Instálalas para modo live:
 
 ```bash
-cp -R skills/tmux-worker-loop ~/.claude/skills/
+cp -R skills/tmux-worker-loop skills/liebre-commit-workflow ~/.claude/skills/
 ```
 
-Detalles y las skills externas de [superpowers](docs/superpowers/) (`brainstorming`, `writing-plans`)
-en [`skills/README.md`](skills/README.md).
+La **revisión adversarial** de cada fase se apoya en plugins externos —
+[`codex:codex-rescue`](https://github.com/openai/codex) (gate por defecto) y el `code-review`
+oficial (*ultrareview*)— igual que el diseño usa [superpowers](docs/superpowers/)
+(`brainstorming`, `writing-plans`). Detalles en [`skills/README.md`](skills/README.md).
 
 ## Estado
 
