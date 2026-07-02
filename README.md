@@ -116,6 +116,18 @@ secretos: `.env`, `settings.json`, `curl-env.json`, `repo-config.json`.
 | `COWORK_CLAUDE_CMD` | `claude --permission-mode bypassPermissions` | comando del worker |
 | `COWORK_CLICKUP_TOKEN` / `COWORK_JIRA_*` / `COWORK_GITLAB_*` | — | credenciales de conectores |
 
+## Skills
+
+El flujo de Ronin se orquesta con la skill de Claude Code **`tmux-worker-loop`**, vendorizada en
+[`skills/`](skills/). Instálala para que el botón **▷ Lanzar** funcione en modo live:
+
+```bash
+cp -R skills/tmux-worker-loop ~/.claude/skills/
+```
+
+Detalles y las skills externas de [superpowers](docs/superpowers/) (`brainstorming`, `writing-plans`)
+en [`skills/README.md`](skills/README.md).
+
 ## Estado
 
 Uso interno de LKMX. Requiere una suscripción de Claude Code activa (los workers corren `claude`).
