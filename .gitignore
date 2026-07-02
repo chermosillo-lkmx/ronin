@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.log
+.env
+.DS_Store
+.claude/
+server/data/history.jsonl
+server/data/today.json
+server/data/order.json
+server/data/curl-env.json
+server/data/settings.json
+server/data/repo-config.json
+# datos reales / config local — NO publicar
+server/data/clickup-seed.json
+server/data/jira-seed.json
+server/data/repos.json

@@ -1,0 +1,30 @@
+{
+  "_comment": "Etapas del workflow para tickets. Editable desde el dashboard (⚙ Workflow) o a mano. key=sentinel (touch), label/icon=stepper, instruction=qué pedirle (placeholders {cycle} {ev} {repo}). verifyAfter: etapa tras la cual abrir el verificador (null=ninguno).",
+  "stages": [
+    {
+      "key": "planning",
+      "label": "Plan",
+      "icon": "📋",
+      "instruction": "Escribe un plan breve de la implementación y los artefactos a entregar."
+    },
+    {
+      "key": "implementing",
+      "label": "Impl",
+      "icon": "⌨️",
+      "instruction": "Implementa la solución utilizando /tmux-worker-loop"
+    },
+    {
+      "key": "curl",
+      "label": "Curl",
+      "icon": "🌐",
+      "instruction": "Pruebas CURL contra DEV: ejecuta `source {cycle}/curl.env` (te da $DEV_URL, $TOKEN, $ACCOUNTING_FIRM; no los pidas). Corre los curl relevantes y guarda comando + request body + response body en {ev}/curl.md. Luego ingesta al backup-tester: curl -X POST $BACKUP_TESTER_URL/api/test-coverage/ingest -H \"Authorization: Bearer $BACKUP_TESTER_INGEST_TOKEN\" -F project={repo} -F suite=curl -F junit=@<tu-junit.xml>."
+    },
+    {
+      "key": "done",
+      "label": "Evidence",
+      "icon": "✓",
+      "instruction": "Escribe {ev}/summary.md (comentario listo para el ticket)."
+    }
+  ],
+  "verifyAfter": "curl"
+}

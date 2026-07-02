@@ -1,0 +1,18 @@
+{
+  "name": "claude-cowork",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dashboard local de tareas que orquesta workers Claude vía tmux + integraciones (ClickUp/Jira/GitLab)",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n SERVER,WEB -c cyan,magenta \"npm run dev -w server\" \"npm run dev -w web\"",
+    "dev:live": "concurrently -n SERVER,WEB -c cyan,magenta \"npm run dev:live -w server\" \"npm run dev -w web\"",
+    "start": "npm run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

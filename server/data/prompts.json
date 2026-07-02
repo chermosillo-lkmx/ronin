@@ -1,0 +1,3 @@
+{
+  "_comment": "Overrides de las plantillas de prompt de los workers. Una key ausente o vacía usa el default (el texto original de templates.ts). Editable desde ⚙ Configuración → Prompts o a mano. Placeholders {name} se sustituyen al lanzar; {var:KEY} sólo se resuelve dentro de los pasos."
+}

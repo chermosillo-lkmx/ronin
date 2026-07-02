@@ -1,0 +1,4 @@
+{
+  "_comment": "Acciones/flujos definidos por el usuario. Cada acción = un botón en las tareas con su prompt, etapas propias (o inheritWorkflow → workflow global/por-repo) y flags. Editable desde ⚡ Configuración → Acciones o a mano.",
+  "actions": []
+}
