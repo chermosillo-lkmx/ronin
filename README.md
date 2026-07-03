@@ -21,6 +21,8 @@
   implementar, investigar o revisar cada ticket, orquestados por el skill `/tmux-worker-loop`.
 - Sigue el ciclo del worker en vivo (stepper de etapas + terminal embebida) y recoge **evidencia**
   (resumen, curl, screenshots) lista para pegar en el ticket.
+- Genera **reportes de resumen** diario/semanal de lo trabajado (síntesis + detalle por tarea),
+  construidos con `claude -p` a partir de los commits reales, el disparador y la evidencia del worker.
 - Es totalmente **configurable desde la App**: conectores, repos, workflows por repo y las plantillas
   de prompt que reciben los workers.
 
@@ -67,6 +69,15 @@ Todo corre en tu máquina; no hay servidor remoto. Los secretos viven en archivo
   lanzar flujo, investigar, PR, verificador), con placeholders y restaurar-default.
 - **Tema claro/oscuro** (default claro, estilo LKMX) con toggle persistido.
 
+### Reportes (📊)
+- Vista **📊 Reportes** que genera resúmenes **diario** / **semanal** de las tareas trabajadas en el
+  periodo, on-demand o vía **scheduler opt-in** (`COWORK_REPORT_SCHEDULE=1`).
+- Por tarea: una línea de **síntesis** ("lo que se hizo") + **detalle expandible**, redactados con
+  `claude -p` a partir de los **commits reales** del repo, el **mensaje disparador** (`task.body`) y la
+  **evidencia** del worker (summary/verdict/research/curl) que se persiste al completar cada ciclo.
+- Visor de markdown con **toggle compacto/completo** y copiar; los reportes se guardan en
+  `server/data/reports` (gitignored). Nombres tipo `daily-YYYY-MM-DD` / `weekly-YYYY-Www`.
+
 ### DMs (opcional)
 - **Webhook** `POST /api/webhook/dm {text}` — clasifica el mensaje con `claude -p` y auto-lanza un
   worker si es una tarea. Source-agnostic (Slack / ClickUp / un forwarder).
@@ -86,7 +97,8 @@ tmux), `tmux.ts` / `ttyd.ts` (control de sesiones), `tasks-source.ts` + `clickup
 `gitlab.ts` (fuentes), `settings.ts` (conectores runtime), `repos.ts` / `repo-config.ts` (repos +
 workflows por repo), `workflow.ts` (workflow componible), `prompts.ts` (plantillas editables),
 `templates.ts` (construcción de prompts), `curl-config.ts` (creds de curl por proyecto),
-`clickup-chat.ts` / `classify.ts` (DMs), `stages.ts` / `history.ts` / `today.ts` / `order.ts` (estado).
+`clickup-chat.ts` / `classify.ts` (DMs), `reports.ts` + `report-git.ts` / `report-worker.ts` /
+`report-schedule.ts` (reportes de resumen), `stages.ts` / `history.ts` / `today.ts` / `order.ts` (estado).
 
 **Web (`web/src/`):** `App.tsx` (tablero + secciones de Configuración + modales), `api.ts`, `types.ts`,
 `styles.css` (tokenizado por tema).
@@ -115,6 +127,8 @@ secretos: `.env`, `settings.json`, `curl-env.json`, `repo-config.json`.
 | `COWORK_LIEBRE_ROOT` | `.../code/lkmx/liebre` | raíz de los repos |
 | `COWORK_CLAUDE_CMD` | `claude --permission-mode bypassPermissions` | comando del worker |
 | `COWORK_CLICKUP_TOKEN` / `COWORK_JIRA_*` / `COWORK_GITLAB_*` | — | credenciales de conectores |
+| `COWORK_REPORT_SCHEDULE` | `0` | `1` activa el scheduler de reportes diario/semanal |
+| `COWORK_REPORT_DAILY_AT` / `COWORK_REPORT_WEEKLY_DAY` | `19:00` / `5` | hora del diario y día del semanal (0=Dom…6=Sáb) |
 
 ## Skills
 
