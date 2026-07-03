@@ -1,4 +1,4 @@
-import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PromptTemplate, RepoOverrideConfig, ReposConfig, Snapshot, WorkflowConfig } from "./types";
+import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, Snapshot, WorkflowConfig } from "./types";
 
 /** Subscribe to live snapshots via SSE. Returns an unsubscribe fn. */
 export function subscribeStream(
@@ -262,4 +262,27 @@ export async function saveConnectorSettings(input: ConnectorSettingsInput): Prom
 export async function testConnector(name: "clickup" | "jira" | "gitlab"): Promise<{ ok: boolean; detail?: string; error?: string }> {
   const r = await fetch(`/api/connectors/${name}/test`, { method: "POST" });
   return r.ok ? r.json() : { ok: false, error: "no se pudo probar la conexión" };
+}
+
+export async function generateReport(kind: "daily" | "weekly", date?: string): Promise<{ name: string; markdown: string }> {
+  const r = await fetch("/api/reports/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(date ? { kind, date } : { kind }),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.error || "no se pudo generar el reporte");
+  }
+  return r.json();
+}
+
+export async function listReports(): Promise<ReportMeta[]> {
+  const r = await fetch("/api/reports");
+  return r.ok ? r.json() : [];
+}
+
+export async function getReport(name: string): Promise<{ name: string; markdown: string } | null> {
+  const r = await fetch(`/api/reports/${encodeURIComponent(name)}`);
+  return r.ok ? r.json() : null;
 }

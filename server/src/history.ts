@@ -14,6 +14,13 @@ export interface HistoryEvent {
   title: string;
   source: string;
   repo: string;
+  body?: string;      // opcional: mensaje disparador completo (task.body), clave para ad-hoc/custom
+  evidence?: string;  // opcional: snapshot compacto de la evidencia del worker al completar/parar
+}
+
+/** Recorta a n chars agregando "…[truncado]" para no inflar el JSONL/prompt. */
+export function truncate(s: string, n = 4000): string {
+  return s.length > n ? s.slice(0, n) + "\n…[truncado]" : s;
 }
 
 /** Append an event to the JSONL log (survives restarts). */

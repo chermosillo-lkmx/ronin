@@ -69,3 +69,8 @@ export const GITLAB_PROJECT = process.env.COWORK_GITLAB_PROJECT ?? "";
 // ---- ClickUp DM poller (opt-in; auto-lanza tareas detectadas en DMs) ----
 export const DM_POLL = process.env.COWORK_DM_POLL === "1";
 export const DM_POLL_MS = Number(process.env.COWORK_DM_POLL_MS ?? 120000);
+
+// ---- Reportes de resumen (scheduler opt-in) ----
+export const REPORT_SCHEDULE = process.env.COWORK_REPORT_SCHEDULE === "1";
+export const REPORT_DAILY_AT = process.env.COWORK_REPORT_DAILY_AT ?? "19:00";
+export const REPORT_WEEKLY_DAY = Number(process.env.COWORK_REPORT_WEEKLY_DAY ?? 5); // 0=Dom..6=Sáb, default vie

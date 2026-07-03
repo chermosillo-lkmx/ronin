@@ -473,6 +473,8 @@ h2.mt { margin-top: 26px; }
 .settings { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
 .settings-menu { display: flex; flex-direction: column; gap: 4px; min-width: 200px; }
 .settings-menu-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 8px 6px 4px; }
+.reports-gen { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 6px 10px; }
+.reports-gen input[type="date"] { flex: 1 1 100%; }
 .settings-back { text-align: left; background: none; border: none; color: var(--muted); cursor: pointer; padding: 6px; }
 .settings-back:hover { color: var(--ink); }
 .settings-item { text-align: left; background: none; border: 1px solid transparent; border-radius: 8px; color: var(--ink); cursor: pointer; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
@@ -483,6 +485,9 @@ h2.mt { margin-top: 26px; }
 .settings-content { flex: 1; min-width: 0; }
 .settings-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px rgba(11, 14, 41, 0.06); }
 .settings-panel-head { margin-bottom: 12px; }
+/* solo Reportes: alinea toggle + copiar a la derecha (los demás paneles apilan drawer-sub debajo) */
+.reports-head { display: flex; align-items: center; gap: 8px; }
+.reports-head .drawer-title { flex: 1; }
 .drawer-sub code { color: var(--lkmx); }
 
 /* --- Editor de repos --- */

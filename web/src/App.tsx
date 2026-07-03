@@ -23,6 +23,9 @@ import {
   launchPrReview,
   launchResearch,
   launchTask,
+  generateReport,
+  listReports,
+  getReport,
   pinTask,
   refreshTasks,
   saveConnectorSettings,
@@ -36,7 +39,7 @@ import {
   workerInput,
   type Evidence,
 } from "./api";
-import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, Priority, PromptTemplate, RepoOverrideConfig, ReposConfig, Snapshot, Task, TaskSource, TaskStatus, WfStage, WfStep, WorkflowConfig, Worker, WorkerState } from "./types";
+import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, Priority, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, Snapshot, Task, TaskSource, TaskStatus, WfStage, WfStep, WorkflowConfig, Worker, WorkerState } from "./types";
 
 const PRIO_NUM: Record<Priority, number> = { urgent: 1, high: 2, normal: 3, low: 4, none: 0 };
 
@@ -1686,6 +1689,97 @@ function SettingsView({ onBack, onActionsChanged }: { onBack: () => void; onActi
   );
 }
 
+/** Vista 📊 Reportes: generar diario/semanal, lista de anteriores y visor del markdown con copiar. */
+function ReportsView({ onBack }: { onBack: () => void }) {
+  const [list, setList] = useState<ReportMeta[]>([]);
+  const [sel, setSel] = useState<{ name: string; markdown: string } | null>(null);
+  const [date, setDate] = useState(todayISO());
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [full, setFull] = useState(false); // false = compacto (sin <details>), true = completo
+
+  const refresh = () => listReports().then(setList).catch((e) => setErr((e as Error).message));
+  useEffect(() => { refresh(); }, []);
+
+  async function generar(kind: "daily" | "weekly") {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await generateReport(kind, date || undefined);
+      setSel(r);
+      await refresh();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copiar() {
+    if (!sel) return;
+    try {
+      await navigator.clipboard.writeText(sel.markdown); // undefined en http-LAN sin contexto seguro
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setErr("no se pudo copiar (portapapeles no disponible)");
+    }
+  }
+
+  // compacto (default): quita los <details>…</details> por regex string (sin renderizar HTML → sin XSS)
+  const shown = sel
+    ? (full ? sel.markdown
+            : sel.markdown.replace(/<details[\s\S]*?<\/details>\s*/gi, "").replace(/\n{3,}/g, "\n\n").trim())
+    : "";
+
+  return (
+    <div className="settings">
+      <nav className="settings-menu">
+        <button className="settings-back" onClick={onBack}>← Tablero</button>
+        <div className="settings-menu-title">Reportes</div>
+        <div className="reports-gen">
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+          <button className="btn launch" onClick={() => generar("daily")} disabled={busy}>📅 Generar diario</button>
+          <button className="btn launch" onClick={() => generar("weekly")} disabled={busy}>🗓️ Generar semanal</button>
+        </div>
+        {busy && <div className="empty">generando… (claude -p)</div>}
+        {err && <div className="wf-err">{err}</div>}
+        <div className="settings-menu-title">Anteriores <span className="muted">({list.length})</span></div>
+        {list.length === 0 && <div className="empty">sin reportes aún</div>}
+        {list.map((r) => (
+          <button
+            key={r.name}
+            className={`settings-item ${sel?.name === r.name ? "on" : ""}`}
+            onClick={() => {
+              setErr(null);
+              getReport(r.name)
+                .then((x) => (x ? setSel(x) : setErr("no se pudo abrir el reporte")))
+                .catch((e) => setErr((e as Error).message));
+            }}
+          >
+            {r.kind === "daily" ? "📅" : "🗓️"} {r.date}
+          </button>
+        ))}
+      </nav>
+      <div className="settings-content">
+        <div className="settings-panel">
+          <header className="settings-panel-head reports-head">
+            <div className="drawer-title">📊 {sel ? sel.name : "Reportes de resumen"}</div>
+            {sel && <button className="btn view" onClick={() => setFull((f) => !f)}>{full ? "▾ completo" : "▸ compacto"}</button>}
+            {sel && <button className="btn copy" onClick={copiar}>{copied ? "✓ copiado" : "⧉ copiar"}</button>}
+          </header>
+          {sel ? (
+            <pre className="ev-md">{shown}</pre>
+          ) : (
+            <div className="empty">genera o selecciona un reporte para verlo aquí</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [connected, setConnected] = useState(false);
@@ -1698,7 +1792,7 @@ export function App() {
   const [adhocBusy, setAdhocBusy] = useState(false);
   const [prOpen, setPrOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
-  const [view, setView] = useState<"board" | "settings">("board");
+  const [view, setView] = useState<"board" | "settings" | "reports">("board");
   const [launchFor, setLaunchFor] = useState<Task | null>(null);
   const [previewTask, setPreviewTask] = useState<Task | null>(null);
   const [actions, setActions] = useState<CustomAction[]>([]);
@@ -1872,6 +1966,9 @@ export function App() {
         >
           {theme === "light" ? "🌙" : "☀️"}
         </button>
+        <button className="refresh" onClick={() => setView("reports")} title="reportes de resumen (diario/semanal)">
+          📊
+        </button>
         <button className="refresh wf-btn" onClick={() => setView("settings")} title="configuración (repos, workflows)">
           ⚙
         </button>
@@ -1880,6 +1977,8 @@ export function App() {
 
       {view === "settings" ? (
         <SettingsView onBack={() => setView("board")} onActionsChanged={refreshActions} />
+      ) : view === "reports" ? (
+        <ReportsView onBack={() => setView("board")} />
       ) : (
         <>
       <main className="body">

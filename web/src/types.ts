@@ -99,6 +99,14 @@ export interface HistoryEvent {
   repo: string;
 }
 
+export interface ReportMeta {
+  name: string;                    // daily-2026-07-02 | weekly-2026-W27
+  kind: "daily" | "weekly";
+  date: string;                    // periodo (fecha o AAAA-Www)
+  ts: number;                      // mtime ms
+  size: number;
+}
+
 export interface ReposConfig {
   defaultPath: string;
   repos: { key: string; path: string }[];

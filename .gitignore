@@ -14,3 +14,4 @@ server/data/repo-config.json
 server/data/clickup-seed.json
 server/data/jira-seed.json
 server/data/repos.json
+server/data/reports/

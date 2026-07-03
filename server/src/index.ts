@@ -2,10 +2,12 @@ import cors from "cors";
 import express from "express";
 import { join } from "node:path";
 import { startDmPoller } from "./clickup-chat.js";
-import { CLICKUP_REFRESH_MS, DM_POLL, DM_POLL_MS, PORT } from "./config.js";
+import { CLICKUP_REFRESH_MS, DM_POLL, DM_POLL_MS, PORT, REPORT_SCHEDULE } from "./config.js";
 import { attachWorker, launchAction, launchAdhoc, launchCustom, launchPrReview, launchResearch, launchTask, start, stopWorker, workerInput, workerPane } from "./engine.js";
 import { getActions, saveActions } from "./actions.js";
 import { readHistory } from "./history.js";
+import { generateReport, listReports, readReport, BadRequest } from "./reports.js";
+import { startReportSchedule } from "./report-schedule.js";
 import { setOrder } from "./order.js";
 import { evidenceDir, readEvidence } from "./stages.js";
 import { startTtyd } from "./ttyd.js";
@@ -277,6 +279,35 @@ app.get("/api/history", (req, res) => {
   res.json(readHistory(from, to));
 });
 
+// Reportes de resumen (diario/semanal). Markdown en server/data/reports (gitignored).
+app.post("/api/reports/generate", async (req, res) => {
+  const kind = req.body?.kind;
+  if (kind !== "daily" && kind !== "weekly") return res.status(400).json({ error: "kind inválido" });
+  try {
+    const { name, markdown } = await generateReport(kind, req.body?.date);
+    res.json({ name, markdown });
+  } catch (e) {
+    // Solo los errores de validación (BadRequest: fecha/name) son 400 con su texto real;
+    // claude/git → 500 con mensaje genérico (no filtra stderr interno al cliente).
+    if (e instanceof BadRequest) return res.status(400).json({ error: e.message });
+    console.warn(`[claude-cowork] generar reporte falló: ${(e as Error).message}`);
+    res.status(500).json({ error: "no se pudo generar el reporte" });
+  }
+});
+app.get("/api/reports", (_req, res) => {
+  res.json(listReports());
+});
+app.get("/api/reports/:name", (req, res) => {
+  try {
+    const r = readReport(req.params.name);           // lanza BadRequest si name inválido → 400
+    if (!r) return res.status(404).json({ error: "reporte no encontrado" });
+    res.json(r);
+  } catch (e) {
+    const code = e instanceof BadRequest ? 400 : 500;
+    res.status(code).json({ error: (e as Error).message });
+  }
+});
+
 // Pin / unpin a task into "today's plan"
 app.post("/api/today/pin/:id", (req, res) => {
   const pins = togglePin(req.params.id, true);
@@ -327,6 +358,7 @@ app.listen(PORT, async () => {
   const mode = await start(source);
   startAutoRefresh(CLICKUP_REFRESH_MS);
   if (DM_POLL) startDmPoller(DM_POLL_MS);
+  if (REPORT_SCHEDULE) startReportSchedule();
   console.log(
     `[claude-cowork] server en http://localhost:${PORT}  ` +
       `(modo: ${mode}, tareas: ${source}, auto-refresh: ${Math.round(CLICKUP_REFRESH_MS / 1000)}s)`

@@ -1,8 +1,8 @@
 import { AUTOSUBMIT, MODE } from "./config.js";
 import { fetchClickUpDescription } from "./clickup.js";
-import { recordEvent } from "./history.js";
+import { recordEvent, truncate } from "./history.js";
 import { resolveCwd } from "./repos.js";
-import { cycleDirForSession, detectStage, ensureCycleDir, removeCycleDir } from "./stages.js";
+import { cycleDirForSession, detectStage, ensureCycleDir, readEvidence, removeCycleDir } from "./stages.js";
 import { writeCurlEnv } from "./curl-config.js";
 import { getRepoStartCommand, getRepoVars } from "./repo-config.js";
 import { getAction, getActions } from "./actions.js";
@@ -24,8 +24,24 @@ import {
 } from "./tmux.js";
 import type { CustomAction, Task, TaskStatus, Worker, WorkerState } from "./types.js";
 
-function logEvent(type: "launch" | "complete" | "stop", task: Task): void {
-  recordEvent({ type, key: task.key, title: task.title, source: task.source, repo: task.repo });
+function logEvent(type: "launch" | "complete" | "stop", task: Task, evidence?: string): void {
+  recordEvent({
+    type, key: task.key, title: task.title, source: task.source, repo: task.repo,
+    body: task.body ? truncate(task.body) : undefined,
+    evidence: evidence || undefined,
+  });
+}
+
+/** Snapshot compacto de la evidencia del worker (summary→verdict→research→curl). Nunca lanza. */
+function captureEvidence(worker: Worker): string | undefined {
+  if (!worker.cycle) return undefined;
+  try {
+    const ev = readEvidence(worker.cycle);
+    const text = ev.summary ?? ev.verdict ?? ev.research ?? ev.curl;
+    return text ? truncate(text) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 let activeMode: "simulated" | "live" = MODE;
@@ -115,7 +131,7 @@ function completeWorker(worker: Worker): void {
   if (task) {
     task.status = "done";
     task.workerId = undefined;
-    logEvent("complete", task);
+    logEvent("complete", task, captureEvidence(worker));
   }
   stageIndex.delete(worker.id);
   removeWorker(worker.id);
@@ -492,6 +508,7 @@ async function stopLive(workerId: string): Promise<boolean> {
     stopTtyd(worker.session);
     await killSession(worker.session);
   }
+  const evidence = captureEvidence(worker);   // ANTES de borrar el cycle dir
   if (worker.cycle) removeCycleDir(worker.cycle);
   const task = findTask(worker.taskId);
   if (ownsBoard(worker) && task) {
@@ -499,7 +516,7 @@ async function stopLive(workerId: string): Promise<boolean> {
       task.status = "queued";
       task.workerId = undefined;
     }
-    logEvent("stop", task);
+    logEvent("stop", task, evidence);
   }
   workerFlow.delete(workerId);
   removeWorker(workerId);
@@ -593,7 +610,7 @@ async function pollLive(): Promise<void> {
             const task = findTask(worker.taskId);
             if (task) {
               task.status = stage.task;
-              if (reachedDone) logEvent("complete", task);
+              if (reachedDone) logEvent("complete", task, captureEvidence(worker));
             }
           }
           changed = true;
@@ -721,7 +738,7 @@ export async function stopWorker(workerId: string): Promise<boolean> {
       task.status = "queued";
       task.workerId = undefined;
     }
-    logEvent("stop", task);
+    logEvent("stop", task, captureEvidence(worker));
   }
   stageIndex.delete(workerId);
   removeWorker(workerId);
