@@ -376,6 +376,18 @@ h2.mt { margin-top: 26px; }
   color: var(--ink-strong); border-color: var(--lkmx); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 700;
   box-shadow: 0 0 0 1px var(--lkmx); animation: needspulse 1.6s ease-in-out infinite;
 }
+.pstep.is-failed {
+  color: var(--danger, #e53e3e); border-color: rgba(229, 62, 62, 0.5);
+  background: rgba(229, 62, 62, 0.08); font-weight: 700;
+}
+.pill.ctx-pressure {
+  color: #b7791f; border-color: rgba(214, 158, 46, 0.5); background: rgba(214, 158, 46, 0.12);
+}
+.ctx-note {
+  margin-top: 8px; padding: 6px 9px; border-radius: 6px; font-size: 0.82rem;
+  color: #b7791f; border: 1px solid rgba(214, 158, 46, 0.4); background: rgba(214, 158, 46, 0.09);
+}
+.ctx-note code { font-size: 0.8em; }
 .parrow { color: var(--muted); }
 .parrow.is-done { color: var(--ok); }
 

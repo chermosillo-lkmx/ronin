@@ -37,10 +37,13 @@ export interface Worker {
   startedAt: number;
   session?: string;       // tmux session name (live mode)
   cwd?: string;           // working directory of the pane (live mode)
+  worktree?: string;      // P1: ephemeral git worktree path (live task workers); absent → shares repo root
   cycle?: string;         // cycle dir (sentinels + evidence), keyed by session
   stageKey?: string;      // current pipeline stage key (planning/implementing/curl/verify/done)
   needsInput?: boolean;   // idle while the task isn't done → waiting for the user
   stages?: WfStep[];      // this worker's resolved stepper steps (per-launch subset)
+  verifyFailure?: { stageKey: string; output: string }; // P2: a stage's verifyCmd gate exhausted its retries
+  contextPressure?: { tokens?: number; note: string };  // P4: pane under context pressure (auto-compact / /clear)
 }
 
 /**

@@ -15,6 +15,10 @@ export interface WfStage {
   label: string;        // short label for the stepper
   icon: string;         // stepper icon
   instruction?: string; // what to ask the worker to do at this stage
+  role?: "impl";        // F0: marks the implementation stage → drives the plan→impl /model switch
+  verifyCmd?: string;   // P2: shell cmd (exit 0 = pass) gating advancement past this stage. ONLY honored
+                        // from the gitignored per-repo override (stripped everywhere git-tracked — RCE guard).
+  maxRetries?: number;  // P2: max verify attempts before the stage is marked failed (default 2).
 }
 
 export interface WorkflowConfig {
@@ -25,11 +29,20 @@ export interface WorkflowConfig {
 const here = dirname(fileURLToPath(import.meta.url));
 const WORKFLOW_PATH = join(here, "..", "data", "workflow.json");
 
+/**
+ * Drop the executable verifyCmd/maxRetries from a stage — single source for the "git-tracked path
+ * strips verifyCmd" rule (B3). Used by the global workflow load; actions strip via validateStages.
+ */
+export function stripVerifyFields<T extends object>(stage: T): Omit<T, "verifyCmd" | "maxRetries"> {
+  const { verifyCmd, maxRetries, ...rest } = stage as any;
+  return rest;
+}
+
 const DEFAULT: WorkflowConfig = {
   verifyAfter: "curl",
   stages: [
     { key: "planning", label: "Plan", icon: "📋", instruction: "Escribe un plan breve de la implementación y los artefactos a entregar." },
-    { key: "implementing", label: "Impl", icon: "⌨️", instruction: "Implementa la solución." },
+    { key: "implementing", label: "Impl", icon: "⌨️", role: "impl", instruction: "Implementa la solución." },
     { key: "curl", label: "Curl", icon: "🌐", instruction: "Pruebas CURL contra DEV: ejecuta `source {cycle}/curl.env` (te da $DEV_URL, $TOKEN, $ACCOUNTING_FIRM; no los pidas). Corre los curl relevantes y guarda comando + request body + response body en {ev}/curl.md." },
     { key: "done", label: "Done", icon: "✓", instruction: "Escribe {ev}/summary.md (comentario listo para el ticket)." },
   ],
@@ -46,7 +59,11 @@ function load(): WorkflowConfig {
   try {
     const raw = JSON.parse(readFileSync(WORKFLOW_PATH, "utf8"));
     const stages: WfStage[] = Array.isArray(raw.stages)
-      ? raw.stages.filter((s: any) => s && typeof s.key === "string" && s.key[0] !== "_")
+      ? raw.stages
+          .filter((s: any) => s && typeof s.key === "string" && s.key[0] !== "_")
+          // Strip verifyCmd/maxRetries: the global workflow.json is git-tracked, so a committed
+          // verifyCmd must NOT execute (B3). Only the gitignored per-repo override honors it.
+          .map((s: any) => stripVerifyFields(s))
       : [];
     cache = {
       stages: stages.length ? stages : DEFAULT.stages,
@@ -88,15 +105,27 @@ export const RESERVED_KEYS = ["verify", "evidence"];
  * saveWorkflow (global) and the per-repo override store (repo-config.ts) so the
  * validation rules live in exactly one place.
  */
-export function validateStages(input: Partial<WorkflowConfig>): WorkflowConfig {
+export function validateStages(input: Partial<WorkflowConfig>, allowVerifyCmd = false): WorkflowConfig {
   const seen = new Set<string>();
   const stages: WfStage[] = (Array.isArray(input.stages) ? input.stages : [])
-    .map((s) => ({
-      key: slug(s?.key ?? ""),
-      label: String(s?.label ?? "").trim() || (s?.key ?? "stage"),
-      icon: String(s?.icon ?? "").trim() || "•",
-      instruction: typeof s?.instruction === "string" ? s.instruction : "",
-    }))
+    .map((s) => {
+      // P2/B3: verifyCmd executes arbitrary shell → only honored from the gitignored per-repo
+      // override (allowVerifyCmd=true). Stripped everywhere git-tracked (global workflow.json,
+      // actions.json) so a committed verifyCmd can never RCE on `git pull` + live launch.
+      const verifyCmd = allowVerifyCmd && typeof s?.verifyCmd === "string" && s.verifyCmd.trim() ? s.verifyCmd.trim() : undefined;
+      const maxRetries = verifyCmd
+        ? Number.isFinite(s?.maxRetries) ? Math.min(Math.max(0, Math.floor(s!.maxRetries as number)), 10) : 2
+        : undefined;
+      return {
+        key: slug(s?.key ?? ""),
+        label: String(s?.label ?? "").trim() || (s?.key ?? "stage"),
+        icon: String(s?.icon ?? "").trim() || "•",
+        instruction: typeof s?.instruction === "string" ? s.instruction : "",
+        ...(s?.role === "impl" ? { role: "impl" as const } : {}),
+        ...(verifyCmd ? { verifyCmd } : {}),
+        ...(maxRetries !== undefined ? { maxRetries } : {}),
+      };
+    })
     .filter((s) => s.key && !seen.has(s.key) && (seen.add(s.key), true));
   if (!stages.length) throw new Error("el workflow necesita al menos una etapa");
   const bad = stages.find((s) => RESERVED_KEYS.includes(s.key));
@@ -114,7 +143,7 @@ export function saveWorkflow(input: Partial<WorkflowConfig>): WorkflowConfig {
     JSON.stringify(
       {
         _comment:
-          "Etapas del workflow para tickets. Editable desde el dashboard (⚙ Workflow) o a mano. key=sentinel (touch), label/icon=stepper, instruction=qué pedirle (placeholders {cycle} {ev} {repo}). verifyAfter: etapa tras la cual abrir el verificador (null=ninguno).",
+          "Etapas del workflow para tickets. Editable desde el dashboard (⚙ Workflow) o a mano. key=sentinel (touch), label/icon=stepper, instruction=qué pedirle (placeholders {cycle} {ev} {repo}). verifyAfter: etapa tras la cual abrir el verificador (null=ninguno). NOTA: verifyCmd/maxRetries (gate pass/fail por-stage) se IGNORAN aquí — este archivo es git-tracked y verifyCmd ejecuta shell; sólo el override por-repo (gitignored) los honra.",
         ...cfg,
       },
       null,
@@ -123,6 +152,96 @@ export function saveWorkflow(input: Partial<WorkflowConfig>): WorkflowConfig {
   );
   cache = cfg;
   return cfg;
+}
+
+/**
+ * Index of the implementation stage in a flow (F0): the stage flagged `role:"impl"`,
+ * or (back-compat for overrides authored before `role`) the stage keyed "implementing".
+ * -1 when the flow has no implementation stage (e.g. research/PR read-only flows).
+ */
+export function implStageIndex(stages: WfStage[]): number {
+  const byRole = stages.findIndex((s) => s.role === "impl");
+  return byRole >= 0 ? byRole : stages.findIndex((s) => s.key === "implementing");
+}
+
+/**
+ * F0: pure decision for the plan→impl `/model` switch. True when this launch enabled the
+ * switch (implementer launch — PR/research set switchEnabled=false), it hasn't fired yet,
+ * the flow HAS an impl stage, and the worker is at that stage OR later (F2: tolerates a
+ * skipped `implementing` poll when the worker touches impl+curl in one 2s interval).
+ */
+export function shouldSwitchModel(
+  switchEnabled: boolean,
+  alreadySwitched: boolean,
+  stages: WfStage[],
+  stageKey: string
+): boolean {
+  if (!switchEnabled || alreadySwitched) return false;
+  const implIdx = implStageIndex(stages);
+  if (implIdx < 0) return false;
+  const curIdx = stages.findIndex((s) => s.key === stageKey);
+  // The synthetic "verify" step isn't in stages[] but is always inserted AFTER a real stage
+  // (verifyAfter), so reaching it means impl is already past — treat it as "at or after impl".
+  if (curIdx < 0) return stageKey === "verify";
+  return curIdx >= implIdx;
+}
+
+/**
+ * P2 (B2 — no false-green): the stage key to CAP the displayed progress at, given the furthest
+ * REAL stage the worker reached. If any verifyCmd stage at/before it hasn't passed, the worker
+ * can't be shown beyond that gate (so it never reaches `done` on a false green). null = no cap.
+ * The cap is always ≤ the furthest reached stage, so it only ever holds progress back.
+ */
+export function verifyGateCap(
+  stages: WfStage[],
+  furthestRealKey: string | null,
+  isPassed: (key: string) => boolean
+): string | null {
+  if (!furthestRealKey) return null;
+  const fIdx = stages.findIndex((s) => s.key === furthestRealKey);
+  if (fIdx < 0) return null;
+  for (let p = 0; p <= fIdx; p++) {
+    if (stages[p].verifyCmd && !isPassed(stages[p].key)) return stages[p].key;
+  }
+  return null;
+}
+
+/**
+ * P2 (B2, incl. TERMINAL gates): true when a stage's unpassed verifyCmd must PREVENT it from
+ * being treated as done. Guarding only on "failed" was a false-green — a gate on the last stage
+ * maps to `done` while the check is still `pending`/in-flight, firing complete irreversibly.
+ */
+export function gateHoldsDone(hasVerifyCmd: boolean, status: "pending" | "passed" | "failed" | null): boolean {
+  return hasVerifyCmd && status !== "passed";
+}
+
+export interface EligibleVerify {
+  key: string;
+  verifyCmd: string;
+  maxRetries: number;
+}
+/**
+ * P2: verifyCmd stages the worker has LEFT (a later real stage was reached, or it's the terminal
+ * stage) whose gate isn't yet resolved (not passed/failed) — i.e. eligible to run now.
+ */
+export function eligibleVerifyStages(
+  stages: WfStage[],
+  furthestRealKey: string | null,
+  statusOf: (key: string) => "pending" | "passed" | "failed" | null
+): EligibleVerify[] {
+  if (!furthestRealKey) return [];
+  const fIdx = stages.findIndex((s) => s.key === furthestRealKey);
+  if (fIdx < 0) return [];
+  const out: EligibleVerify[] = [];
+  for (let p = 0; p <= fIdx; p++) {
+    const s = stages[p];
+    if (!s.verifyCmd) continue;
+    const st = statusOf(s.key);
+    if (st === "passed" || st === "failed") continue;
+    const left = p === stages.length - 1 ? true : fIdx > p; // moved past it, or it's terminal
+    if (left) out.push({ key: s.key, verifyCmd: s.verifyCmd, maxRetries: s.maxRetries ?? 2 });
+  }
+  return out;
 }
 
 /** Insert the synthetic "verify" step right after verifyAfter (when it matches). */

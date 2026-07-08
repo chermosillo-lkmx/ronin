@@ -373,6 +373,11 @@ function WorkerRow({ worker, task, actions = [], onOpen }: { worker: Worker; tas
         <span className="stage">{worker.repo} · {worker.stage}</span>
       </div>
       <div className="row-side">
+        {worker.contextPressure && (
+          <span className="pill ctx-pressure" title={`Presión de contexto: ${worker.contextPressure.note}. Considera /clear o compactar.`}>
+            🧠 contexto{worker.contextPressure.tokens ? ` ${worker.contextPressure.tokens}k` : ""}
+          </span>
+        )}
         {worker.needsInput && <span className="pill needs-pill">⚠ responder</span>}
         {worker.kind === "research" && <span className="pill research">🔍 investigación</span>}
         {worker.kind === "action" && (
@@ -416,17 +421,27 @@ const LOOP_STAGES: WfStep[] = [
   { key: "done", label: "Done", icon: "✓" },
 ];
 
-function Pipeline({ stageKey, stages }: { stageKey?: string; stages?: WfStep[] }) {
+function Pipeline({ stageKey, stages, failedKey }: { stageKey?: string; stages?: WfStep[]; failedKey?: string }) {
   const steps = stages && stages.length ? stages : LOOP_STAGES;
   const idx = steps.findIndex((s) => s.key === stageKey);
   return (
     <div className="pipe-steps">
       {steps.map((s, i) => {
-        const state = idx < 0 ? "pending" : i < idx ? "is-done" : i === idx ? "is-current" : "is-pending";
+        // P2: a stage whose verifyCmd gate exhausted its retries shows a failed (red) state.
+        const failed = failedKey && s.key === failedKey;
+        const state = failed
+          ? "is-failed"
+          : idx < 0
+          ? "pending"
+          : i < idx
+          ? "is-done"
+          : i === idx
+          ? "is-current"
+          : "is-pending";
         return (
           <div key={s.key} className="pstep-wrap">
-            <div className={`pstep ${state}`}>
-              <span className="pico">{s.icon}</span>
+            <div className={`pstep ${state}`} title={failed ? "verifyCmd falló — gate agotó reintentos" : undefined}>
+              <span className="pico">{failed ? "✖" : s.icon}</span>
               <span className="plabel">{s.label}</span>
             </div>
             {i < steps.length - 1 && <span className={`parrow ${i < idx ? "is-done" : ""}`}>→</span>}
@@ -511,7 +526,13 @@ function TaskDetailWindow({ worker, task, stages, onClose }: { worker: Worker; t
 
             <section className="drawer-sec">
               <h4>▸ LOOP</h4>
-              <Pipeline stageKey={worker.stageKey} stages={worker.stages ?? stages} />
+              <Pipeline stageKey={worker.stageKey} stages={worker.stages ?? stages} failedKey={worker.verifyFailure?.stageKey} />
+              {worker.contextPressure && (
+                <div className="ctx-note" title="Detectado en la terminal del worker">
+                  🧠 Presión de contexto: {worker.contextPressure.note}
+                  {worker.contextPressure.tokens ? ` (~${worker.contextPressure.tokens}k)` : ""} — considera <code>/clear</code> o compactar.
+                </div>
+              )}
             </section>
 
             <section className="drawer-sec">
@@ -595,6 +616,8 @@ function TaskDetailWindow({ worker, task, stages, onClose }: { worker: Worker; t
 function LaunchModal({ task, onClose }: { task: Task; onClose: () => void }) {
   const [wf, setWf] = useState<WorkflowConfig | null>(null);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
+  const [plannerModel, setPlannerModel] = useState("");
+  const [workerModel, setWorkerModel] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -619,7 +642,10 @@ function LaunchModal({ task, onClose }: { task: Task; onClose: () => void }) {
     if (!keys.length) return;
     setBusy(true);
     try {
-      await launchTask(task.id, keys);
+      const models: { plannerModel?: string; workerModel?: string } = {};
+      if (plannerModel.trim()) models.plannerModel = plannerModel.trim();
+      if (workerModel.trim()) models.workerModel = workerModel.trim();
+      await launchTask(task.id, keys, models);
       onClose();
     } finally {
       setBusy(false);
@@ -658,6 +684,22 @@ function LaunchModal({ task, onClose }: { task: Task; onClose: () => void }) {
                 <span className="wf-tinstr">{verifierOn ? `corre tras "${verifierLabel}"` : `apagado (enciende "${verifierLabel}")`}</span>
               </div>
             )}
+          </div>
+        )}
+
+        {wf && (
+          <div className="repos-editor">
+            <div className="drawer-sub">Modelos (override para esta corrida; vacío = default por repo)</div>
+            <div className="repos-default">
+              <span>Planner:</span>
+              <input className="repos-path" placeholder="opus (default)" value={plannerModel}
+                onChange={(e) => setPlannerModel(e.target.value)} />
+            </div>
+            <div className="repos-default">
+              <span>Worker:</span>
+              <input className="repos-path" placeholder="sonnet (default)" value={workerModel}
+                onChange={(e) => setWorkerModel(e.target.value)} />
+            </div>
           </div>
         )}
 
@@ -846,11 +888,13 @@ function StageEditor({
   verifyAfter,
   onStages,
   onVerifyAfter,
+  allowVerifyCmd = false,
 }: {
   stages: WfStage[];
   verifyAfter: string | null;
   onStages: (next: WfStage[]) => void;
   onVerifyAfter: (va: string | null) => void;
+  allowVerifyCmd?: boolean; // verifyCmd sólo tiene efecto en el override por-repo (gitignored)
 }) {
   function patch(i: number, p: Partial<WfStage>) {
     onStages(stages.map((s, idx) => (idx === i ? { ...s, ...p } : s)));
@@ -894,6 +938,26 @@ function StageEditor({
                 value={s.instruction ?? ""}
                 onChange={(e) => patch(i, { instruction: e.target.value })}
               />
+              <div className="wf-line">
+                <input
+                  className="wf-label"
+                  placeholder={allowVerifyCmd ? "verifyCmd (exit 0 = pass; ⚠️ ejecuta shell)" : "verifyCmd — sólo por-repo (ejecuta shell)"}
+                  value={s.verifyCmd ?? ""}
+                  disabled={!allowVerifyCmd}
+                  title={allowVerifyCmd ? "Comando shell que corre en el cwd del worker; exit 0 avanza, ≠0 reintenta" : "Sólo editable en el override por-repo (gitignored). En el workflow global se ignora."}
+                  onChange={(e) => patch(i, { verifyCmd: e.target.value })}
+                />
+                <input
+                  className="wf-key"
+                  type="number"
+                  min={0}
+                  max={10}
+                  placeholder="reintentos (2)"
+                  value={s.maxRetries ?? ""}
+                  disabled={!allowVerifyCmd || !s.verifyCmd}
+                  onChange={(e) => patch(i, { maxRetries: e.target.value === "" ? undefined : Number(e.target.value) })}
+                />
+              </div>
             </div>
           </div>
         ))}
@@ -968,6 +1032,8 @@ function RepoOverrideEditor({ repo }: { repo: string }) {
   const [inherit, setInherit] = useState(true);
   const [vars, setVars] = useState<{ key: string; value: string }[]>([]);
   const [startCommand, setStartCommand] = useState("");
+  const [plannerModel, setPlannerModel] = useState("");
+  const [workerModel, setWorkerModel] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -983,6 +1049,8 @@ function RepoOverrideEditor({ repo }: { repo: string }) {
       setInherit(c.usesDefaultWorkflow);
       setVars(Object.entries(c.vars).map(([key, value]) => ({ key, value })));
       setStartCommand(c.startCommand);
+      setPlannerModel(c.plannerModel);
+      setWorkerModel(c.workerModel);
     });
   }, [repo]);
 
@@ -1026,12 +1094,16 @@ function RepoOverrideEditor({ repo }: { repo: string }) {
         workflow: inherit ? null : cfg.workflow,
         vars: varsObj,
         startCommand: startCommand.trim(),
+        plannerModel: plannerModel.trim(),
+        workerModel: workerModel.trim(),
         inheritWorkflow: inherit,
       });
       setCfg(updated);
       setInherit(updated.usesDefaultWorkflow);
       setVars(Object.entries(updated.vars).map(([key, value]) => ({ key, value })));
       setStartCommand(updated.startCommand);
+      setPlannerModel(updated.plannerModel);
+      setWorkerModel(updated.workerModel);
       setSaved(true);
     } catch (e) {
       setErr((e as Error).message);
@@ -1056,6 +1128,7 @@ function RepoOverrideEditor({ repo }: { repo: string }) {
               verifyAfter={cfg.workflow.verifyAfter}
               onStages={(stages) => setWorkflow({ ...cfg.workflow!, stages })}
               onVerifyAfter={(verifyAfter) => setWorkflow({ ...cfg.workflow!, verifyAfter })}
+              allowVerifyCmd
             />
           )}
 
@@ -1078,6 +1151,25 @@ function RepoOverrideEditor({ repo }: { repo: string }) {
               placeholder="claude --permission-mode bypassPermissions (default)"
               value={startCommand}
               onChange={(e) => { setStartCommand(e.target.value); setSaved(false); }}
+            />
+          </div>
+
+          <div className="repos-default">
+            <span>Modelo Planner:</span>
+            <input
+              className="repos-path"
+              placeholder="opus (default) — arranca el pane"
+              value={plannerModel}
+              onChange={(e) => { setPlannerModel(e.target.value); setSaved(false); }}
+            />
+          </div>
+          <div className="repos-default">
+            <span>Modelo Worker:</span>
+            <input
+              className="repos-path"
+              placeholder="sonnet (default) — se activa en impl"
+              value={workerModel}
+              onChange={(e) => { setWorkerModel(e.target.value); setSaved(false); }}
             />
           </div>
         </>

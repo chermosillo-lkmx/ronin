@@ -31,9 +31,12 @@ export interface Worker {
   startedAt: number;
   session?: string;
   cwd?: string;
+  worktree?: string;     // P1: ephemeral git worktree path (informativo)
   stageKey?: string;
   needsInput?: boolean;
   stages?: WfStep[];
+  verifyFailure?: { stageKey: string; output: string }; // P2: gate verifyCmd agotó reintentos
+  contextPressure?: { tokens?: number; note: string };  // P4: pane bajo presión de contexto
 }
 
 export interface CustomAction {
@@ -75,6 +78,9 @@ export interface WfStep {
 
 export interface WfStage extends WfStep {
   instruction?: string;
+  role?: "impl";               // marca la etapa de implementación (dispara el switch de modelo)
+  verifyCmd?: string;          // P2: gate pass/fail (solo override por-repo; ejecuta shell)
+  maxRetries?: number;         // P2: reintentos antes de marcar la etapa como fallida
 }
 
 export interface WorkflowConfig {
@@ -116,6 +122,8 @@ export interface RepoOverrideConfig {
   workflow: WorkflowConfig | null;   // null = hereda el default global
   vars: Record<string, string>;
   startCommand: string;              // "" = usa CLAUDE_CMD
+  plannerModel: string;              // "" = hereda COWORK_PLANNER_MODEL
+  workerModel: string;               // "" = hereda COWORK_WORKER_MODEL
   usesDefaultWorkflow: boolean;
 }
 

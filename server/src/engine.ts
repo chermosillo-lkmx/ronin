@@ -1,13 +1,60 @@
+import { basename } from "node:path";
 import { AUTOSUBMIT, MODE } from "./config.js";
 import { fetchClickUpDescription } from "./clickup.js";
 import { recordEvent, truncate } from "./history.js";
-import { resolveCwd } from "./repos.js";
-import { cycleDirForSession, detectStage, ensureCycleDir, readEvidence, removeCycleDir } from "./stages.js";
+import { listRepos, resolveCwd } from "./repos.js";
+import {
+  cycleDirForSession,
+  detectStage,
+  ensureCycleDir,
+  markModelSwitched,
+  markModelSwitchFailed,
+  markVerifierSpawned,
+  modelSwitched,
+  modelSwitchFailed,
+  readEvidence,
+  readModelsInfo,
+  readVerifyState,
+  removeCycleDir,
+  verifierSpawned,
+  verifyPassed,
+  writeModelsInfo,
+  writeVerifyState,
+} from "./stages.js";
+import { runVerify, verifyOutcome, verifyRunDecision } from "./verify.js";
 import { writeCurlEnv } from "./curl-config.js";
-import { getRepoStartCommand, getRepoVars } from "./repo-config.js";
+import { getRepoPlannerModel, getRepoStartCommand, getRepoVars, getRepoWorkerModel } from "./repo-config.js";
+import {
+  currentModelFromPane,
+  isModelPickerOpen,
+  launchSwitchEnabled,
+  modelFamily,
+  modelSwitchConfirmed,
+  pickerOffersModel,
+  sanitizeModel,
+  withModel,
+} from "./models.js";
+import {
+  addWorktree,
+  branchForSession,
+  isGitRepo,
+  reconcileWorktrees,
+  removeWorktree,
+  worktreeExists,
+  worktreePathForSession,
+} from "./worktree.js";
 import { getAction, getActions } from "./actions.js";
 import { buildActionPrompt, buildResearchPrompt, buildVerifierPrompt, buildWorkerPrompt } from "./templates.js";
-import { liveMapFor, resolveFlow, stepperFor, type WfStage } from "./workflow.js";
+import {
+  eligibleVerifyStages,
+  gateHoldsDone,
+  liveMapFor,
+  resolveFlow,
+  shouldSwitchModel,
+  stepperFor,
+  verifyGateCap,
+  type WfStage,
+} from "./workflow.js";
 import { stopTtyd } from "./ttyd.js";
 import { addTask, emit, findTask, findWorker, nextWorkerLabel, removeWorker, setMode, tasks, workers } from "./state.js";
 import {
@@ -19,6 +66,8 @@ import {
   lastMeaningfulLine,
   listSessions,
   openTerminal,
+  parseContextPressure,
+  sendKeys,
   sendText,
   tmuxAvailable,
 } from "./tmux.js";
@@ -239,13 +288,28 @@ async function sendWhenReady(session: string, prompt: string): Promise<void> {
 function sanitizeKey(key: string): string {
   return key.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40);
 }
+
+/**
+ * The session that OWNS a worktree: for a verifier (`<parent>-verify` / `<parent>-verify-2`)
+ * it's the parent session (strip the suffix); for a normal worker it's the session itself.
+ * Used so a rediscovered verifier reconstructs the PARENT's worktree path (P1g).
+ */
+export function owningSession(session: string): string {
+  return session.replace(/-verify(?:-\d+)?$/, "");
+}
 async function uniqueSession(base: string): Promise<string> {
   let name = `cowork-${base}`;
   for (let n = 2; await hasSession(name); n++) name = `cowork-${base}-${n}`;
   return name;
 }
 
-async function launchLive(taskId: string, stageKeys?: string[]): Promise<Worker | null> {
+/** Per-launch overrides (from the Lanzar modal). Sanitized server-side; local-only trust boundary. */
+export interface LaunchOpts {
+  plannerModel?: string;
+  workerModel?: string;
+}
+
+async function launchLive(taskId: string, stageKeys?: string[], opts: LaunchOpts = {}): Promise<Worker | null> {
   const task = findTask(taskId);
   if (!task) return null;
   if (task.workerId) return findWorker(task.workerId) ?? null;
@@ -274,7 +338,18 @@ async function launchLive(taskId: string, stageKeys?: string[]): Promise<Worker 
   logEvent("launch", task);
   emit();
 
+  // Fresh launch: wipe any stale cycle dir left by a prior crash reusing the same
+  // deterministic session name (stale sentinels/latches would misreport the stage or
+  // skip the plan→impl model switch — F3).
+  removeCycleDir(worker.cycle!);
   ensureCycleDir(worker.cycle!);
+  // F0: Planner model injected as --model over the repo's start command (existing --model wins).
+  const plannerModel = sanitizeModel(opts.plannerModel || getRepoPlannerModel(task.repo));
+  // Switch to the Worker model at plan→impl only for real implementer launches (never PR).
+  writeModelsInfo(worker.cycle!, {
+    worker: sanitizeModel(opts.workerModel || getRepoWorkerModel(task.repo)),
+    switchEnabled: launchSwitchEnabled(task.source),
+  });
   const vars = getRepoVars(task.repo); // per-repo test vars (merged into curl.env + {var:KEY} in the prompt)
   writeCurlEnv(task.repo, worker.cycle!, vars); // per-project dev creds + repo vars for the curl stage
   // Enrich the prompt with the full ticket description (best-effort, ClickUp only).
@@ -282,18 +357,41 @@ async function launchLive(taskId: string, stageKeys?: string[]): Promise<Worker 
     const desc = await fetchClickUpDescription(task.id);
     if (desc) task.body = desc;
   }
+  // P1: isolate this worker in an ephemeral git worktree so two workers over the same repo
+  // don't collide. Fallback to the repo root (with a visible note) if the repo isn't git or
+  // the worktree can't be created — never abort the launch.
+  let launchCwd = cwd;
+  let worktreeNote: string | null = null;
+  if (real && (await isGitRepo(cwd))) {
+    const wt = worktreePathForSession(cwd, session);
+    try {
+      await addWorktree(cwd, wt, branchForSession(session));
+      worker.worktree = wt;
+      worker.cwd = wt;
+      launchCwd = wt;
+    } catch {
+      worktreeNote = "⚠️ worktree no disponible · repo raíz compartido";
+    }
+  }
   try {
-    await createSession(session, cwd, getRepoStartCommand(task.repo));
+    await createSession(session, launchCwd, withModel(getRepoStartCommand(task.repo), plannerModel));
     const prompt = buildWorkerPrompt(task, worker.cycle!, flow, vars);
     // Send once claude's input is actually ready (handles boot lag + dialogs).
     void sendWhenReady(session, prompt);
     worker.state = "idle";
-    worker.stage = real
-      ? AUTOSUBMIT
-        ? "💬 enviando requerimiento…"
-        : "💬 template en el prompt (revisa y Enter)"
-      : "⚠️ repo no encontrado · cwd de respaldo";
+    worker.stage =
+      worktreeNote ??
+      (real
+        ? AUTOSUBMIT
+          ? "💬 enviando requerimiento…"
+          : "💬 template en el prompt (revisa y Enter)"
+        : "⚠️ repo no encontrado · cwd de respaldo");
   } catch {
+    // P1f: don't leak the worktree if the session failed to start.
+    if (worker.worktree) {
+      void removeWorktree(cwd, worker.worktree, branchForSession(session)).catch(() => {});
+      worker.worktree = undefined;
+    }
     worker.state = "idle";
     worker.stage = "✖ error al crear la sesión tmux";
   }
@@ -336,7 +434,8 @@ async function launchResearchLive(taskId: string): Promise<Worker | null> {
     if (desc) task.body = desc;
   }
   try {
-    await createSession(session, cwd, getRepoStartCommand(task.repo));
+    // Research is read-only → stays on the Planner model the whole run (no plan→impl switch).
+    await createSession(session, cwd, withModel(getRepoStartCommand(task.repo), sanitizeModel(getRepoPlannerModel(task.repo))));
     void sendWhenReady(session, buildResearchPrompt(task, worker.cycle!));
     worker.state = "idle";
     worker.stage = real ? "🔍 investigando el ticket…" : "⚠️ repo no encontrado · cwd de respaldo";
@@ -440,7 +539,8 @@ async function launchActionLive(taskId: string, actionKey: string): Promise<Work
     if (desc) task.body = desc;
   }
   try {
-    await createSession(session, cwd, getRepoStartCommand(task.repo));
+    // Custom actions start (like every launch) on the Planner model; no plan→impl switch (decoupled).
+    await createSession(session, cwd, withModel(getRepoStartCommand(task.repo), sanitizeModel(getRepoPlannerModel(task.repo))));
     void sendWhenReady(session, buildActionPrompt(action, task, worker.cycle!, flow, vars));
     worker.state = "idle";
     worker.stage = real ? `${action.icon} ${action.label}` : "⚠️ repo no encontrado · cwd de respaldo";
@@ -501,13 +601,39 @@ export async function workerPane(workerId: string): Promise<{ hasSession: boolea
   }
 }
 
+/**
+ * P1 teardown: remove a worker's ephemeral worktree, honoring (a) the refcount — a verifier
+ * shares the parent's worktree, so don't remove while another live worker sits in it — and
+ * (b) the dirty guard inside removeWorktree (uncommitted/committed work is KEPT, not deleted).
+ * The branch is derived from the worktree path leaf (== the OWNING session), which is correct
+ * for both a task worker and a verifier that inherited the parent's worktree. Never throws.
+ */
+/** True if another live worker (e.g. the verifier) still sits in this worktree. */
+export function worktreeReferencedByOthers(all: Worker[], workerId: string, worktree: string): boolean {
+  return all.some((w) => w.id !== workerId && w.worktree === worktree);
+}
+
+async function cleanupWorktree(worker: Worker): Promise<void> {
+  const wt = worker.worktree;
+  if (!wt) return;
+  if (worktreeReferencedByOthers(workers, worker.id, wt)) return; // still referenced (refcount)
+  const repoRoot = resolveCwd(worker.repo).cwd;
+  const res = await removeWorktree(repoRoot, wt, branchForSession(basename(wt))).catch(() => ({
+    removed: false,
+    kept: false,
+  }));
+  if (res.removed) worker.worktree = undefined;
+  else if (res.kept) console.log(`[claude-cowork] worktree conservado (cambios sin commitear/commits): ${wt}`);
+}
+
 async function stopLive(workerId: string): Promise<boolean> {
   const worker = findWorker(workerId);
   if (!worker) return false;
   if (worker.session) {
     stopTtyd(worker.session);
-    await killSession(worker.session);
+    await killSession(worker.session); // kill the pane BEFORE removing the worktree (P1-10)
   }
+  await cleanupWorktree(worker);
   const evidence = captureEvidence(worker);   // ANTES de borrar el cycle dir
   if (worker.cycle) removeCycleDir(worker.cycle);
   const task = findTask(worker.taskId);
@@ -519,6 +645,8 @@ async function stopLive(workerId: string): Promise<boolean> {
     logEvent("stop", task, evidence);
   }
   workerFlow.delete(workerId);
+  modelSwitchAttempts.delete(workerId);
+  clearWorkerVerify(workerId);
   removeWorker(workerId);
   emit();
   return true;
@@ -533,17 +661,15 @@ async function spawnVerifier(mainWorker: Worker): Promise<void> {
   verifierFor.add(mainWorker.id);
   const task = findTask(mainWorker.taskId);
   if (!task || !mainWorker.cycle) return;
-  // Incluye el marcador -action-<key> cuando el padre es una acción, para que rediscoverSessions
-  // lo detecte como desacoplado tras un reinicio (y no agarre el tablero).
-  // Mismo esquema que launchActionLive (partes sanitizadas por separado) para que ambos caminos coincidan
-  // y el marcador -action- sobreviva al truncado.
-  const vbase =
-    mainWorker.kind === "action" && mainWorker.actionKey
-      ? `${sanitizeKey(task.key)}-action-${sanitizeKey(mainWorker.actionKey)}`
-      : sanitizeKey(task.key);
-  const session = await uniqueSession(`${vbase}-verify`);
-  const cwd = mainWorker.cwd ?? resolveCwd(task.repo).cwd;
+  // P1h: a prior process life already spawned the verifier (latch in the parent cycle dir) →
+  // don't spawn a second one after a restart (verifierFor is empty on a fresh process).
+  if (verifierSpawned(mainWorker.cycle)) return;
   const id = `v${Date.now().toString(36)}`;
+  const cwd = mainWorker.cwd ?? resolveCwd(task.repo).cwd;
+  // P1 pt3: reserve the verifier in workers[] SYNCHRONOUSLY (before the first await) with the
+  // parent's worktree set, so a reachedDone cleanup that fires in this same window sees the
+  // reference and won't remove the (possibly clean) worktree out from under the attaching verifier.
+  // session is filled in after uniqueSession; an empty session is skipped by pollLive (falsy).
   const worker: Worker = {
     id,
     label: nextWorkerLabel(),
@@ -554,12 +680,22 @@ async function spawnVerifier(mainWorker: Worker): Promise<void> {
     state: "starting",
     stage: "🔎 verificador arrancando…",
     startedAt: Date.now(),
-    session,
+    session: "", // placeholder; real name assigned below (pollLive skips empty-session workers)
     cwd, // no own cycle: reads/writes the main worker's cycle via absolute paths
+    worktree: mainWorker.worktree, // P1-6: share the parent's worktree → refcount keeps it alive
   };
   verifierIds.add(id);
   workers.push(worker);
   emit();
+  // Incluye el marcador -action-<key> cuando el padre es una acción, para que rediscoverSessions
+  // lo detecte como desacoplado tras un reinicio (y no agarre el tablero).
+  const vbase =
+    mainWorker.kind === "action" && mainWorker.actionKey
+      ? `${sanitizeKey(task.key)}-action-${sanitizeKey(mainWorker.actionKey)}`
+      : sanitizeKey(task.key);
+  const session = await uniqueSession(`${vbase}-verify`);
+  worker.session = session;
+  markVerifierSpawned(mainWorker.cycle); // persist so a restart won't spawn a second verifier
   try {
     // Verifier deliberately uses the default CLAUDE_CMD, not the repo's startCommand
     // (a repo whose startCommand is a required wrapper could make it fail — acceptable to defer).
@@ -574,6 +710,182 @@ async function spawnVerifier(mainWorker: Worker): Promise<void> {
   emit();
 }
 
+// In-memory attempt counter for the plan→impl /model switch (bounded resend; the
+// authoritative "done" latch lives in the cycle dir via markModelSwitched).
+const modelSwitchAttempts = new Map<string, number>();
+
+// ---- P2: per-stage verifyCmd gate execution ----
+const verifyRunning = new Set<string>(); // `${workerId}:${stageKey}` currently executing
+const verifyArmed = new Set<string>();   // retry allowed (armed when the worker worked again)
+
+function clearWorkerVerify(workerId: string): void {
+  for (const s of [...verifyRunning]) if (s.startsWith(`${workerId}:`)) verifyRunning.delete(s);
+  for (const s of [...verifyArmed]) if (s.startsWith(`${workerId}:`)) verifyArmed.delete(s);
+}
+
+/**
+ * Run a stage's verifyCmd off the poll loop. Pass → persist "passed" (advancement allowed next
+ * poll). Fail with retries left → "pending" + re-prompt the worker (only when idle) to fix and
+ * re-touch the sentinel. Fail with none left → "failed" (the gate cap holds the worker at this
+ * stage forever — never a false-green). State persists in the cycle dir (survives restart).
+ */
+async function runVerifyStage(worker: Worker, gate: { key: string; verifyCmd: string; maxRetries: number }, prevAttempts: number): Promise<void> {
+  const cwd = worker.worktree ?? worker.cwd;
+  try {
+    if (!worker.cycle || !cwd) return;
+    const res = await runVerify(gate.verifyCmd, cwd);
+    const outcome = verifyOutcome(res.ok, prevAttempts, gate.maxRetries);
+    writeVerifyState(worker.cycle, gate.key, outcome);
+    if (outcome.status === "pending" && worker.session) {
+      // D1: re-prompt to fix, only when idle (never write into a busy pane). No sentinel deletion.
+      const pane = await capturePane(worker.session).catch(() => "");
+      if (!isBusy(pane)) {
+        await sendText(
+          worker.session,
+          `⚠️ verifyCmd de la etapa "${gate.key}" falló (intento ${outcome.attempts}/${gate.maxRetries}). ` +
+            `Corrige y vuelve a tocar el sentinel ${gate.key}. Salida:\n${truncate(res.output)}`,
+          true
+        ).catch(() => {});
+      }
+    }
+    emit();
+  } finally {
+    verifyRunning.delete(`${worker.id}:${gate.key}`);
+  }
+}
+
+/**
+ * For each verifyCmd gate the worker has left, run the check — paced by the worker's own
+ * busy/idle cycle: never runs while the pane is busy, and a RETRY requires the worker to have
+ * worked (gone busy) since the last failed attempt (armed), so we don't burn through maxRetries
+ * while the worker is still fixing. First attempt runs as soon as the worker leaves the stage.
+ */
+async function maybeRunVerifies(
+  worker: Worker,
+  flow: { stages: WfStage[]; verifyAfter: string | null },
+  furthestReal: string | null
+): Promise<void> {
+  if (!worker.session || !worker.cycle || !worker.cwd) return;
+  const eligible = eligibleVerifyStages(flow.stages, furthestReal, (k) => readVerifyState(worker.cycle!, k)?.status ?? null);
+  if (!eligible.length) return;
+  let pane = "";
+  try {
+    pane = await capturePane(worker.session);
+  } catch {
+    return;
+  }
+  const busy = isBusy(pane);
+  for (const g of eligible) {
+    const runKey = `${worker.id}:${g.key}`;
+    if (verifyRunning.has(runKey)) continue;
+    const state = readVerifyState(worker.cycle, g.key);
+    const decision = verifyRunDecision(busy, state?.attempts ?? 0, verifyArmed.has(runKey));
+    if (decision === "arm") verifyArmed.add(runKey); // worker is fixing → arm the next retry
+    if (decision !== "run") continue;
+    verifyRunning.add(runKey);
+    verifyArmed.delete(runKey);
+    void runVerifyStage(worker, g, state?.attempts ?? 0);
+  }
+}
+
+/**
+ * F0: at plan→impl, switch the pane to the Worker model with `/model`. Idempotent via a
+ * persisted cycle-dir latch (survives restart). Fires only when: this launch enabled the
+ * switch (implementer launch, not PR/research — see writeModelsInfo), the flow has an impl
+ * stage, and the worker has reached it OR later (F2: tolerates a skipped `implementing`
+ * poll). Never sends while the pane is busy — a slash command mid-turn is a silent no-op
+ * (F1) — and verifies the switch applied before latching, retrying (bounded) otherwise.
+ */
+const MODEL_SWITCH_MAX_ATTEMPTS = 3;
+
+async function maybeSwitchModel(
+  worker: Worker,
+  flow: { stages: WfStage[]; verifyAfter: string | null },
+  stageKey: string
+): Promise<void> {
+  if (!worker.session || !worker.cycle) return;
+  const info = readModelsInfo(worker.cycle);
+  if (!info) return;
+  // Already-done = success latch OR abandoned-after-retries latch (never re-fire either).
+  const done = modelSwitched(worker.cycle) || modelSwitchFailed(worker.cycle);
+  if (!shouldSwitchModel(info.switchEnabled, done, flow.stages, stageKey)) return;
+  const model = sanitizeModel(info.worker);
+  if (!model) {
+    markModelSwitched(worker.cycle);             // nothing valid to switch to; don't retry forever
+    return;
+  }
+  const target = modelFamily(model);
+  // Confirmed by: the transient "Set model to <target>" confirmation line (current Claude sets
+  // directly, no persistent banner), OR a persistent banner reading the target (older versions).
+  const confirms = (p: string) => modelSwitchConfirmed(p, target) || currentModelFromPane(p) === target;
+
+  let pane = "";
+  try {
+    pane = await capturePane(worker.session);
+  } catch {
+    return;
+  }
+  // Dedup: a prior poll may have already switched and the confirmation is still on screen → latch
+  // without resending (this is what stops the observed 3× `/model sonnet` resend).
+  if (confirms(pane)) {
+    markModelSwitched(worker.cycle);
+    modelSwitchAttempts.delete(worker.id);
+    return;
+  }
+  if (isBusy(pane)) return;                       // F1: never send mid-turn — retry next poll
+
+  await sendText(worker.session, "/model " + model, true).catch(() => {});
+  const attempts = (modelSwitchAttempts.get(worker.id) ?? 0) + 1;
+  modelSwitchAttempts.set(worker.id, attempts);
+
+  // Poll a few times (~2.4s) for the confirmation to render — a single 800ms capture can miss it.
+  // Also handle the picker path (other/older Claude versions that open a "Switch model?" confirm
+  // instead of setting directly): confirm the pre-selected target with Enter, else dismiss.
+  let applied = false;
+  for (let i = 0; i < 3 && !applied; i++) {
+    await delay(800);
+    let after = await capturePane(worker.session).catch(() => "");
+    if (isModelPickerOpen(after)) {
+      if (pickerOffersModel(after, target)) {
+        await sendKeys(worker.session, "Enter").catch(() => {});
+        await delay(800);
+        after = await capturePane(worker.session).catch(() => "");
+      } else {
+        await sendKeys(worker.session, "Escape").catch(() => {});
+      }
+    }
+    applied = confirms(after);
+  }
+
+  if (applied) {
+    markModelSwitched(worker.cycle);
+    modelSwitchAttempts.delete(worker.id);
+    return;
+  }
+  if (attempts >= MODEL_SWITCH_MAX_ATTEMPTS) {
+    // Give up WITHOUT claiming success: visible note + a distinct latch so we stop retrying
+    // but never silently pretend the (expensive Planner) model was swapped (point 1).
+    markModelSwitchFailed(worker.cycle);
+    worker.stage = `⚠️ no pude cambiar a "${model}" · usa /model en el pane`;
+    worker.needsInput = true;
+    modelSwitchAttempts.delete(worker.id);
+  }
+}
+
+/**
+ * P4: set/clear worker.contextPressure from the pane, change-gated (only reports a real change so
+ * SSE doesn't churn and the log isn't spammed). Returns true when the value changed.
+ */
+export function applyContextPressure(worker: Worker, pane: string): boolean {
+  const next = parseContextPressure(pane);
+  const prev = worker.contextPressure;
+  const same =
+    (!next && !prev) || (!!next && !!prev && next.note === prev.note && next.tokens === prev.tokens);
+  if (same) return false;
+  worker.contextPressure = next ?? undefined;
+  return true;
+}
+
 async function pollLive(): Promise<void> {
   let changed = false;
   for (const worker of [...workers]) {
@@ -585,8 +897,11 @@ async function pollLive(): Promise<void> {
         task.status = "queued";
         task.workerId = undefined;
       }
+      await cleanupWorktree(worker); // P1: remove the worktree (dirty-guarded, refcounted)
       if (worker.cycle) removeCycleDir(worker.cycle);
       workerFlow.delete(worker.id);
+      modelSwitchAttempts.delete(worker.id);
+      clearWorkerVerify(worker.id);
       removeWorker(worker.id);
       changed = true;
       continue;
@@ -595,39 +910,99 @@ async function pollLive(): Promise<void> {
       // Loop-stage sentinels take precedence: they reflect the real pipeline.
       // Fallback (worker rediscovered after a restart) resolves over the repo's workflow.
       const flow = workerFlow.get(worker.id) ?? resolveFlow(undefined, worker.repo);
-      const stageKey = worker.cycle ? detectStage(worker.cycle, stepKeys(flow)) : null;
+      // P4: capture the pane once per poll and detect context pressure (change-gated, no log spam).
+      // Reused by the busy/idle fallback below so we don't double-capture.
+      let paneSnapshot: string | null = null;
+      try {
+        paneSnapshot = await capturePane(worker.session);
+      } catch {
+        /* transient */
+      }
+      if (paneSnapshot !== null && applyContextPressure(worker, paneSnapshot)) changed = true;
+      let stageKey = worker.cycle ? detectStage(worker.cycle, stepKeys(flow)) : null;
+      // P2: run any eligible verifyCmd gates, then CAP the displayed stage at an unpassed gate so
+      // the board never reaches `done` on a false green (B2). The cap consults the persisted
+      // pass/fail state synchronously — no reliance on sentinel timing.
+      if (ownsBoard(worker) && worker.cycle) {
+        const furthestReal = detectStage(worker.cycle, flow.stages.map((s) => s.key));
+        await maybeRunVerifies(worker, flow, furthestReal);
+        const cap = verifyGateCap(flow.stages, furthestReal, (k) => verifyPassed(worker.cycle!, k));
+        if (cap) stageKey = cap;
+      }
       const stage = stageKey ? liveMapFor(flow.stages, flow.verifyAfter).get(stageKey) : undefined;
       if (stage) {
+        // P2 (B2 — including a TERMINAL gate): if the RESOLVED stage carries a verifyCmd that
+        // hasn't PASSED (pending, running, or failed), it is NOT done — force review/busy and
+        // never fire reachedDone/logEvent("complete"). Otherwise use the normal board mapping.
+        // Guarding only on `failed` was a false-green: a gate on the last stage maps to `done`
+        // while the check is still `pending` in-flight → complete would fire irreversibly.
+        const gateStage = stageKey ? flow.stages.find((s) => s.key === stageKey && s.verifyCmd) : undefined;
+        const gstate = gateStage && worker.cycle ? readVerifyState(worker.cycle, stageKey!) : null;
+        const gateFailed = gstate?.status === "failed";
+        const gateUnpassed = gateHoldsDone(!!gateStage, gstate?.status ?? null); // pending/absent/failed
+        const gateStuck = gateUnpassed && !gateFailed && (gstate?.attempts ?? 0) > 0; // worker ignoring the re-prompt
+        const tWorker: WorkerState = gateUnpassed ? "review" : stage.worker;
+        const tTask: TaskStatus = gateUnpassed ? "review" : stage.task;
+        const tLabel = gateFailed
+          ? `✖ verifyCmd falló · ${stage.label}`
+          : gateStuck
+          ? `⚠️ gate "${stage.label}" pendiente (intento ${gstate?.attempts}) · corrige y re-toca`
+          : gateUnpassed
+          ? `⏳ verificando "${stage.label}"…`
+          : stage.label;
+        if (gateFailed && stageKey) {
+          worker.verifyFailure = { stageKey, output: `${gstate?.attempts ?? 0} intento(s) fallido(s)` };
+        } else if (worker.verifyFailure) {
+          worker.verifyFailure = undefined;
+          changed = true;
+        }
         if (worker.stageKey !== stageKey) {
           worker.stageKey = stageKey ?? undefined;
           changed = true;
         }
-        if (worker.state !== stage.worker || worker.stage !== stage.label) {
-          const reachedDone = stage.worker === "done" && worker.state !== "done";
-          worker.state = stage.worker;
-          worker.stage = stage.label;
+        if (worker.state !== tWorker || worker.stage !== tLabel) {
+          const reachedDone = tWorker === "done" && worker.state !== "done";
+          worker.state = tWorker;
+          worker.stage = tLabel;
           if (ownsBoard(worker)) {
             const task = findTask(worker.taskId);
             if (task) {
-              task.status = stage.task;
+              task.status = tTask;
               if (reachedDone) logEvent("complete", task, captureEvidence(worker));
             }
           }
+          // P1e: worker completed with its session still alive → reclaim the worktree now
+          // (dirty-guarded: a worktree with commits/uncommitted work is kept, so real work
+          // survives for inspection; only a genuinely no-op worktree is removed).
+          if (reachedDone) void cleanupWorktree(worker);
           changed = true;
         }
-        if (worker.needsInput) {
-          worker.needsInput = false; // progressing through the pipeline
+        // Point 3: a failed OR stuck-pending gate needs operator attention → surface it (the UI
+        // already highlights needsInput). A cleanly-progressing worker clears it.
+        const wantNeedsInput = gateFailed || gateStuck;
+        if (worker.needsInput !== wantNeedsInput) {
+          worker.needsInput = wantNeedsInput;
           changed = true;
         }
-        // verifyAfter stage reached on a main worker → spawn the verifier (once)
-        if (stageKey && flow.verifyAfter && stageKey === flow.verifyAfter && !verifierIds.has(worker.id)) {
+        // F0: plan→impl reached → switch the pane to the Worker model (once, idle-only).
+        if (stageKey) await maybeSwitchModel(worker, flow, stageKey);
+        // verifyAfter stage reached on a main worker → spawn the verifier (once). Gate on the
+        // per-main-worker set AND the persisted latch (the old `verifierIds.has(worker.id)` guard
+        // was ineffective — worker is the PARENT, never in verifierIds — so a restart re-spawned).
+        if (
+          stageKey &&
+          flow.verifyAfter &&
+          stageKey === flow.verifyAfter &&
+          !verifierFor.has(worker.id) &&
+          !(worker.cycle && verifierSpawned(worker.cycle))
+        ) {
           void spawnVerifier(worker);
         }
         continue;
       }
 
-      // No sentinel yet → fall back to the busy/idle pane heuristic.
-      const pane = await capturePane(worker.session);
+      // No sentinel yet → fall back to the busy/idle pane heuristic (reuse the P4 snapshot).
+      const pane = paneSnapshot ?? (await capturePane(worker.session));
       const busy = isBusy(pane);
       const hint = lastMeaningfulLine(pane);
       const newState: WorkerState = busy ? "busy" : "idle";
@@ -687,6 +1062,20 @@ async function rediscoverSessions(): Promise<void> {
       : action && !action.inheritWorkflow
       ? { stages: action.stages, verifyAfter: action.verifyAfter }
       : resolveFlow(undefined, task?.repo);
+    // P1-1/P1g: reconstruct the worktree cwd from the deterministic path. Only task workers
+    // (kind undefined) and their verifiers get worktrees; a verifier's own session is
+    // `<parent>-verify`, so derive the OWNING session (strip the verify suffix) to find the
+    // parent's worktree — restoring isolation AND letting the refcount see the verifier hold it.
+    const root = task ? resolveCwd(task.repo).cwd : undefined;
+    let worktree: string | undefined;
+    let cwd = root;
+    if (root && kind === undefined) {
+      const wt = worktreePathForSession(root, isVerify ? owningSession(session) : session);
+      if (worktreeExists(wt)) {
+        worktree = wt;
+        cwd = wt;
+      }
+    }
     const worker: Worker = {
       id: `w${Date.now().toString(36)}${workers.length}`,
       label: nextWorkerLabel(),
@@ -702,12 +1091,16 @@ async function rediscoverSessions(): Promise<void> {
         : "↻ redescubierto",
       startedAt: Date.now(),
       session,
-      cwd: task ? resolveCwd(task.repo).cwd : undefined,
+      cwd,
+      worktree,
       cycle: cycleDirForSession(session),
       stages: stepSteps(flow),
     };
     workerFlow.set(worker.id, flow); // research/action/global: pollLive usa el flow correcto tras reinicio
     workers.push(worker);
+    // P1h: a live `-verify` session means the parent already has its verifier → set the latch on
+    // the parent's cycle dir so the rediscovered parent doesn't spawn a second one.
+    if (isVerify) markVerifierSpawned(cycleDirForSession(owningSession(session)));
     if (!decoupled && task && !task.workerId) {
       task.workerId = worker.id;
       if (task.status === "queued" || task.status === "triage") task.status = "running";
@@ -720,12 +1113,31 @@ async function rediscoverSessions(): Promise<void> {
   }
 }
 
+/**
+ * P1-5: on startup, remove worktrees whose tmux session no longer exists (a crash left them
+ * behind), across the known repo roots. Dirty-guarded (uncommitted/committed work is kept).
+ * Best-effort — never throws, runs once after rediscovery.
+ */
+async function reconcileLeakedWorktrees(): Promise<void> {
+  const live = new Set((await listSessions()).filter((s) => s.startsWith("cowork-")));
+  const roots = new Set<string>();
+  for (const repo of listRepos()) {
+    const { cwd, real } = resolveCwd(repo);
+    if (real) roots.add(cwd);
+  }
+  for (const root of roots) {
+    if (!(await isGitRepo(root))) continue;
+    const n = await reconcileWorktrees(root, live).catch(() => 0);
+    if (n) console.log(`[claude-cowork] limpiadas ${n} worktree(s) huérfana(s) en ${root}`);
+  }
+}
+
 // ============================================================
 //  PUBLIC API  (mode-dispatched)
 // ============================================================
 
-export async function launchTask(taskId: string, stageKeys?: string[]): Promise<Worker | null> {
-  return activeMode === "live" ? launchLive(taskId, stageKeys) : launchSimulated(taskId);
+export async function launchTask(taskId: string, stageKeys?: string[], opts: LaunchOpts = {}): Promise<Worker | null> {
+  return activeMode === "live" ? launchLive(taskId, stageKeys, opts) : launchSimulated(taskId);
 }
 
 export async function stopWorker(workerId: string): Promise<boolean> {
@@ -765,12 +1177,13 @@ export async function launchAdhoc(text: string, title?: string, repo = "monorepo
 export async function launchCustom(
   text: string,
   repo = "monorepo",
-  stageKeys?: string[]
+  stageKeys?: string[],
+  opts: LaunchOpts = {}
 ): Promise<Worker | null> {
   const id = `custom-${Date.now().toString(36)}`;
   const title = text.split("\n").find((l) => l.trim())?.trim().slice(0, 70) || "petición";
   addTask({ id, key: id, title, body: text, repo, source: "custom", status: "running" });
-  return launchTask(id, stageKeys);
+  return launchTask(id, stageKeys, opts);
 }
 
 /** Create + launch a PR review task. Verifies the PR vs the task; curl in dev after merge. */
@@ -806,9 +1219,15 @@ export async function start(taskSource: string): Promise<"simulated" | "live"> {
     activeMode = "live";
     setMode(activeMode);
     await rediscoverSessions(); // re-attach to tmux sessions still running after a restart
-    setInterval(() => {
-      pollLive().catch(() => {});
-    }, 2000);
+    await reconcileLeakedWorktrees(); // P1-5: prune worktrees whose session died in a crash
+    // G1: recursive setTimeout (not setInterval) so a poll that runs past 2s — capturePane,
+    // hasSession, verifyCmd are all awaited — never overlaps the next tick over the same workers[].
+    const loop = () => {
+      pollLive()
+        .catch(() => {})
+        .finally(() => setTimeout(loop, 2000));
+    };
+    setTimeout(loop, 2000);
     return activeMode;
   }
   activeMode = "simulated";

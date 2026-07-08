@@ -47,6 +47,11 @@ export async function sendText(name: string, text: string, submit: boolean): Pro
   if (submit) await pexec("tmux", ["send-keys", "-t", name, "Enter"]);
 }
 
+/** Send named keys (interpreted by tmux, e.g. "Escape", "Down", "Enter") — not literal text. */
+export async function sendKeys(name: string, ...keys: string[]): Promise<void> {
+  await pexec("tmux", ["send-keys", "-t", name, ...keys]);
+}
+
 export async function capturePane(name: string): Promise<string> {
   const { stdout } = await pexec("tmux", ["capture-pane", "-t", name, "-p"]);
   return stdout;
@@ -89,4 +94,49 @@ export function lastMeaningfulLine(pane: string): string {
     .filter((l) => l && !CHROME.test(l));
   const last = lines[lines.length - 1] ?? "";
   return last.replace(/\s+/g, " ").slice(0, 56);
+}
+
+// P4: how many recent lines to scan for context-pressure signals. Small, like lastMeaningfulLine,
+// so a stale `/clear` banner from earlier scrollback never triggers a false positive.
+const PRESSURE_RECENT_LINES = 15;
+// The context-left footer ("Context left until auto-compact: N%") is ALWAYS present, so only a LOW
+// percentage counts as pressure — a bare "context left" match must never fire on its own (P4a).
+const CONTEXT_LEFT_THRESHOLD = 20;
+
+/**
+ * P4: detect that the worker's pane is under context pressure (auto-compact imminent / suggested
+ * `/clear`). Robust to pane-width truncation (matches fragments, not one exact string) and scans
+ * only the recent lines. Deliberately ignores the ever-present low-signal footer at a high
+ * percentage and the `/clear` slash-menu item (both would be false positives). Returns the token
+ * count when parseable, else just a note; null when there's no signal.
+ */
+export function parseContextPressure(pane: string): { tokens?: number; note: string } | null {
+  const recent = (pane ?? "")
+    .split("\n")
+    .slice(-PRESSURE_RECENT_LINES)
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  for (const l of recent) {
+    if (/clear conversation/i.test(l)) continue; // the /clear slash-menu item, not a warning (P4a)
+    // "…/clear to save 45k tokens" — the "/clear to" prefix may be truncated off, so key on
+    // "save Nk" within a context-related line. Tokens best-effort (may be cut by width).
+    const m = l.match(/save (\d+) ?k\b/i);
+    if (m && /clear|token|context|compact/i.test(l)) {
+      return { tokens: Number(m[1]), note: `/clear para ahorrar ${m[1]}k tokens` };
+    }
+    if (/clear to sav/i.test(l)) return { note: "aviso de /clear (contexto alto)" }; // truncated, no number
+  }
+
+  if (recent.some((l) => /compacting conversation/i.test(l))) return { note: "compactando conversación" };
+
+  for (const l of recent) {
+    if (l.startsWith("/")) continue; // slash-menu line
+    const m = l.match(/context left[^0-9]*(\d{1,3}) ?%/i) ?? l.match(/(\d{1,3}) ?% context left/i);
+    if (m) {
+      const pct = Number(m[1]);
+      if (pct < CONTEXT_LEFT_THRESHOLD) return { note: `${pct}% de contexto restante` };
+    }
+  }
+  return null;
 }

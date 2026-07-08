@@ -18,11 +18,15 @@ export function subscribeStream(
   return () => es.close();
 }
 
-export async function launchTask(taskId: string, stageKeys?: string[]): Promise<void> {
+export async function launchTask(
+  taskId: string,
+  stageKeys?: string[],
+  models?: { plannerModel?: string; workerModel?: string }
+): Promise<void> {
   await fetch(`/api/tasks/${taskId}/launch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(stageKeys ? { stageKeys } : {}),
+    body: JSON.stringify({ ...(stageKeys ? { stageKeys } : {}), ...(models ?? {}) }),
   });
 }
 
@@ -227,7 +231,14 @@ export async function getRepoConfig(repo: string): Promise<RepoOverrideConfig | 
 
 export async function saveRepoConfig2(
   repo: string,
-  cfg: { workflow: WorkflowConfig | null; vars: Record<string, string>; startCommand: string; inheritWorkflow: boolean }
+  cfg: {
+    workflow: WorkflowConfig | null;
+    vars: Record<string, string>;
+    startCommand: string;
+    plannerModel: string;
+    workerModel: string;
+    inheritWorkflow: boolean;
+  }
 ): Promise<RepoOverrideConfig> {
   const r = await fetch(`/api/repo-config/${encodeURIComponent(repo)}`, {
     method: "PUT",

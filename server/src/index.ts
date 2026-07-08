@@ -28,6 +28,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+/** Extract per-launch model overrides from a request body (sanitized again in the engine). */
+function launchOpts(body: any): { plannerModel?: string; workerModel?: string } {
+  const o: { plannerModel?: string; workerModel?: string } = {};
+  if (typeof body?.plannerModel === "string" && body.plannerModel.trim()) o.plannerModel = body.plannerModel.trim();
+  if (typeof body?.workerModel === "string" && body.workerModel.trim()) o.workerModel = body.workerModel.trim();
+  return o;
+}
+
 // Full snapshot (initial load / polling fallback)
 app.get("/api/state", (_req, res) => {
   res.json(snapshot());
@@ -120,7 +128,7 @@ app.post("/api/custom", async (req, res) => {
   const stageKeys: string[] | undefined = Array.isArray(req.body?.stageKeys)
     ? req.body.stageKeys.filter((x: unknown) => typeof x === "string")
     : undefined;
-  const worker = await launchCustom(text, repo, stageKeys);
+  const worker = await launchCustom(text, repo, stageKeys, launchOpts(req.body));
   res.json({ worker });
 });
 
@@ -169,7 +177,8 @@ app.post("/api/tasks/:id/launch", async (req, res) => {
   const stageKeys: string[] | undefined = Array.isArray(req.body?.stageKeys)
     ? req.body.stageKeys.filter((x: unknown) => typeof x === "string")
     : undefined;
-  const worker = await launchTask(req.params.id, stageKeys);
+  const opts = launchOpts(req.body); // per-launch model overrides (sanitized server-side)
+  const worker = await launchTask(req.params.id, stageKeys, opts);
   if (!worker) return res.status(404).json({ error: "task not found" });
   res.json(worker);
 });
@@ -353,7 +362,10 @@ app.get("/api/workers/:id/evidence/file/:name", (req, res) => {
   res.sendFile(join(evidenceDir(worker.cycle), safe));
 });
 
-app.listen(PORT, async () => {
+// Bind to loopback only: the board is local-only ("todo corre en tu máquina, no hay servidor
+// remoto") and several config routes (startCommand, per-repo verifyCmd) persist values that later
+// run as shell — binding to 0.0.0.0 would expose that as unauthenticated RCE to the LAN.
+app.listen(PORT, "127.0.0.1", async () => {
   const source = await initTasks(); // populate the board before the engine seeds workers
   const mode = await start(source);
   startAutoRefresh(CLICKUP_REFRESH_MS);

@@ -86,21 +86,22 @@ fi
 ### 2.5. Clear the worker session if it has prior conversation
 If the worker pane already has Claude running with an active conversation (prior cycle's plan, codex pastes, diff), the history burns tokens and risks bleed-through. See `references/session-handling.md` for the full decision tree (fresh / mid-execution / idle-with-scrollback) and the `/clear` procedure. Quick check: when in doubt, clear — fresh context is cheap.
 
-### 2.6. Pick the right worker model for the cycle
+### 2.6. Pick Planner + Worker models for the cycle
 
-Cheap-by-default. The worker pane inherits whatever model `claude` launched with — usually the user's account default, which may be a 1M-context Opus tier that costs more and may even be unentitled on a particular account. Don't ride that default; pick deliberately based on the cycle's scope.
+Ronin runs the **advisor-caro-on-demand + executor-barato** pattern: the pane **starts on the Planner model** (writes the plan, investigates, analyzes PRs), and the orchestrator switches it to the cheaper **Worker model** for the implementation phase only, right after `PLAN APPROVED` (same pane, same conversation — Opción 1).
 
-| Cycle scope | Recommended worker model |
-|---|---|
-| Config / wiring, KB updates, small refactors | **Sonnet 4.6** |
-| Multi-file feature work with TDD | **Opus 4.6 standard (200K)** |
-| Reading huge codebases or generating very long plans | **Opus 4.7 (1M)** — only when justified |
+| Role | Default | Alias / pinnable id | Used for |
+|---|---|---|---|
+| **Planner** (advisor) | **Opus 4.8** | `opus` / `claude-opus-4-8` | Starts the pane. Plan, Investigar, PR analysis. Read-only flows (research/PR) stay on it the whole run. |
+| **Worker** (implementer) | **Sonnet** | `sonnet` / `claude-sonnet-5` | Implementation phase only, after `PLAN APPROVED`. |
 
-Before sending the worker prompt, glance at the worker pane's model line (the banner shows `Opus 4.7 (1M context)` etc.). If it doesn't match the table above for this cycle's scope, instruct the user to switch — or do it yourself with `tmux send-keys -t "$sib" '/model' Enter`, then guide them through the picker.
+Defaults live in `server/src/config.ts` (`COWORK_PLANNER_MODEL` / `COWORK_WORKER_MODEL`) with a per-repo and per-launch override in the App (⚙ → Workflows, and the Lanzar modal). Ronin injects `--model <planner>` when it launches the pane and sends `/model <worker>` at the plan→impl boundary; **if the repo's `startCommand` already pins a `--model`, that one wins** (Ronin does not duplicate the flag).
 
-The driver pane's model is typically a separate concern and stays whatever the user picked for their interactive session — don't change it without asking.
+The **codex adversarial review is orthogonal** to the model roles — codex still reviews the plan and the diff regardless of which model the pane is on.
 
-If the worker errors with `API Error: Extra usage is required for 1M context · run /extra-usage to enable, or /model to switch to standard context`, the account doesn't have the 1M entitlement. Park the cycle, tell the user, and have them `/model` to a 200K variant before retrying — do NOT try to force the cycle through.
+**Known behavior — `/model <name>` persists the global default.** On current Claude Code, `/model sonnet` sets the model directly (no picker) and replies `⎿ Set model to Sonnet 5 and saved as your default for new sessions` — i.e. it also **repoints the operator's global default** to the Worker model. This is acceptable for Ronin because every worker is launched with an explicit `--model <planner>`, so a new pane always starts on the Planner regardless of the saved default; but be aware the interactive default changes. (Some Claude versions instead open a "Switch model?" confirm whose pre-selected option is "Yes, switch to Sonnet 5" — the driver/engine confirms it with Enter.) Ronin verifies the switch by the confirmation line, not a persistent banner (a running pane has no persistent model status line). If a session-only model set ever lands, prefer it.
+
+The driver pane's model is a separate concern and stays whatever the user picked for their interactive session — don't change it without asking.
 
 ### 3. Set up artifacts and the idle-transition watcher
 Cycle id = timestamp; dir = `/tmp/tmux-worker-cycle-<id>`. Copy `watch.sh` from this skill into the dir (so each cycle is self-contained), write the user's requirement to `REQUIREMENT.md`, then:
@@ -150,7 +151,7 @@ For each phase boundary you receive a Monitor event. When idle + sentinel `===PL
    Consolidate into a single brief.
 3. Dispatch **codex:codex-rescue** with: plan.md, the requirement, the consolidated brainstorm brief, and the constraint "produce a hard adversarial review — find spec gaps, contradictions, security holes, missing test cases, hand-waving."
 4. If brainstorm or codex find material issues, paste them into the worker pane prefixed with `CODEX REVIEW:`. Tell it to update plan.md and emit `===PLAN-UPDATED===`.
-5. Loop until codex is satisfied. Then send `PLAN APPROVED — proceed`.
+5. Loop until codex is satisfied. Then **switch the pane to the Worker model before approving** — send `tmux send-keys -t "$sib" "/model <workerModel>" Enter` (default `sonnet`; wait for the pane to be idle so the slash command isn't swallowed mid-turn), then send `PLAN APPROVED — proceed`. Read-only flows (Investigar/PR) have no implementation phase → **don't** switch; they stay on the Planner model. (Ronin's engine performs this same switch automatically for launches from the board; the manual step is for driving a pane by hand.)
 
 Same pattern for `===IMPL-READY===` → codex reviews `git diff` from the worker's cwd and the new tests → relay → `IMPL APPROVED — proceed`.
 

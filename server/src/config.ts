@@ -28,6 +28,20 @@ export const USE_WORKER_LOOP = process.env.COWORK_USE_WORKER_LOOP !== "0";
  */
 export const CLAUDE_CMD = process.env.COWORK_CLAUDE_CMD ?? "claude --permission-mode bypassPermissions";
 
+// ---- Modelos por rol (F0) ----
+/**
+ * Modelo del Planner (advisor): arranca el pane y escribe el plan / investiga / analiza PRs.
+ * Se inyecta como `--model` sobre el startCommand del repo. Default `opus` (Opus 4.8; id
+ * pineable `claude-opus-4-8`). Override por repo en repo-config.ts.
+ */
+export const PLANNER_MODEL = process.env.COWORK_PLANNER_MODEL ?? "opus";
+/**
+ * Modelo del Worker (implementer): sólo la fase de implementación, tras "PLAN APPROVED". El
+ * poller cambia el pane a este modelo con `/model` al cruzar plan→impl. Default `sonnet`
+ * (Sonnet; id pineable `claude-sonnet-5`). Override por repo en repo-config.ts.
+ */
+export const WORKER_MODEL = process.env.COWORK_WORKER_MODEL ?? "sonnet";
+
 /** Root under which task.repo names resolve to working directories. */
 export const LIEBRE_ROOT =
   process.env.COWORK_LIEBRE_ROOT ?? "/Users/cesarhermosillo/code/lkmx/liebre";

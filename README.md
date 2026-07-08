@@ -54,9 +54,21 @@ Todo corre en tu máquina; no hay servidor remoto. Los secretos viven en archivo
   del loop + evidencia; derecha = **terminal en vivo** (`capture-pane`, polling), responder al worker
   (`tmux send-keys`) y terminal interactiva embebida (ttyd, opcional).
 - **Persistencia de terminales**: las sesiones tmux son la fuente de verdad; al reiniciar el server se
-  redescubren las sesiones `cowork-*` vivas y se reconstruyen los workers (etapas + evidencia).
+  redescubren las sesiones `cowork-*` vivas y se reconstruyen los workers (etapas + evidencia + el
+  **worktree** de cada uno).
+- **Aislamiento por worktree (live)**: cada worker de tarea corre en un **git worktree efímero**
+  (rama `cowork/<session>` bajo `~/.cowork/worktrees/…`), así dos workers sobre el mismo repo no
+  colisionan. Se limpia al completar/parar, pero **nunca** se borra un worktree con cambios sin
+  commitear o commits propios (se conserva y se registra). Si el repo no es git o falla la creación,
+  cae a la raíz del repo con una nota visible. El path es determinístico por sesión → se reconstruye
+  al reiniciar. `research` (read-only) y el modo simulado no tocan git.
 - **Monitor de etapas**: cada worker deja archivos centinela por etapa en su cycle dir; el poller los
   mapea al stepper. Aviso del navegador + resalte cuando un worker queda idle esperando input.
+- **Presión de contexto**: el poller detecta en el pane del worker señales de contexto alto /
+  auto-compact (aviso de `/clear`, "Compacting conversation", % de contexto bajo) y las expone como
+  un badge no intrusivo (🧠 contexto) en el panel ▸ EN EJECUCIÓN y en la ventana de detalle, para que
+  decidas hacer `/clear` o compactar antes de que el worker se degrade. Es informativo (no dispara
+  `/clear` solo).
 
 ### Configuración desde la App (⚙)
 - **🔌 Conectores** — token/URL/proyecto de ClickUp, Jira y GitLab, con **probar conexión**; tokens
@@ -64,7 +76,19 @@ Todo corre en tu máquina; no hay servidor remoto. Los secretos viven en archivo
 - **📁 Repos** — mapa `repo → carpeta` donde arranca cada worker.
 - **⚙ Workflows** — editor de las etapas del loop (icono/label/instrucción, `verifyAfter`), global y
   **por repo** (override completo que hereda el default), + **variables por repo** (inyectadas en
-  `curl.env`) y **comando de inicio** por repo.
+  `curl.env`), **comando de inicio** y **modelos Planner/Worker** por repo. El pane arranca en el
+  **Planner** (`opus`) y cambia al **Worker** (`sonnet`) en la frontera plan→impl; también hay
+  override por lanzamiento en el modal de Lanzar. Nota: en el Claude actual, `/model <worker>` setea
+  directo y **también repunta el default global** del operador ("saved as your default for new
+  sessions"); es inocuo para Ronin porque cada worker arranca con `--model <planner>` explícito, pero
+  tenlo presente. El engine verifica el cambio por la línea de confirmación (`Set model to <worker>`),
+  no por un banner persistente.
+  - **`verifyCmd` / `maxRetries` por etapa** (gate cuantitativo): una etapa puede declarar un comando
+    shell (exit 0 = pass) que corre en el `cwd` del worker al completarla; si falla, se reintenta hasta
+    `maxRetries` (default 2) y, agotados, la etapa se marca **fallida** en el stepper sin avanzar a
+    `done` (nada de falso verde). ⚠️ **Ejecuta shell arbitrario** → sólo se honra desde el override
+    **por-repo** (gitignored, mismo trust boundary que `startCommand`/`vars`); en el workflow global
+    (git-tracked) se ignora, y nunca se acepta de fuentes remotas (webhook/DM).
 - **✍️ Prompts** — edita las 6 plantillas de prompt que reciben los workers (ad-hoc, ad-hoc complejo,
   lanzar flujo, investigar, PR, verificador), con placeholders y restaurar-default.
 - **Tema claro/oscuro** (default claro, estilo LKMX) con toggle persistido.
@@ -126,6 +150,9 @@ secretos: `.env`, `settings.json`, `curl-env.json`, `repo-config.json`.
 | `COWORK_MODE` | `simulated` | `live` activa tmux real |
 | `COWORK_LIEBRE_ROOT` | `.../code/lkmx/liebre` | raíz de los repos |
 | `COWORK_CLAUDE_CMD` | `claude --permission-mode bypassPermissions` | comando del worker |
+| `COWORK_PLANNER_MODEL` | `opus` | modelo con el que **arranca** el pane (Planner/advisor; `--model`) |
+| `COWORK_WORKER_MODEL` | `sonnet` | modelo al que se cambia en la fase de impl (Worker; `/model` tras "PLAN APPROVED") |
+| `COWORK_WORKTREE_HOME` | `~/.cowork/worktrees` | base de los git worktrees efímeros por worker (P1) |
 | `COWORK_CLICKUP_TOKEN` / `COWORK_JIRA_*` / `COWORK_GITLAB_*` | — | credenciales de conectores |
 | `COWORK_REPORT_SCHEDULE` | `0` | `1` activa el scheduler de reportes diario/semanal |
 | `COWORK_REPORT_DAILY_AT` / `COWORK_REPORT_WEEKLY_DAY` | `19:00` / `5` | hora del diario y día del semanal (0=Dom…6=Sáb) |
