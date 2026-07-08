@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { MODEL_GROUPS, MODEL_INHERIT, isKnownModel } from "./models";
 import {
   attachWorker,
   evidenceFileUrl,
@@ -612,6 +613,28 @@ function TaskDetailWindow({ worker, task, stages, onClose }: { worker: Worker; t
   );
 }
 
+/**
+ * Selector de modelo Claude (Planner / Worker). `<select>` estricto con la lista curada
+ * de `models.ts`. `value:""` = hereda el default. Si el valor actual no está en la lista
+ * (p. ej. un modelo pineado a mano antes de esta feature), lo inyecta como opción extra
+ * para que el select nunca lo pierda al re-guardar.
+ */
+function ModelSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <select className="repos-path model-select" value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value={MODEL_INHERIT.value}>{MODEL_INHERIT.label}</option>
+      {MODEL_GROUPS.map((g) => (
+        <optgroup key={g.label} label={g.label}>
+          {g.options.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </optgroup>
+      ))}
+      {!isKnownModel(value) && <option value={value}>{value} (personalizado)</option>}
+    </select>
+  );
+}
+
 /** Pre-launch step: turn workflow stages on/off for this run. */
 function LaunchModal({ task, onClose }: { task: Task; onClose: () => void }) {
   const [wf, setWf] = useState<WorkflowConfig | null>(null);
@@ -692,13 +715,11 @@ function LaunchModal({ task, onClose }: { task: Task; onClose: () => void }) {
             <div className="drawer-sub">Modelos (override para esta corrida; vacío = default por repo)</div>
             <div className="repos-default">
               <span>Planner:</span>
-              <input className="repos-path" placeholder="opus (default)" value={plannerModel}
-                onChange={(e) => setPlannerModel(e.target.value)} />
+              <ModelSelect value={plannerModel} onChange={setPlannerModel} />
             </div>
             <div className="repos-default">
               <span>Worker:</span>
-              <input className="repos-path" placeholder="sonnet (default)" value={workerModel}
-                onChange={(e) => setWorkerModel(e.target.value)} />
+              <ModelSelect value={workerModel} onChange={setWorkerModel} />
             </div>
           </div>
         )}
@@ -1156,21 +1177,11 @@ function RepoOverrideEditor({ repo }: { repo: string }) {
 
           <div className="repos-default">
             <span>Modelo Planner:</span>
-            <input
-              className="repos-path"
-              placeholder="opus (default) — arranca el pane"
-              value={plannerModel}
-              onChange={(e) => { setPlannerModel(e.target.value); setSaved(false); }}
-            />
+            <ModelSelect value={plannerModel} onChange={(v) => { setPlannerModel(v); setSaved(false); }} />
           </div>
           <div className="repos-default">
             <span>Modelo Worker:</span>
-            <input
-              className="repos-path"
-              placeholder="sonnet (default) — se activa en impl"
-              value={workerModel}
-              onChange={(e) => { setWorkerModel(e.target.value); setSaved(false); }}
-            />
+            <ModelSelect value={workerModel} onChange={(v) => { setWorkerModel(v); setSaved(false); }} />
           </div>
         </>
       )}

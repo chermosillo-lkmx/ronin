@@ -512,6 +512,11 @@ h2.mt { margin-top: 26px; }
 .repos-key { flex: 0 0 220px; font-family: "JetBrains Mono", monospace; }
 .repos-path { flex: 1; min-width: 0; }
 .repos-key:focus, .repos-path:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+.model-select { cursor: pointer; appearance: none; -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+  padding-right: 28px; }
+.model-select optgroup, .model-select option { background: var(--panel-2); color: var(--ink); }
 .repos-default { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
 .repos-default span { color: var(--muted); white-space: nowrap; }
 
