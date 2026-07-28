@@ -1,4 +1,4 @@
-import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, Snapshot, WorkflowConfig } from "./types";
+import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PaneRole, PaneView, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, Snapshot, WorkflowConfig } from "./types";
 
 /** Subscribe to live snapshots via SSE. Returns an unsubscribe fn. */
 export function subscribeStream(
@@ -18,10 +18,18 @@ export function subscribeStream(
   return () => es.close();
 }
 
+/** Overrides por lanzamiento: modelos + (modo Driver) mode/reviewTool. Se re-validan en el server. */
+export interface LaunchOverrides {
+  plannerModel?: string;
+  workerModel?: string;
+  mode?: "driver";
+  reviewTool?: "codex" | "agent";
+}
+
 export async function launchTask(
   taskId: string,
   stageKeys?: string[],
-  models?: { plannerModel?: string; workerModel?: string }
+  models?: LaunchOverrides
 ): Promise<void> {
   await fetch(`/api/tasks/${taskId}/launch`, {
     method: "POST",
@@ -114,16 +122,56 @@ export async function stopWorker(workerId: string): Promise<void> {
   await fetch(`/api/workers/${workerId}/stop`, { method: "POST" });
 }
 
-export async function attachWorker(workerId: string): Promise<void> {
-  await fetch(`/api/workers/${workerId}/attach`, { method: "POST" });
+/** Abre Terminal.app. Con `role` (modo driver) zoomea antes ese pane; si no se pudo, no abre nada. */
+export async function attachWorker(workerId: string, role?: PaneRole): Promise<void> {
+  const r = await fetch(`/api/workers/${workerId}/attach`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(role ? { role } : {}),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.error || "no se pudo abrir la terminal");
+  }
+}
+
+export interface PanesResult {
+  panes: PaneView[];
+  zoomed: PaneRole | null;
+}
+
+/** Los 4 panes de una sesión driver con su estado. null si no hay sesión o el layout está degradado. */
+export async function getWorkerPanes(id: string): Promise<PanesResult | null> {
+  const r = await fetch(`/api/workers/${id}/panes`);
+  return r.ok ? r.json() : null;
+}
+
+/**
+ * Zoom de tmux sobre un pane (`null` → volver a los 4 panes). OJO: el zoom es estado de la VENTANA
+ * tmux, no del cliente — lo ven todos los attachados (otras pestañas y Terminal.app).
+ */
+export async function focusPane(id: string, role: PaneRole | null): Promise<void> {
+  const r = await fetch(`/api/workers/${id}/focus`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.error || "no se pudo enfocar el pane");
+  }
 }
 
 export async function refreshTasks(): Promise<void> {
   await fetch("/api/refresh", { method: "POST" });
 }
 
-export async function getPane(id: string): Promise<{ hasSession: boolean; pane: string } | null> {
-  const r = await fetch(`/api/workers/${id}/pane`);
+/** Texto del pane. `role` (modo driver) elige cuál; sin él, el pane del driver. */
+export async function getPane(
+  id: string,
+  role?: PaneRole
+): Promise<{ hasSession: boolean; pane: string } | null> {
+  const r = await fetch(`/api/workers/${id}/pane${role ? `?role=${encodeURIComponent(role)}` : ""}`);
   return r.ok ? r.json() : null;
 }
 

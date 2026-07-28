@@ -10,14 +10,19 @@ import {
   markModelSwitched,
   markModelSwitchFailed,
   markVerifierSpawned,
+  lastSentinelAt,
   modelSwitched,
   modelSwitchFailed,
   readEvidence,
+  parseParkedLimit,
+  readDriverInfo,
   readModelsInfo,
+  readSentinelsTail,
   readVerifyState,
   removeCycleDir,
   verifierSpawned,
   verifyPassed,
+  writeDriverInfo,
   writeModelsInfo,
   writeVerifyState,
 } from "./stages.js";
@@ -32,6 +37,7 @@ import {
   modelSwitchConfirmed,
   pickerOffersModel,
   sanitizeModel,
+  sanitizeReviewTool,
   withModel,
 } from "./models.js";
 import {
@@ -44,12 +50,14 @@ import {
   worktreePathForSession,
 } from "./worktree.js";
 import { getAction, getActions } from "./actions.js";
-import { buildActionPrompt, buildResearchPrompt, buildVerifierPrompt, buildWorkerPrompt } from "./templates.js";
+import { buildActionPrompt, buildDriverPrompt, buildResearchPrompt, buildVerifierPrompt, buildWorkerPrompt } from "./templates.js";
 import {
   eligibleVerifyStages,
   gateHoldsDone,
   liveMapFor,
   resolveFlow,
+  DRIVER_FLOW,
+  DRIVER_STAGES,
   shouldSwitchModel,
   stepperFor,
   verifyGateCap,
@@ -58,7 +66,11 @@ import {
 import { stopTtyd } from "./ttyd.js";
 import { addTask, emit, findTask, findWorker, nextWorkerLabel, removeWorker, setMode, tasks, workers } from "./state.js";
 import {
+  applyZoom,
   capturePane,
+  capturePaneSafe,
+  claudeAlive,
+  createDriverWindow,
   createSession,
   hasSession,
   isBusy,
@@ -66,12 +78,23 @@ import {
   lastMeaningfulLine,
   listSessions,
   openTerminal,
+  paneStatus,
   parseContextPressure,
+  parsePaneId,
+  pastePrompt,
+  promptPending,
+  readPaneRoles,
+  readSessionReviewTool,
+  readZoomState,
   sendKeys,
   sendText,
+  setSessionReviewTool,
   tmuxAvailable,
+  PANE_ROLES,
+  type PaneRole,
+  type ZoomOutcome,
 } from "./tmux.js";
-import type { CustomAction, Task, TaskStatus, Worker, WorkerState } from "./types.js";
+import type { CustomAction, DriverPanes, PaneView, Task, TaskStatus, Worker, WorkerState } from "./types.js";
 
 function logEvent(type: "launch" | "complete" | "stop", task: Task, evidence?: string): void {
   recordEvent({
@@ -127,6 +150,7 @@ const RESEARCH_STAGES: WfStage[] = [
   { key: "done",          label: "Done",         icon: "✓"  },
 ];
 const RESEARCH_FLOW: { stages: WfStage[]; verifyAfter: string | null } = { stages: RESEARCH_STAGES, verifyAfter: null };
+
 // Per-worker resolved flow (the per-launch enabled stages). Drives that worker's
 // prompt, stepper, stage detection and verifier. Missing → fall back to the global
 // workflow (e.g. workers rediscovered after a restart).
@@ -264,6 +288,18 @@ const READY = /for shortcuts|esc to interrupt|bypass permissions on|auto mode on
  * dismiss boot dialogs (trust / bypass warning), then type + submit.
  */
 async function sendWhenReady(session: string, prompt: string): Promise<void> {
+  // TODO prompt inicial (driver Y scripted) se entrega por bracketed paste + pausa antes del
+  // Enter. Con send-keys -l + Enter inmediato, el Enter llega mientras la caja de input sigue
+  // componiendo los trozos pegados y se lo TRAGA: el prompt queda escrito pero sin enviar,
+  // indefinidamente. Medido en vivo: falla reproducible a 13KB, funciona con paste. Los prompts
+  // scripted son más cortos y hoy no lo disparan, pero el modo de falla es el mismo si crecen
+  // (una descripción de ticket larga basta), y es silencioso — el worker simplemente nunca
+  // arranca. `sendText` NO cambia: los slash commands (/model), el Enter de los diálogos y las
+  // respuestas cortas del operador siguen por el camino de siempre.
+  const deliver = async () => {
+    await pastePrompt(session, prompt, AUTOSUBMIT).catch(() => {});
+    if (AUTOSUBMIT) await ensureSubmitted(session);
+  };
   for (let i = 0; i < 24; i++) {
     await delay(700);
     let pane = "";
@@ -277,11 +313,25 @@ async function sendWhenReady(session: string, prompt: string): Promise<void> {
       continue;
     }
     if (READY.test(pane)) {
-      await sendText(session, prompt, AUTOSUBMIT).catch(() => {});
+      await deliver();
       return;
     }
   }
-  await sendText(session, prompt, AUTOSUBMIT).catch(() => {}); // fallback
+  await deliver(); // fallback
+}
+
+/**
+ * Segunda capa tras un paste largo: verificar que el prompt SALIÓ en vez de asumirlo. Si el pane
+ * sigue idle con texto compuesto en la caja, reenvía Enter de forma acotada. Un Enter de más
+ * sobre una caja vacía es inocuo; un prompt que nunca se envía deja el ciclo colgado para siempre.
+ */
+async function ensureSubmitted(target: string): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    await delay(1500);
+    const pane = await capturePane(target).catch(() => "");
+    if (!pane || !promptPending(pane)) return; // ocupado o sin nada pendiente ⇒ entró
+    await sendKeys(target, "Enter").catch(() => {});
+  }
 }
 
 /** tmux session names can't contain dots/colons; keep it readable and unique. */
@@ -307,6 +357,81 @@ async function uniqueSession(base: string): Promise<string> {
 export interface LaunchOpts {
   plannerModel?: string;
   workerModel?: string;
+  mode?: "scripted" | "driver";
+  reviewTool?: "codex" | "agent";
+}
+
+// ---- Bloques compartidos por launchLive y launchDriverLive. Extraídos SIN cambiar
+// comportamiento ni orden (extract-method mecánico): launchLive los llama en la misma
+// secuencia de siempre, así el camino scripted no gana un solo condicional. ----
+
+/** El worker toma el tablero: se registra, marca la tarea como corriendo y publica. */
+function registerTaskWorker(task: Task, worker: Worker): void {
+  workers.push(worker);
+  task.workerId = worker.id;
+  task.status = "running";
+  logEvent("launch", task);
+  emit();
+}
+
+/**
+ * Fresh launch: wipe any stale cycle dir left by a prior crash reusing the same
+ * deterministic session name (stale sentinels/latches would misreport the stage or
+ * skip the plan→impl model switch — F3).
+ */
+function freshCycleDir(worker: Worker): void {
+  removeCycleDir(worker.cycle!);
+  ensureCycleDir(worker.cycle!);
+}
+
+/** Vars por repo ({var:KEY} en el prompt) + creds de curl del proyecto en el cycle dir. */
+function writeLaunchArtifacts(task: Task, cycle: string): Record<string, string> {
+  const vars = getRepoVars(task.repo);
+  writeCurlEnv(task.repo, cycle, vars);
+  return vars;
+}
+
+/** Enrich the prompt with the full ticket description (best-effort, ClickUp only). */
+async function enrichTaskBody(task: Task): Promise<void> {
+  if (task.source === "clickup" && !task.body) {
+    const desc = await fetchClickUpDescription(task.id);
+    if (desc) task.body = desc;
+  }
+}
+
+/**
+ * P1: isolate this worker in an ephemeral git worktree so two workers over the same repo
+ * don't collide. Fallback to the repo root (with a visible note) if the repo isn't git or
+ * the worktree can't be created — never abort the launch.
+ */
+async function acquireWorktree(
+  worker: Worker,
+  cwd: string,
+  real: boolean,
+  session: string
+): Promise<{ launchCwd: string; note: string | null }> {
+  let launchCwd = cwd;
+  let note: string | null = null;
+  if (real && (await isGitRepo(cwd))) {
+    const wt = worktreePathForSession(cwd, session);
+    try {
+      await addWorktree(cwd, wt, branchForSession(session));
+      worker.worktree = wt;
+      worker.cwd = wt;
+      launchCwd = wt;
+    } catch {
+      note = "⚠️ worktree no disponible · repo raíz compartido";
+    }
+  }
+  return { launchCwd, note };
+}
+
+/** P1f: don't leak the worktree if the session failed to start. Fire-and-forget, nunca lanza. */
+function rollbackWorktree(worker: Worker, repoRoot: string, session: string): void {
+  if (worker.worktree) {
+    void removeWorktree(repoRoot, worker.worktree, branchForSession(session)).catch(() => {});
+    worker.worktree = undefined;
+  }
 }
 
 async function launchLive(taskId: string, stageKeys?: string[], opts: LaunchOpts = {}): Promise<Worker | null> {
@@ -332,17 +457,9 @@ async function launchLive(taskId: string, stageKeys?: string[], opts: LaunchOpts
     stages: stepSteps(flow),
   };
   workerFlow.set(id, flow);
-  workers.push(worker);
-  task.workerId = worker.id;
-  task.status = "running";
-  logEvent("launch", task);
-  emit();
+  registerTaskWorker(task, worker);
 
-  // Fresh launch: wipe any stale cycle dir left by a prior crash reusing the same
-  // deterministic session name (stale sentinels/latches would misreport the stage or
-  // skip the plan→impl model switch — F3).
-  removeCycleDir(worker.cycle!);
-  ensureCycleDir(worker.cycle!);
+  freshCycleDir(worker);
   // F0: Planner model injected as --model over the repo's start command (existing --model wins).
   const plannerModel = sanitizeModel(opts.plannerModel || getRepoPlannerModel(task.repo));
   // Switch to the Worker model at plan→impl only for real implementer launches (never PR).
@@ -350,29 +467,9 @@ async function launchLive(taskId: string, stageKeys?: string[], opts: LaunchOpts
     worker: sanitizeModel(opts.workerModel || getRepoWorkerModel(task.repo)),
     switchEnabled: launchSwitchEnabled(task.source),
   });
-  const vars = getRepoVars(task.repo); // per-repo test vars (merged into curl.env + {var:KEY} in the prompt)
-  writeCurlEnv(task.repo, worker.cycle!, vars); // per-project dev creds + repo vars for the curl stage
-  // Enrich the prompt with the full ticket description (best-effort, ClickUp only).
-  if (task.source === "clickup" && !task.body) {
-    const desc = await fetchClickUpDescription(task.id);
-    if (desc) task.body = desc;
-  }
-  // P1: isolate this worker in an ephemeral git worktree so two workers over the same repo
-  // don't collide. Fallback to the repo root (with a visible note) if the repo isn't git or
-  // the worktree can't be created — never abort the launch.
-  let launchCwd = cwd;
-  let worktreeNote: string | null = null;
-  if (real && (await isGitRepo(cwd))) {
-    const wt = worktreePathForSession(cwd, session);
-    try {
-      await addWorktree(cwd, wt, branchForSession(session));
-      worker.worktree = wt;
-      worker.cwd = wt;
-      launchCwd = wt;
-    } catch {
-      worktreeNote = "⚠️ worktree no disponible · repo raíz compartido";
-    }
-  }
+  const vars = writeLaunchArtifacts(task, worker.cycle!);
+  await enrichTaskBody(task);
+  const { launchCwd, note: worktreeNote } = await acquireWorktree(worker, cwd, real, session);
   try {
     await createSession(session, launchCwd, withModel(getRepoStartCommand(task.repo), plannerModel));
     const prompt = buildWorkerPrompt(task, worker.cycle!, flow, vars);
@@ -387,13 +484,97 @@ async function launchLive(taskId: string, stageKeys?: string[], opts: LaunchOpts
           : "💬 template en el prompt (revisa y Enter)"
         : "⚠️ repo no encontrado · cwd de respaldo");
   } catch {
-    // P1f: don't leak the worktree if the session failed to start.
-    if (worker.worktree) {
-      void removeWorktree(cwd, worker.worktree, branchForSession(session)).catch(() => {});
-      worker.worktree = undefined;
-    }
+    rollbackWorktree(worker, cwd, session);
     worker.state = "idle";
     worker.stage = "✖ error al crear la sesión tmux";
+  }
+  emit();
+  return worker;
+}
+
+/**
+ * Modo Driver: una ventana tmux de 4 panes con un Claude DRIVER real que orquesta a los otros
+ * tres corriendo /tmux-worker-loop en modo provisioned-panes. Los slots son posiciones, no roles:
+ * worker=Implementer (sonnet), review=Reviewer (opus/codex), verify=Brain (opus). El mapeo está
+ * en el skill (references/provisioned-panes.md) y el driver lo escribe en <CYCLE_DIR>/panes.env.
+ *
+ * Comparte con launchLive todos los helpers de preparación (registro, cycle dir, curl.env,
+ * enriquecimiento, worktree + rollback), así que ninguno de esos bloques está duplicado — que
+ * era el riesgo real de tener dos caminos de lanzamiento.
+ */
+async function launchDriverLive(taskId: string, opts: LaunchOpts = {}): Promise<Worker | null> {
+  const task = findTask(taskId);
+  if (!task) return null;
+  // Mismo guard que launchLive: un ticket con worker vivo no se relanza. Consecuencia visible
+  // en la UI: para pasar de Driver a rápido (o al revés) hay que parar el worker primero.
+  if (task.workerId) return findWorker(task.workerId) ?? null;
+
+  const { cwd, real } = resolveCwd(task.repo);
+  const id = `d${Date.now().toString(36)}`;
+  const session = await uniqueSession(`${sanitizeKey(task.key)}-driver`);
+  const reviewTool = sanitizeReviewTool(opts.reviewTool);
+  const worker: Worker = {
+    id,
+    label: nextWorkerLabel(),
+    repo: task.repo,
+    taskId: task.id,
+    state: "starting",
+    stage: "⏳ abriendo 4 panes…",
+    startedAt: Date.now(),
+    session,
+    cwd,
+    cycle: cycleDirForSession(session),
+    stages: stepSteps(DRIVER_FLOW),
+    mode: "driver",
+    reviewTool,
+  };
+  workerFlow.set(id, DRIVER_FLOW);
+  registerTaskWorker(task, worker);
+
+  freshCycleDir(worker);
+  // Dos neutralizaciones PERSISTIDAS: tras un reinicio worker.mode aún no existe cuando el
+  // poller corre, así que los guards en memoria no bastan. models.json apaga el /model (que
+  // se teclearía en el pane activo, posiblemente el de codex) y el latch de verificador evita
+  // que se lance un 5º claude en una sesión aparte.
+  // worker:"" apaga el switch, NO descarta el modelo del Implementer: en modo Driver cada rol
+  // arranca con su propio --model y ese valor viaja por el prompt (buildDriverPrompt), no por
+  // models.json. Ver el bloque de modelos más abajo.
+  writeModelsInfo(worker.cycle!, { worker: "", switchEnabled: false });
+  markVerifierSpawned(worker.cycle!);
+  writeDriverInfo(worker.cycle!, { reviewTool });
+  const vars = writeLaunchArtifacts(task, worker.cycle!);
+  await enrichTaskBody(task);
+  const { launchCwd, note } = await acquireWorktree(worker, cwd, real, session);
+  try {
+    const plannerModel = sanitizeModel(opts.plannerModel || getRepoPlannerModel(task.repo));
+    // El workerModel NO se pierde por escribir models.json vacío arriba: en modo Driver no hay
+    // switch plan→impl que lo consuma, así que viaja al prompt y el driver lo aplica como
+    // `--model` al arrancar el pane del Implementer. Sin esto, un override por repo/UI se
+    // ignoraría en silencio aquí y sólo funcionaría en modo rápido.
+    const workerModel = sanitizeModel(opts.workerModel || getRepoWorkerModel(task.repo));
+    const panes = await createDriverWindow(
+      session,
+      launchCwd,
+      withModel(getRepoStartCommand(task.repo), plannerModel)
+    );
+    worker.panes = panes;
+    await setSessionReviewTool(session, reviewTool);
+    // Se apunta al pane DRIVER, no a la sesión: tras los splits el pane activo es otro.
+    void sendWhenReady(
+      panes.driver,
+      buildDriverPrompt(task, worker.cycle!, panes, reviewTool, vars, {
+        planner: plannerModel,
+        worker: workerModel,
+      })
+    );
+    worker.state = "idle";
+    worker.stage = note ?? (real ? "🖥️ 4 panes · driver arrancando…" : "⚠️ repo no encontrado · cwd de respaldo");
+  } catch {
+    rollbackWorktree(worker, cwd, session);
+    // Nunca dejar media ventana viva: el prompt del driver referencia panes que quizá no existen.
+    await killSession(session);
+    worker.state = "idle";
+    worker.stage = "✖ error al crear la sesión driver";
   }
   emit();
   return worker;
@@ -581,8 +762,18 @@ export async function launchAction(taskId: string, actionKey: string): Promise<W
   return activeMode === "live" ? launchActionLive(taskId, actionKey) : launchActionSimulated(taskId, actionKey);
 }
 
-/** Current pane content of a worker's terminal (live mode). */
-export async function workerPane(workerId: string): Promise<{ hasSession: boolean; pane: string } | null> {
+/**
+ * Current pane content of a worker's terminal (live mode). `role` (sólo modo driver) elige QUÉ
+ * pane; sin él se lee el pane del driver.
+ *
+ * Antes se leía `capturePane(worker.session)`, o sea el pane ACTIVO — que con `mouse on` cambia
+ * cada vez que el operador hace click dentro del iframe. Ya era incorrecto para modo driver, y con
+ * el zoom (que también cambia el pane activo) pasaría a estar mal casi siempre.
+ */
+export async function workerPane(
+  workerId: string,
+  role?: PaneRole | null
+): Promise<{ hasSession: boolean; pane: string } | null> {
   const worker = findWorker(workerId);
   if (!worker) return null;
   if (!worker.session) {
@@ -594,11 +785,101 @@ export async function workerPane(workerId: string): Promise<{ hasSession: boolea
         `Para una terminal real (claude en el repo + evidencia), reinicia con:\n  npm run dev:live`,
     };
   }
+  const target = role ? resolvePaneTarget(worker, role) : (paneTargetFor(worker) ?? worker.session);
+  if (!target) return { hasSession: true, pane: "(no se pudo resolver ese pane: layout degradado)" };
   try {
-    return { hasSession: true, pane: await capturePane(worker.session) };
+    return { hasSession: true, pane: await capturePane(target) };
   } catch {
     return { hasSession: false, pane: "(sesión no disponible)" };
   }
+}
+
+// Ventana de la caché de capturas por pane. Corta a propósito: la vista pollea a 1.5s, así que
+// esto sólo colapsa las ráfagas simultáneas (varias pestañas) sin volver rancio lo que se muestra.
+const PANES_TTL_MS = 1000;
+const panesCache = new Map<string, { at: number; inflight: Promise<PanesResult> }>();
+
+export function clearPaneCache(workerId: string): void {
+  panesCache.delete(workerId);
+}
+
+export interface PanesResult {
+  panes: PaneView[];
+  zoomed: PaneRole | null;
+}
+
+/** Los 4 panes con su estado + qué rol está zoomeado. null: sin worker/sesión; "degraded": sin panes. */
+export async function workerPanes(workerId: string): Promise<PanesResult | null | "degraded"> {
+  const worker = findWorker(workerId);
+  if (!worker?.session) return null;
+  if (worker.mode !== "driver" || !worker.panes) return "degraded";
+  return memoTTL(panesCache, workerId, PANES_TTL_MS, () => collectPanes(worker.session!, worker.panes!));
+}
+
+/**
+ * Captura los 4 panes y deriva su estado. Toda la heurística se reusa de tmux.ts (paneStatus,
+ * lastMeaningfulLine, parseContextPressure): el dashboard no reimplementa la lógica de los skills,
+ * sólo pinta lo que el server ya calculó.
+ *
+ * El estado NO se persiste en el Worker ni viaja en el Snapshot: es un cálculo barato y guardarlo
+ * sólo arriesgaría mostrarlo rancio — el mismo criterio que ya rige driverDown/parked/stalled.
+ */
+async function collectPanes(session: string, panes: DriverPanes): Promise<PanesResult> {
+  const zoom = await readZoomState(session);
+  const views = await Promise.all(
+    PANE_ROLES.map(async (role): Promise<PaneView> => {
+      const paneId = panes[role];
+      const text = await capturePaneSafe(paneId);
+      return {
+        role,
+        paneId,
+        status: paneStatus(text),
+        hint: text ? lastMeaningfulLine(text) : "",
+        contextPressure: text ? (parseContextPressure(text) ?? undefined) : undefined,
+      };
+    })
+  );
+  // El zoom se lee de tmux en cada llamada, nunca se memoriza: es estado compartido y cualquier
+  // otro cliente (u otra pestaña) puede cambiarlo sin avisarnos.
+  const zoomedRole =
+    zoom?.zoomed ? (PANE_ROLES.find((r) => panes[r] === zoom.active) ?? null) : null;
+  return { panes: views, zoomed: zoomedRole };
+}
+
+/**
+ * Resultado tipado en vez de booleano: "no hay sesión", "el layout está degradado" y "tmux no
+ * aplicó el zoom" piden mensajes distintos al operador, y un boolean los colapsa en un 404
+ * engañoso.
+ */
+export type FocusResult = "ok" | "noop" | "no-session" | "degraded" | "tmux-failed";
+
+/**
+ * La I/O de tmux/Terminal.app, inyectable. Mismo patrón que el `now` de memoTTL: el repo no usa
+ * framework de mocking, así que la costura es un parámetro con default. Existe para poder probar
+ * que attachWorker ABORTA cuando el zoom no se confirmó — la garantía entera de esa feature.
+ */
+export interface FocusDeps {
+  zoom: (session: string, target: string | null, driverPane: string) => Promise<ZoomOutcome>;
+  terminal: (session: string) => Promise<void>;
+}
+const REAL_FOCUS: FocusDeps = { zoom: applyZoom, terminal: openTerminal };
+
+/** Zoomea un rol (o `null` para volver al 2×2). El zoom es GLOBAL a la ventana: lo ven todos. */
+export async function focusPane(
+  workerId: string,
+  role: PaneRole | null,
+  deps: FocusDeps = REAL_FOCUS
+): Promise<FocusResult> {
+  const worker = findWorker(workerId);
+  if (!worker?.session) return "no-session";
+  const driverPane = resolvePaneTarget(worker, "driver");
+  if (!driverPane) return "degraded";
+  const target = role ? resolvePaneTarget(worker, role) : null;
+  if (role && !target) return "degraded";
+  const outcome = await deps.zoom(worker.session, target, driverPane);
+  if (outcome === "ok" || outcome === "noop") return outcome;
+  console.warn(`[claude-cowork] zoom en ${worker.session} → ${role ?? "4 panes"}: ${outcome}`);
+  return "tmux-failed";
 }
 
 /**
@@ -647,6 +928,8 @@ async function stopLive(workerId: string): Promise<boolean> {
   workerFlow.delete(workerId);
   modelSwitchAttempts.delete(workerId);
   clearWorkerVerify(workerId);
+  clearDriverHealth(workerId);
+  clearPaneCache(workerId);
   removeWorker(workerId);
   emit();
   return true;
@@ -738,10 +1021,10 @@ async function runVerifyStage(worker: Worker, gate: { key: string; verifyCmd: st
     writeVerifyState(worker.cycle, gate.key, outcome);
     if (outcome.status === "pending" && worker.session) {
       // D1: re-prompt to fix, only when idle (never write into a busy pane). No sentinel deletion.
-      const pane = await capturePane(worker.session).catch(() => "");
+      const pane = await capturePane(paneTargetFor(worker) ?? worker.session).catch(() => "");
       if (!isBusy(pane)) {
         await sendText(
-          worker.session,
+          paneTargetFor(worker) ?? worker.session,
           `⚠️ verifyCmd de la etapa "${gate.key}" falló (intento ${outcome.attempts}/${gate.maxRetries}). ` +
             `Corrige y vuelve a tocar el sentinel ${gate.key}. Salida:\n${truncate(res.output)}`,
           true
@@ -803,6 +1086,10 @@ async function maybeSwitchModel(
   flow: { stages: WfStage[]; verifyAfter: string | null },
   stageKey: string
 ): Promise<void> {
+  // Modo driver: el switch de modelos es del skill. Además `/model` se enviaría con sendKeys al
+  // pane ACTIVO de la ventana — que puede ser el de codex, o un shell desnudo donde el texto se
+  // EJECUTA. El guard va aquí (no en el call site) para cubrir cualquier llamador futuro.
+  if (worker.mode === "driver") return;
   if (!worker.session || !worker.cycle) return;
   const info = readModelsInfo(worker.cycle);
   if (!info) return;
@@ -872,6 +1159,131 @@ async function maybeSwitchModel(
   }
 }
 
+// ============================================================
+//  Modo Driver — salud del pane driver (helpers PUROS)
+// ============================================================
+
+/**
+ * Target de pane para TODA la I/O del servidor. En modo driver es el pane DRIVER: un `-t
+ * <session>` pelado resuelve al pane ACTIVO, y con `mouse on` cada click del operador dentro
+ * del iframe lo cambia — leyendo/escribiendo el pane equivocado. Scripted no cambia.
+ */
+export function paneTargetFor(w: {
+  mode?: "scripted" | "driver";
+  panes?: DriverPanes;
+  session?: string;
+}): string | undefined {
+  return (w.mode === "driver" ? w.panes?.driver : undefined) ?? w.session;
+}
+
+/**
+ * Rol pedido por el CLIENTE → el `%N` de ese pane. Deliberadamente más estricta que paneTargetFor:
+ * ahí el fallback al nombre de sesión es aceptable (es I/O del propio server sobre un worker
+ * scripted), pero aquí el rol viene de fuera y un `-t <session>` resuelve al pane ACTIVO — que el
+ * mouse del operador cambia. Pedir el pane "worker" y recibir el que estuviera activo es peor que
+ * un error: no se nota. Todo lo que no se resuelva con certeza es null ⇒ degradar visible.
+ */
+export function resolvePaneTarget(
+  // Acepta `session` para tener la MISMA forma que paneTargetFor y dejar explícito que aquí no se
+  // usa como fallback: es justo la diferencia entre las dos funciones.
+  w: { mode?: "scripted" | "driver"; panes?: DriverPanes; session?: string },
+  role: string
+): string | null {
+  if (w.mode !== "driver" || !w.panes) return null;
+  if (!(PANE_ROLES as readonly string[]).includes(role)) return null;
+  if (!Object.hasOwn(w.panes, role)) return null;
+  // parsePaneId revalida la forma %N: un registro corrupto no debe llegar a un `-t` de tmux.
+  return parsePaneId(w.panes[role as PaneRole] ?? "");
+}
+
+/**
+ * Memoiza por clave con TTL corto. Guarda la promesa EN VUELO, no el valor resuelto: con una caché
+ * de sólo-valor, N pestañas que abran la vista a la vez encuentran el hueco vacío y disparan N×4
+ * `capture-pane` simultáneos — justo la amplificación que la caché venía a evitar, y en el peor
+ * momento. Un rechazo no se cachea (si no, un blip de tmux rompería la vista durante todo el TTL).
+ * `now` es inyectable para poder testear el TTL sin dormir.
+ */
+export function memoTTL<T>(
+  cache: Map<string, { at: number; inflight: Promise<T> }>,
+  key: string,
+  ttlMs: number,
+  fn: () => Promise<T>,
+  now: () => number = Date.now
+): Promise<T> {
+  const hit = cache.get(key);
+  if (hit && now() - hit.at <= ttlMs) return hit.inflight;
+  const inflight = fn();
+  cache.set(key, { at: now(), inflight });
+  void inflight.catch(() => {
+    if (cache.get(key)?.inflight === inflight) cache.delete(key);
+  });
+  return inflight;
+}
+
+// Polls consecutivos sin chrome de claude antes de declarar caído el driver (~6s a 2s/poll).
+// Un `capture-pane` puede caer justo en un repintado, así que un solo fallo no basta.
+const DRIVER_DOWN_POLLS = 3;
+// Umbral de la señal blanda de atasco: por encima del turno típico de un Claude trabajando
+// (que además marca el pane busy y resetea el contador) y muy por debajo de un ciclo completo.
+const STALL_MS = 15 * 60_000;
+const STALL_IDLE_POLLS = 2;
+
+/** Minutos sin avance si aplica la señal blanda de atasco; null si no. */
+export function stallNote(msSinceProgress: number, idlePolls: number): { minutes: number } | null {
+  if (idlePolls < STALL_IDLE_POLLS || msSinceProgress < STALL_MS) return null;
+  return { minutes: Math.floor(msSinceProgress / 60_000) };
+}
+
+export interface DriverHealth {
+  driverDown?: boolean;
+  parked?: { resetAt?: string };
+  stalled?: { minutes: number };
+  stage?: string;      // etiqueta que sustituye a worker.stage cuando algo va mal
+  needsInput: boolean; // driverDown/parked piden acción; stalled es sólo una nota
+}
+
+/**
+ * Resuelve los 3 estados de salud con precedencia driverDown > parked > stalled, en un solo
+ * lugar y testeable sin tmux. Se mantienen separados (y separados de needsInput) porque piden
+ * acciones OPUESTAS del operador: caído → relanzar; parqueado → esperar el reset y mandar
+ * RESUME; atascado → quizá sólo falta un `touch` del sentinel.
+ */
+export function driverHealth(input: {
+  paneHasClaude: boolean;
+  claudeSeen: boolean;
+  downPolls: number;
+  parked: { resetAt?: string } | null;
+  idlePolls: number;
+  msSinceProgress: number;
+}): DriverHealth {
+  // claudeSeen es el latch de arranque: mientras claude nunca haya pintado su TUI en este pane
+  // no se puede afirmar que "murió" — simplemente todavía no arrancó (sendWhenReady tolera ~17s).
+  if (input.claudeSeen && !input.paneHasClaude && input.downPolls >= DRIVER_DOWN_POLLS) {
+    return {
+      driverDown: true,
+      stage: "✖ driver caído · los panes hermanos pueden seguir corriendo",
+      needsInput: true,
+    };
+  }
+  if (input.parked) {
+    const at = input.parked.resetAt;
+    return {
+      parked: input.parked,
+      stage: `⏸ worker parqueado por cuota${at ? ` · reset ~${at}` : ""}`,
+      needsInput: true,
+    };
+  }
+  const stalled = stallNote(input.msSinceProgress, input.idlePolls);
+  if (stalled) {
+    return {
+      stalled,
+      stage: `⏳ sin avance desde hace ${stalled.minutes}m · ¿sentinel olvidado?`,
+      needsInput: false,
+    };
+  }
+  return { needsInput: false };
+}
+
 /**
  * P4: set/clear worker.contextPressure from the pane, change-gated (only reports a real change so
  * SSE doesn't churn and the log isn't spammed). Returns true when the value changed.
@@ -886,6 +1298,87 @@ export function applyContextPressure(worker: Worker, pane: string): boolean {
   return true;
 }
 
+// Estado por worker para las 3 señales de salud del modo driver (§ driverHealth).
+const claudeSeen = new Set<string>();            // el pane driver YA mostró la TUI de claude (latch de arranque)
+const driverDownPolls = new Map<string, number>(); // polls consecutivos sin chrome de claude
+const idlePolls = new Map<string, number>();       // polls consecutivos con el pane idle
+const lastProgressAt = new Map<string, number>();  // último cambio de etapa o pane ocupado
+
+export function clearDriverHealth(workerId: string): void {
+  claudeSeen.delete(workerId);
+  driverDownPolls.delete(workerId);
+  idlePolls.delete(workerId);
+  lastProgressAt.delete(workerId);
+}
+
+/**
+ * Las 3 señales de salud del modo driver, sobre el snapshot del pane que pollLive ya capturó
+ * (sin captura extra). Corre ANTES de la rama de sentinels a propósito: esa rama hace
+ * `continue`, así que un chequeo puesto en el fallback busy/idle nunca vería a un driver que ya
+ * escribió su primer sentinel — justo el caso que importa.
+ * Devuelve true si cambió algo publicable.
+ */
+export function applyDriverHealth(worker: Worker, pane: string | null, stageChanged: boolean): boolean {
+  if (worker.mode !== "driver" || !worker.cycle) return false;
+  const now = Date.now();
+  // Una captura fallida NO es una observación: no toca claudeSeen (armaría el latch de arranque
+  // sin haber visto nunca la TUI) ni los contadores (un blip reseteaba la cuenta de caídas, y
+  // "no pude leer" se contaba como idle). Simplemente no se concluye nada este poll.
+  const observed = pane !== null;
+  const alive = observed && claudeAlive(pane!);
+  if (observed) {
+    if (alive) {
+      claudeSeen.add(worker.id);
+      driverDownPolls.delete(worker.id);
+    } else {
+      driverDownPolls.set(worker.id, (driverDownPolls.get(worker.id) ?? 0) + 1);
+    }
+  }
+  const busy = observed && isBusy(pane!);
+  if (observed) idlePolls.set(worker.id, busy ? 0 : (idlePolls.get(worker.id) ?? 0) + 1);
+  // En el PRIMER poll de un worker, `stageChanged` no significa nada: no hay observación previa
+  // contra la cual comparar (un worker redescubierto llega con stageKey ya sembrado, pero si
+  // alguien lo omite el comparador fabrica un "avanzó" falso). Así que el primer poll siempre
+  // siembra del sentinel más reciente y IGNORA stageChanged — es lo que impide que un reinicio
+  // del server borre un atasco real de horas, sin depender de que el llamador lo haga bien.
+  const firstPoll = !lastProgressAt.has(worker.id);
+  if (firstPoll) {
+    lastProgressAt.set(worker.id, lastSentinelAt(worker.cycle, stepKeys(DRIVER_FLOW)) ?? now);
+  } else if (stageChanged || busy) {
+    lastProgressAt.set(worker.id, now);
+  }
+
+  const parked = parseParkedLimit(readSentinelsTail(worker.cycle)) ?? parkedFromPane(pane);
+  const health = driverHealth({
+    // Sin observación no se puede afirmar que murió → se pasa "vivo" para que driverDown no
+    // dispare; los downPolls quedan intactos, así que 3 fallos REALES seguidos sí lo disparan.
+    paneHasClaude: observed ? alive : true,
+    claudeSeen: claudeSeen.has(worker.id),
+    downPolls: driverDownPolls.get(worker.id) ?? 0,
+    parked,
+    idlePolls: idlePolls.get(worker.id) ?? 0,
+    msSinceProgress: now - (lastProgressAt.get(worker.id) ?? now),
+  });
+
+  let changed = false;
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  if (worker.driverDown !== health.driverDown) { worker.driverDown = health.driverDown; changed = true; }
+  if (!same(worker.parked, health.parked)) { worker.parked = health.parked; changed = true; }
+  if (!same(worker.stalled, health.stalled)) { worker.stalled = health.stalled; changed = true; }
+  if (health.stage && worker.stage !== health.stage) { worker.stage = health.stage; changed = true; }
+  if (health.needsInput && !worker.needsInput) { worker.needsInput = true; changed = true; }
+  return changed;
+}
+
+/** Respaldo por pane cuando el sentinels.log no existe (el contrato pide archivo + impresión). */
+function parkedFromPane(pane: string | null): { resetAt?: string } | null {
+  if (!pane) return null;
+  const m = pane.match(/===WORKER-PARKED-LIMIT:(.*?)===/);
+  if (!m) return null;
+  const at = m[1].trim();
+  return at ? { resetAt: at } : {};
+}
+
 async function pollLive(): Promise<void> {
   let changed = false;
   for (const worker of [...workers]) {
@@ -897,11 +1390,14 @@ async function pollLive(): Promise<void> {
         task.status = "queued";
         task.workerId = undefined;
       }
+      stopTtyd(worker.session); // sin esto, cada sesión que muere sola filtra un ttyd + su puerto
       await cleanupWorktree(worker); // P1: remove the worktree (dirty-guarded, refcounted)
       if (worker.cycle) removeCycleDir(worker.cycle);
       workerFlow.delete(worker.id);
       modelSwitchAttempts.delete(worker.id);
       clearWorkerVerify(worker.id);
+      clearDriverHealth(worker.id);
+      clearPaneCache(worker.id);
       removeWorker(worker.id);
       changed = true;
       continue;
@@ -914,16 +1410,27 @@ async function pollLive(): Promise<void> {
       // Reused by the busy/idle fallback below so we don't double-capture.
       let paneSnapshot: string | null = null;
       try {
-        paneSnapshot = await capturePane(worker.session);
+        // En modo driver se lee el pane DRIVER: `-t <session>` resuelve al pane ACTIVO y con
+        // `mouse on` cada click del operador dentro del iframe lo cambiaría.
+        paneSnapshot = await capturePane(paneTargetFor(worker) ?? worker.session);
       } catch {
         /* transient */
       }
       if (paneSnapshot !== null && applyContextPressure(worker, paneSnapshot)) changed = true;
       let stageKey = worker.cycle ? detectStage(worker.cycle, stepKeys(flow)) : null;
+      // Salud del driver antes de la rama de sentinels (que hace `continue`).
+      // `?? undefined` NO es cosmético: detectStage devuelve null y worker.stageKey es undefined,
+      // así que `null !== undefined` daría "avanzó" en CADA poll mientras no haya ningún sentinel
+      // — justo el caso (driver que murió antes de escribir el primero) donde más falta hace la
+      // señal de atasco. Normalizar ambos lados es lo que la deja funcionar.
+      if (applyDriverHealth(worker, paneSnapshot, (stageKey ?? undefined) !== worker.stageKey)) changed = true;
+      const driverUnhealthy = !!(worker.driverDown || worker.parked);
       // P2: run any eligible verifyCmd gates, then CAP the displayed stage at an unpassed gate so
       // the board never reaches `done` on a false green (B2). The cap consults the persisted
       // pass/fail state synchronously — no reliance on sentinel timing.
-      if (ownsBoard(worker) && worker.cycle) {
+      // Modo driver: los gates son maquinaria de "el engine es el driver" — aquí el driver es
+      // dueño de sus propias revisiones, y un re-prompt caería en el pane equivocado.
+      if (ownsBoard(worker) && worker.cycle && worker.mode !== "driver") {
         const furthestReal = detectStage(worker.cycle, flow.stages.map((s) => s.key));
         await maybeRunVerifies(worker, flow, furthestReal);
         const cap = verifyGateCap(flow.stages, furthestReal, (k) => verifyPassed(worker.cycle!, k));
@@ -960,10 +1467,12 @@ async function pollLive(): Promise<void> {
           worker.stageKey = stageKey ?? undefined;
           changed = true;
         }
-        if (worker.state !== tWorker || worker.stage !== tLabel) {
+        if (worker.state !== tWorker || (worker.stage !== tLabel && !driverUnhealthy)) {
           const reachedDone = tWorker === "done" && worker.state !== "done";
           worker.state = tWorker;
-          worker.stage = tLabel;
+          // Un driver caído o parqueado ya puso su propia etiqueta: no la pisamos con la etapa
+          // del stepper, que sería justo la información engañosa que el badge viene a corregir.
+          if (!driverUnhealthy) worker.stage = tLabel;
           if (ownsBoard(worker)) {
             const task = findTask(worker.taskId);
             if (task) {
@@ -974,12 +1483,15 @@ async function pollLive(): Promise<void> {
           // P1e: worker completed with its session still alive → reclaim the worktree now
           // (dirty-guarded: a worktree with commits/uncommitted work is kept, so real work
           // survives for inspection; only a genuinely no-op worktree is removed).
-          if (reachedDone) void cleanupWorktree(worker);
+          // En modo driver NO: el refcount sólo cuenta registros Worker, y los panes
+          // worker/review/verify no lo son → se borraría (rm -rf) el cwd de 3 procesos vivos.
+          // Ahí el worktree se reclama sólo en stopLive o al morir la sesión (4 panes muertos).
+          if (reachedDone && worker.mode !== "driver") void cleanupWorktree(worker);
           changed = true;
         }
         // Point 3: a failed OR stuck-pending gate needs operator attention → surface it (the UI
         // already highlights needsInput). A cleanly-progressing worker clears it.
-        const wantNeedsInput = gateFailed || gateStuck;
+        const wantNeedsInput = gateFailed || gateStuck || driverUnhealthy;
         if (worker.needsInput !== wantNeedsInput) {
           worker.needsInput = wantNeedsInput;
           changed = true;
@@ -989,8 +1501,10 @@ async function pollLive(): Promise<void> {
         // verifyAfter stage reached on a main worker → spawn the verifier (once). Gate on the
         // per-main-worker set AND the persisted latch (the old `verifierIds.has(worker.id)` guard
         // was ineffective — worker is the PARENT, never in verifierIds — so a restart re-spawned).
+        // Modo driver: el verificador es un PANE de la misma ventana, no una sesión aparte.
         if (
           stageKey &&
+          worker.mode !== "driver" &&
           flow.verifyAfter &&
           stageKey === flow.verifyAfter &&
           !verifierFor.has(worker.id) &&
@@ -1002,20 +1516,23 @@ async function pollLive(): Promise<void> {
       }
 
       // No sentinel yet → fall back to the busy/idle pane heuristic (reuse the P4 snapshot).
-      const pane = paneSnapshot ?? (await capturePane(worker.session));
+      const pane = paneSnapshot ?? (await capturePane(paneTargetFor(worker) ?? worker.session));
       const busy = isBusy(pane);
       const hint = lastMeaningfulLine(pane);
       const newState: WorkerState = busy ? "busy" : "idle";
       const newStage = busy ? `⚙️ ${hint || "trabajando…"}` : `💤 ${hint || "esperando input"}`;
       const task = findTask(worker.taskId);
-      if (worker.state !== newState || worker.stage !== newStage) {
+      if (worker.state !== newState || (worker.stage !== newStage && !driverUnhealthy)) {
         worker.state = newState;
-        worker.stage = newStage;
+        if (!driverUnhealthy) worker.stage = newStage;
         if (ownsBoard(worker) && task) task.status = busy ? "running" : "review";
         changed = true;
       }
-      // idle while the task isn't done → waiting for the user to respond
-      const ni = !busy && !!task && task.status !== "done";
+      // idle while the task isn't done → waiting for the user to respond.
+      // Modo driver: el driver queda idle en CADA frontera de turno, así que un solo poll
+      // dispararía una tormenta de notificaciones del navegador → se exige idle sostenido.
+      const idleEnough = worker.mode === "driver" ? (idlePolls.get(worker.id) ?? 0) >= 2 : true;
+      const ni = driverUnhealthy || (!busy && idleEnough && !!task && task.status !== "done");
       if (worker.needsInput !== ni) {
         worker.needsInput = ni;
         changed = true;
@@ -1049,6 +1566,9 @@ async function rediscoverSessions(): Promise<void> {
     const isVerify = /-verify(?:-\d+)?$/.test(rest);
     const isAction = rest.startsWith("-action-");
     const isResearch = !isAction && /^-research(?:-\d+)?$/.test(rest);
+    // Marcador de modo driver, anclado a la cola como los demás. Es la clasificación primaria:
+    // sobrevive aunque el cycle dir se haya borrado.
+    const isDriver = !isAction && !isVerify && /^-driver(?:-\d+)?$/.test(rest);
     // action key: quita un -verify final (verificador) y resuelve contra el registry por prefijo más largo,
     // en vez de asumir que un -<dígitos> final es sufijo de dedup (un key real puede terminar en dígito).
     const actionSeg = isAction ? rest.slice("-action-".length).replace(/-verify(?:-\d+)?$/, "") : "";
@@ -1059,9 +1579,24 @@ async function rediscoverSessions(): Promise<void> {
     const decoupled = kind !== undefined || isVerify;
     const flow = isResearch
       ? RESEARCH_FLOW
+      : isDriver
+      ? DRIVER_FLOW // CRÍTICO: sin esto detectStage buscaría las keys del workflow global
       : action && !action.inheritWorkflow
       ? { stages: action.stages, verifyAfter: action.verifyAfter }
       : resolveFlow(undefined, task?.repo);
+    // Modo driver: los panes se re-consultan a tmux (fuente de verdad); reviewTool sale de la
+    // opción de sesión, con driver.json de respaldo. tmux guarda el valor VERBATIM sin validar,
+    // así que se re-sanitiza siempre.
+    let panes: DriverPanes | undefined;
+    let reviewTool: "codex" | "agent" | undefined;
+    if (isDriver) {
+      panes = (await readPaneRoles(session)) ?? undefined;
+      const raw =
+        (await readSessionReviewTool(session)) ||
+        readDriverInfo(cycleDirForSession(session))?.reviewTool ||
+        "";
+      reviewTool = sanitizeReviewTool(raw);
+    }
     // P1-1/P1g: reconstruct the worktree cwd from the deterministic path. Only task workers
     // (kind undefined) and their verifiers get worktrees; a verifier's own session is
     // `<parent>-verify`, so derive the OWNING session (strip the verify suffix) to find the
@@ -1088,6 +1623,10 @@ async function rediscoverSessions(): Promise<void> {
         ? "🔍 investigación (redescubierta)"
         : isAction
         ? "⚡ acción (redescubierta)"
+        : isDriver
+        ? panes
+          ? "↻ driver (redescubierto)"
+          : "⚠ driver redescubierto sin panes · targets degradados"
         : "↻ redescubierto",
       startedAt: Date.now(),
       session,
@@ -1095,6 +1634,12 @@ async function rediscoverSessions(): Promise<void> {
       worktree,
       cycle: cycleDirForSession(session),
       stages: stepSteps(flow),
+      // Sembrar la etapa YA detectada, como haría el primer poll. Sin esto, ese primer poll
+      // compara stageKey (real, del disco) contra undefined y fabrica un "avanzó" que no ocurrió
+      // — lo que reseteaba el reloj de atasco en CADA reinicio del server, justo el caso que la
+      // señal de "sin avance" existe para cubrir.
+      stageKey: detectStage(cycleDirForSession(session), stepKeys(flow)) ?? undefined,
+      ...(isDriver ? { mode: "driver" as const, reviewTool, panes } : {}),
     };
     workerFlow.set(worker.id, flow); // research/action/global: pollLive usa el flow correcto tras reinicio
     workers.push(worker);
@@ -1137,7 +1682,10 @@ async function reconcileLeakedWorktrees(): Promise<void> {
 // ============================================================
 
 export async function launchTask(taskId: string, stageKeys?: string[], opts: LaunchOpts = {}): Promise<Worker | null> {
-  return activeMode === "live" ? launchLive(taskId, stageKeys, opts) : launchSimulated(taskId);
+  // Modo driver sólo tiene sentido en live (en simulado no hay tmux); la UI además deshabilita
+  // el toggle, así que aquí basta con caer al camino simulado de siempre.
+  if (activeMode !== "live") return launchSimulated(taskId);
+  return opts.mode === "driver" ? launchDriverLive(taskId, opts) : launchLive(taskId, stageKeys, opts);
 }
 
 export async function stopWorker(workerId: string): Promise<boolean> {
@@ -1153,16 +1701,37 @@ export async function stopWorker(workerId: string): Promise<boolean> {
     logEvent("stop", task, captureEvidence(worker));
   }
   stageIndex.delete(workerId);
-  removeWorker(workerId);
+  clearPaneCache(workerId); // por simetría: un worker simulado no tiene panes, pero el próximo que
+  removeWorker(workerId);   // toque esto no debería tener que razonarlo
   emit();
   return true;
 }
 
-export async function attachWorker(workerId: string): Promise<boolean> {
+/**
+ * Abre una Terminal.app attachada a la sesión. Con `role` (modo driver) zoomea ANTES ese pane, para
+ * que la terminal nativa abra mostrándolo a pantalla completa en vez de los 4 comprimidos.
+ *
+ * Si el zoom no se pudo aplicar, ABORTA sin abrir nada: una Terminal que muestra los 4 panes
+ * cuando pediste "abrir el pane worker" es peor que un error, porque parece que funcionó. El
+ * chequeo sólo vale porque focusPane verifica de verdad (relee el estado), no porque haya
+ * encontrado un %N.
+ *
+ * `openTerminal` sigue recibiendo SÓLO `worker.session`: su argumento se interpola en un AppleScript
+ * que Terminal.app ejecuta como shell, así que ningún dato derivado del cliente puede llegar ahí.
+ */
+export async function attachWorker(
+  workerId: string,
+  role?: PaneRole | null,
+  deps: FocusDeps = REAL_FOCUS
+): Promise<FocusResult> {
   const worker = findWorker(workerId);
-  if (!worker?.session) return false;
-  await openTerminal(worker.session);
-  return true;
+  if (!worker?.session) return "no-session";
+  if (role) {
+    const r = await focusPane(workerId, role, deps);
+    if (r !== "ok" && r !== "noop") return r;
+  }
+  await deps.terminal(worker.session);
+  return "ok";
 }
 
 /** Create + launch an ad-hoc task (DM/mention). complex → /tmux-worker-loop. */
@@ -1203,7 +1772,9 @@ export async function launchPrReview(
 export async function workerInput(workerId: string, text: string): Promise<boolean> {
   const worker = findWorker(workerId);
   if (!worker?.session) return false;
-  await sendText(worker.session, text, true);
+  // Modo driver: responder desde la UI debe llegar al pane del DRIVER, no al que el mouse
+  // haya dejado activo (que puede ser el de codex, o un shell donde el texto se ejecutaría).
+  await sendText(paneTargetFor(worker) ?? worker.session, text, true);
   return true;
 }
 

@@ -37,6 +37,35 @@ export interface Worker {
   stages?: WfStep[];
   verifyFailure?: { stageKey: string; output: string }; // P2: gate verifyCmd agotó reintentos
   contextPressure?: { tokens?: number; note: string };  // P4: pane bajo presión de contexto
+  // ---- Modo Driver (espejo de server/src/types.ts; el desajuste aquí es SILENCIOSO, es JSON) ----
+  mode?: "scripted" | "driver";   // ausente = scripted
+  reviewTool?: "codex" | "agent"; // sólo si mode === "driver"
+  panes?: DriverPanes;
+  driverDown?: boolean;           // driver caído → relanzar
+  parked?: { resetAt?: string };  // parqueado por cuota → esperar al reset y mandar RESUME
+  stalled?: { minutes: number };  // sin avance → quizá un sentinel olvidado (señal blanda)
+}
+
+export interface DriverPanes {
+  driver: string;
+  worker: string;
+  review: string;
+  verify: string;
+}
+
+// Espejo de server/src/types.ts (que a su vez re-exporta PaneRole/PaneStatus de tmux.ts, donde
+// PANE_ROLES es constante en runtime). Aquí se declaran literales porque el espejo es manual.
+export type PaneRole = "driver" | "worker" | "review" | "verify";
+/** shell = el pane está en un shell desnudo: "sin arrancar", NO "caído" (review/verify nacen así). */
+export type PaneStatus = "working" | "idle" | "shell" | "gone";
+
+/** Estado de un pane de la ventana driver. No viaja en el Snapshot: tiene su propio endpoint. */
+export interface PaneView {
+  role: PaneRole;
+  paneId: string;
+  status: PaneStatus;
+  hint: string;
+  contextPressure?: { tokens?: number; note: string };
 }
 
 export interface CustomAction {

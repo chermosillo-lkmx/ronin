@@ -5,17 +5,22 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   ensureCycleDir,
+  lastSentinelAt,
   markModelSwitched,
   markModelSwitchFailed,
   markVerifierSpawned,
   modelSwitched,
   modelSwitchFailed,
+  parseParkedLimit,
+  readDriverInfo,
   readModelsInfo,
+  readSentinelsTail,
   readVerifyState,
   removeCycleDir,
   verifierSpawned,
   verifyPassed,
   writeModelsInfo,
+  writeDriverInfo,
   writeVerifyState,
 } from "./stages.js";
 
@@ -134,6 +139,98 @@ test("F3: rediscovery (no removeCycleDir) PRESERVES the latch across a restart",
     // rediscoverSessions rebuilds the worker but never wipes the cycle dir → latch survives.
     assert.equal(modelSwitched(cycle), true);
     assert.ok(existsSync(join(cycle, "model-switched")));
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+// ---- Modo Driver: reviewTool persistido (artefacto de auditoría post-mortem) ----
+
+test("writeDriverInfo/readDriverInfo: round-trip del reviewTool", () => {
+  const cycle = freshCycle();
+  try {
+    ensureCycleDir(cycle);
+    writeDriverInfo(cycle, { reviewTool: "agent" });
+    assert.deepEqual(readDriverInfo(cycle), { reviewTool: "agent" });
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("readDriverInfo: null si no existe o si el JSON está corrupto (nunca lanza)", () => {
+  const cycle = freshCycle();
+  try {
+    ensureCycleDir(cycle);
+    assert.equal(readDriverInfo(cycle), null);
+    writeFileSync(join(cycle, "driver.json"), "{no es json");
+    assert.equal(readDriverInfo(cycle), null);
+    writeFileSync(join(cycle, "driver.json"), JSON.stringify({ reviewTool: 42 }));
+    assert.equal(readDriverInfo(cycle), null);
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("readDriverInfo: un dir inexistente devuelve null sin lanzar", () => {
+  assert.equal(readDriverInfo("/tmp/no-existe-cowork-xyz"), null);
+});
+
+// ---- Modo Driver: detección del auto-parqueo por límite de uso ----
+// Se lee de sentinels.log, NO del pane: el propio skill documenta que raspar el pane fue el
+// modo de falla v6 (los sentinels largos se parten en un pane angosto del layout 2×2).
+
+const PARKED = "===WORKER-PARKED-LIMIT:12:30am===";
+
+test("parseParkedLimit: extrae la hora de reset del último sentinel", () => {
+  const log = ["===PLAN-READY:/tmp/x/plan.md===", "===IMPL-READY===", PARKED].join("\n");
+  assert.deepEqual(parseParkedLimit(log), { resetAt: "12:30am" });
+});
+
+test("parseParkedLimit: parqueo sin hora conocida sigue siendo un parqueo", () => {
+  assert.deepEqual(parseParkedLimit("===WORKER-PARKED-LIMIT:unknown==="), { resetAt: "unknown" });
+  assert.deepEqual(parseParkedLimit("===WORKER-PARKED-LIMIT:==="), {});
+});
+
+// Ésta es la razón de mirar sólo el ÚLTIMO sentinel: un RESUME posterior limpia el estado
+// solo, sin necesitar un latch ni una ruta de "despark".
+test("parseParkedLimit: null si tras el parqueo hay un sentinel posterior (RESUME)", () => {
+  const log = [PARKED, "===IMPL-UPDATED==="].join("\n");
+  assert.equal(parseParkedLimit(log), null);
+});
+
+test("parseParkedLimit: null para un log vacío o sin parqueos", () => {
+  assert.equal(parseParkedLimit(""), null);
+  assert.equal(parseParkedLimit("===PLAN-READY:/tmp/x/plan.md===\n"), null);
+});
+
+test("parseParkedLimit: tolera espacios y líneas en blanco alrededor", () => {
+  assert.deepEqual(parseParkedLimit(`\n  ${PARKED}  \n\n`), { resetAt: "12:30am" });
+});
+
+test("readSentinelsTail: '' cuando no hay log, contenido cuando sí (nunca lanza)", () => {
+  const cycle = freshCycle();
+  try {
+    ensureCycleDir(cycle);
+    assert.equal(readSentinelsTail(cycle), "");
+    writeFileSync(join(cycle, "sentinels.log"), PARKED + "\n");
+    assert.match(readSentinelsTail(cycle), /WORKER-PARKED-LIMIT/);
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("lastSentinelAt: mtime del sentinel de etapa más reciente, null si no hay ninguno", () => {
+  const cycle = freshCycle();
+  try {
+    ensureCycleDir(cycle);
+    const order = ["planning", "implementing", "done"];
+    assert.equal(lastSentinelAt(cycle, order), null);
+    writeFileSync(join(cycle, "planning"), "");
+    const at = lastSentinelAt(cycle, order);
+    assert.equal(typeof at, "number");
+    // Sembrar lastProgressAt con esto (y no con Date.now()) es lo que evita que un reinicio
+    // del server borre un atasco real de horas.
+    assert.ok(at! <= Date.now() + 1000);
   } finally {
     rmSync(cycle, { recursive: true, force: true });
   }

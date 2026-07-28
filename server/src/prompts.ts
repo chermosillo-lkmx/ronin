@@ -3,20 +3,20 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * Store editable de las 6 plantillas de prompt de los workers. Mismo patrón que
+ * Store editable de las 7 plantillas de prompt de los workers. Mismo patrón que
  * workflow.ts/repo-config.ts: mutable en memoria, validate-on-load, writeFileSync
  * + reload. data/prompts.json guarda SÓLO overrides (una key ausente o vacía = usar
  * el default). NO gitignored (los prompts no son secretos). Los DEFAULT_PROMPTS
  * reproducen byte-a-byte el texto que hoy generan los build* de templates.ts.
  *
  * Placeholders {name} se sustituyen al lanzar (renderPrompt, un solo paso; los
- * condicionales que hoy se filtran vienen precompuestos con su \n inicial). Las 5
+ * condicionales que hoy se filtran vienen precompuestos con su \n inicial). Las 6
  * plantillas filtradas son DENSAS (sin líneas en blanco: hoy .filter() las borra);
  * sólo `adhoc` conserva blancos (su build* usa join sin filtro).
  */
-export type PromptKey = "adhoc" | "adhocComplex" | "workflow" | "research" | "pr" | "verifier";
+export type PromptKey = "adhoc" | "adhocComplex" | "workflow" | "research" | "pr" | "verifier" | "driver";
 
-export const PROMPT_KEYS: PromptKey[] = ["adhoc", "adhocComplex", "workflow", "research", "pr", "verifier"];
+export const PROMPT_KEYS: PromptKey[] = ["adhoc", "adhocComplex", "workflow", "research", "pr", "verifier", "driver"];
 
 const LABELS: Record<PromptKey, string> = {
   adhoc: "Ad-hoc simple",
@@ -25,6 +25,7 @@ const LABELS: Record<PromptKey, string> = {
   research: "Investigar (read-only)",
   pr: "PR reviewer",
   verifier: "Verificador independiente",
+  driver: "Driver multi-pane (4 panes)",
 };
 
 // Placeholders disponibles por plantilla (para el panel de ayuda del editor).
@@ -35,10 +36,11 @@ const PLACEHOLDERS: Record<PromptKey, string[]> = {
   research: ["{key}", "{title}", "{ref}", "{desc}", "{repo}", "{cycle}", "{ev}", "{url}", "{body}"],
   pr: ["{body}", "{objetivo}", "{resumen}", "{repo}", "{cycle}", "{ev}", "{url}", "{title}"],
   verifier: ["{key}", "{title}", "{ref}", "{cycle}", "{ev}", "{repo}", "{url}"],
+  driver: ["{key}", "{title}", "{ref}", "{desc}", "{repo}", "{cycle}", "{ev}", "{url}", "{body}", "{steps}", "{driverPane}", "{workerPane}", "{reviewPane}", "{verifyPane}", "{reviewTool}", "{reviewCmd}", "{brainModel}", "{reviewerModel}", "{implModel}"],
 };
 
 // DEFAULT_PROMPTS: texto ACTUAL de cada build*, con placeholders. IMPORTANTE: las
-// 5 filtradas son densas (un solo \n). Sólo `adhoc` conserva blancos.
+// 6 filtradas son densas (un solo \n). Sólo `adhoc` conserva blancos.
 export const DEFAULT_PROMPTS: Record<PromptKey, string> = {
   adhoc: [
     "Tarea ad-hoc (no es de ClickUp/Jira). Resuelve/responde esto directamente —",
@@ -103,6 +105,29 @@ export const DEFAULT_PROMPTS: Record<PromptKey, string> = {
     "5. Escribe {ev}/summary.md y touch {cycle}/done.",
   ].join("\n"),
 
+  driver: [
+    "Eres el DRIVER de un ciclo /tmux-worker-loop con los panes YA provisionados.",
+    "Usa el skill /tmux-worker-loop en modo \"provisioned panes\": lee references/provisioned-panes.md",
+    "del skill — REEMPLAZA los Pasos 0-2 (no hagas pane-discovery, no crees panes, no generes cycle dir).",
+    "Panes tmux (ids fijos, úsalos tal cual con -t; NO uses índices tipo .0/.1: se renumeran).",
+    "Los 4 slots de Ronin hospedan los 4 roles del skill — el slot NO es el rol:",
+    "  {driverPane} = MAIN (tú, orquestas)             · {verifyPane} = BRAIN (escribe plan.md)",
+    "  {workerPane} = IMPLEMENTER (TDD, escribe código) · {reviewPane} = REVIEWER (adversarial)",
+    "Escribe {cycle}/panes.env con ese mapeo ANTES de nada (main/impl/reviewer/brain); relay.sh y",
+    "watch-multi.sh resuelven los roles desde ahí.",
+    "Modelos (de la config del repo — NO uses los del SKILL.md; tu propio pane no se toca):",
+    "  brain=`claude --model {brainModel}` · reviewer=`claude --model {reviewerModel}` · implementer=`claude --model {implModel}`",
+    "Herramienta de review: {reviewTool} → arranca `{reviewCmd}` en el pane de review.",
+    "Requerimiento — {key}: {title}{ref}{desc}",
+    "Servicio probable: {repo}. Trabajas en el worktree aislado de este pane; no salgas de él.",
+    "CYCLE_DIR = {cycle} (ya existe; escribe ahí REQUIREMENT.md y sentinels.log). Evidencia en {ev}.",
+    "Marca cada etapa con touch al INICIAR (el dashboard lee estos archivos):",
+    "{steps}",
+    "Del Paso 3 del SKILL.md en adelante todo sigue igual: loop plan→review→relay→approve→impl→",
+    "diff-review→relay→approve→verify, detección de drift y el self-throttle de uso (70/95/99%, Park).",
+    "No reimplementes el protocolo: lo que no esté aquí, está en el skill.",
+  ].join("\n"),
+
   verifier: [
     "Eres un VERIFICADOR independiente. NO implementes nada.",
     "Tarea original — {key}: {title}{ref}",
@@ -165,7 +190,7 @@ export interface PromptTemplate {
   placeholders: string[];
 }
 
-/** Config de las 6 plantillas para el editor (texto efectivo + isDefault + placeholders). */
+/** Config de las 7 plantillas para el editor (texto efectivo + isDefault + placeholders). */
 export function readPromptConfig(): PromptTemplate[] {
   return PROMPT_KEYS.map((key) => {
     const ov = S()[key];

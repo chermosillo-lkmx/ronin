@@ -12,16 +12,32 @@ cp -R skills/tmux-worker-loop skills/liebre-commit-workflow ~/.claude/skills/
 ## Vendorizadas (en este folder)
 
 ### `tmux-worker-loop`
-El corazón operativo de Ronin. Un Claude **driver** orquesta a un Claude **worker** en un
-pane tmux hermano: el worker escribe un plan, se revisa adversarialmente (codex o
-subagentes en paralelo), el driver relaya hallazgos, el worker implementa (TDD), se revisa
-el diff, y cierra con verificación. Es exactamente el loop que dispara el botón **▷ Lanzar**
-del tablero.
+El corazón operativo de Ronin. **Cuatro roles en cuatro panes**, cada uno con su propio contexto
+y su propio modelo: **Main** orquesta, **Brain** (opus) escribe el plan, **Reviewer** (opus o codex)
+ataca plan y diff, **Implementer** (sonnet) ejecuta en ciclos RED→GREEN→REFACTOR. El plan lo revisa
+quien no lo escribió, y los refactors los audita quien no los hizo — un implementador no puede ver
+cuándo su propia "limpieza" cambió comportamiento.
 
-- `SKILL.md` — flujo principal (pane discovery, sentinels, gates de revisión, self-throttle de límites).
-- `worker_prompt_template.md` — el prompt de protocolo que recibe el worker.
-- `watch.sh` — watcher de transiciones idle/sentinel del pane (Monitor).
-- `references/` — install/setup, pane-discovery, session-handling, troubleshooting.
+Es el loop que dispara el botón **▷ Lanzar** del tablero, en sus dos modos: **rápido** (el driver es
+`engine.ts`, que hace poll de sentinels y manda `send-keys`) y **Driver** (el driver es un Claude
+real en la ventana de 4 panes que Ronin crea de antemano y le entrega por `pane_id`).
+
+En modo Driver los slots de Ronin **no** coinciden con los roles del skill — el mapeo vive en
+`references/provisioned-panes.md` y se materializa en `<CYCLE_DIR>/panes.env`:
+
+| slot Ronin | rol | modelo |
+|---|---|---|
+| driver | Main | del operador |
+| verify | Brain | opus |
+| review | Reviewer | opus / codex |
+| worker | Implementer | sonnet |
+
+- `SKILL.md` — flujo principal (layout, sentinels, RGR, gates de revisión, self-throttle).
+- `brain_prompt_template.md` · `reviewer_prompt_template.md` · `implementer_prompt_template.md` — un prompt por rol.
+- `relay.sh` — mensajería entre panes: resuelve rol→`%id`, no pega en un pane ocupado, registra `relay.log`.
+- `watch-multi.sh` — watcher único para los 3 panes worker (sentinels + idle + alertas de límite).
+- `references/` — install/setup, pane-discovery, **provisioned-panes** (modo Driver), session-handling, troubleshooting.
+- `watch.sh`, `worker_prompt_template.md` — **legacy** del modo single-worker; se conservan para leer cycle dirs viejos.
 
 ### `liebre-commit-workflow`
 Guía los commits/push/PRs: Conventional Commits, el bump de versión de AgileFlow al pushear a

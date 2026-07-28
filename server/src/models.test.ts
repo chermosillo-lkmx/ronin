@@ -7,7 +7,9 @@ import {
   modelFamily,
   modelSwitchConfirmed,
   pickerOffersModel,
+  reviewToolCmd,
   sanitizeModel,
+  sanitizeReviewTool,
   withModel,
 } from "./models.js";
 
@@ -164,4 +166,30 @@ test("isModelPickerOpen: detects an interactive picker (≥2 options + cursor/pr
 
 test("isModelPickerOpen: false for a normal status line with a single model", () => {
   assert.equal(isModelPickerOpen("  Sonnet 4.6 · claude-sonnet-5"), false);
+});
+
+// ---- Driver mode: review tool (allowlist cerrada) ----
+
+test("sanitizeReviewTool: acepta los dos valores válidos", () => {
+  assert.equal(sanitizeReviewTool("codex"), "codex");
+  assert.equal(sanitizeReviewTool("agent"), "agent");
+});
+
+test("sanitizeReviewTool: cualquier otra cosa cae al default seguro (nunca el valor crudo)", () => {
+  // El valor termina siendo un comando tecleado en un pane: allowlist, no regex.
+  for (const bad of ["CODEX", "Agent", "claude", "codex; rm -rf /", "codex --yolo", "", " codex ", "sh"]) {
+    assert.equal(sanitizeReviewTool(bad), "codex", `debería rechazar: ${JSON.stringify(bad)}`);
+  }
+});
+
+test("sanitizeReviewTool: no-strings tampoco pasan (viene de req.body y de una opción de tmux)", () => {
+  for (const bad of [undefined, null, 42, {}, [], { toString: () => "agent" }]) {
+    assert.equal(sanitizeReviewTool(bad), "codex");
+  }
+});
+
+test("reviewToolCmd: mapea a un comando concreto por herramienta", () => {
+  assert.equal(reviewToolCmd("codex"), "codex");
+  // agent → un claude revisor: mismo comando que cualquier otro pane de claude.
+  assert.match(reviewToolCmd("agent"), /^claude\b/);
 });

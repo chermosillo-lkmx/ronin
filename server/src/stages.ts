@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getStepperStages } from "./workflow.js";
 
@@ -106,6 +106,91 @@ export function markVerifierSpawned(cycle: string): void {
   } catch {
     /* best-effort */
   }
+}
+
+// ---- Modo Driver: info de la corrida + señales de salud leídas del cycle dir ----
+
+export interface DriverInfo {
+  reviewTool: "codex" | "agent";
+}
+const DRIVER_FILE = "driver.json";
+
+/**
+ * Persiste la info del ciclo driver. El camino PRIMARIO de rediscovery es la opción de sesión
+ * de tmux (`@cowork-review-tool`) — "las sesiones tmux son la fuente de verdad". Este archivo
+ * es el artefacto de auditoría: sobrevive a la muerte de la sesión (hasta que se borra el cycle
+ * dir), así que sirve para saber post-mortem con qué herramienta corrió un ciclo terminado.
+ */
+export function writeDriverInfo(cycle: string, info: DriverInfo): void {
+  try {
+    writeFileSync(join(cycle, DRIVER_FILE), JSON.stringify(info));
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Lee la info del ciclo driver (null si ausente/corrupta). El llamador DEBE re-sanitizar. */
+export function readDriverInfo(cycle: string): DriverInfo | null {
+  try {
+    const raw = JSON.parse(readFileSync(join(cycle, DRIVER_FILE), "utf8"));
+    if (raw && (raw.reviewTool === "codex" || raw.reviewTool === "agent")) {
+      return { reviewTool: raw.reviewTool };
+    }
+  } catch {
+    /* absent */
+  }
+  return null;
+}
+
+// El worker hace append de cada sentinel a este archivo además de imprimirlo — es el "ground
+// truth" del propio skill (SKILL.md v7), precisamente porque raspar el pane falla con sentinels
+// largos en panes angostos, que es justo la forma del layout 2×2 del modo driver.
+const SENTINELS_FILE = "sentinels.log";
+const SENTINELS_TAIL_BYTES = 8192;
+
+/** Cola del sentinels.log del ciclo ("" si no existe). Nunca lanza. */
+export function readSentinelsTail(cycle: string): string {
+  try {
+    const raw = readFileSync(join(cycle, SENTINELS_FILE), "utf8");
+    return raw.length > SENTINELS_TAIL_BYTES ? raw.slice(-SENTINELS_TAIL_BYTES) : raw;
+  } catch {
+    return "";
+  }
+}
+
+const PARKED_RE = /^===WORKER-PARKED-LIMIT:(.*)===$/;
+
+/**
+ * ¿El ÚLTIMO sentinel del log es un auto-parqueo por límite de uso? Sólo el último, a
+ * propósito: así un RESUME (que produce sentinels de fase posteriores) limpia el estado solo,
+ * sin latch ni ruta de "despark".
+ */
+export function parseParkedLimit(sentinels: string): { resetAt?: string } | null {
+  const lines = (sentinels ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const last = lines[lines.length - 1];
+  if (!last) return null;
+  const m = last.match(PARKED_RE);
+  if (!m) return null;
+  const at = m[1].trim();
+  return at ? { resetAt: at } : {};
+}
+
+/**
+ * mtime (ms) del sentinel de etapa más reciente, o null si aún no hay ninguno. Se usa para
+ * sembrar el reloj de "sin avance" al redescubrir tras un reinicio — con Date.now() un
+ * reinicio borraría un atasco real de horas.
+ */
+export function lastSentinelAt(cycle: string, order: string[]): number | null {
+  let newest: number | null = null;
+  for (const key of order) {
+    try {
+      const { mtimeMs } = statSync(join(cycle, key));
+      if (newest === null || mtimeMs > newest) newest = mtimeMs;
+    } catch {
+      /* ese sentinel no existe todavía */
+    }
+  }
+  return newest;
 }
 
 // ---- P2: per-stage verifyCmd gate state (persisted in the cycle dir → survives restart, so a

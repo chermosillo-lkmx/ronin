@@ -1,6 +1,19 @@
-import type { CustomAction, Task } from "./types.js";
+import type { CustomAction, DriverPanes, Task } from "./types.js";
 import { getPromptTemplate, renderPrompt } from "./prompts.js";
-import { resolveFlow, type WfStage } from "./workflow.js";
+import { DRIVER_FLOW, resolveFlow, type WfStage } from "./workflow.js";
+import { reviewToolCmd } from "./models.js";
+import { PLANNER_MODEL, WORKER_MODEL } from "./config.js";
+
+/**
+ * Modelos efectivos de un launch en modo Driver, ya resueltos (opts → repo-config → env).
+ * Ambos opcionales: un valor vacío cae al default, nunca produce un `--model ` sin argumento.
+ */
+export interface DriverModels {
+  planner?: string; // Brain + Reviewer
+  worker?: string;  // Implementer
+}
+
+const DEFAULT_DRIVER_MODELS = { planner: PLANNER_MODEL, worker: WORKER_MODEL } as const;
 
 /**
  * {cycle}/{ev}/{repo}/{var:KEY} → valor, en un solo paso. El retorno del callback se inserta
@@ -177,6 +190,50 @@ export function buildActionPrompt(
       : "",
   };
   return fill(renderPrompt(action.prompt, values));
+}
+
+/**
+ * Modo Driver: prompt CORTO para el pane driver. Delega en el skill (modo provisioned panes)
+ * en vez de repetir su protocolo — mismo criterio que buildComplexPrompt, que sólo dice "usa
+ * el skill /tmux-worker-loop". Los {steps} salen de DRIVER_FLOW vía assembleSteps, así las
+ * keys de sentinel viven en un solo lugar y no pueden divergir de lo que detectStage busca.
+ */
+export function buildDriverPrompt(
+  task: Task,
+  cycleDir: string,
+  panes: DriverPanes,
+  reviewTool: "codex" | "agent",
+  vars: Record<string, string> = {},
+  models: DriverModels = {}
+): string {
+  const ev = `${cycleDir}/evidence`;
+  const desc = (task.body ?? "").trim();
+  const fill = makeFill(cycleDir, task.repo, vars);
+  return renderPrompt(getPromptTemplate("driver"), {
+    key: task.key,
+    title: task.title ?? "",
+    ref: task.url ? `\nRef: ${task.url}` : "",
+    desc: desc ? `\nDescripción del ticket:\n${desc}` : "",
+    repo: task.repo,
+    cycle: cycleDir,
+    ev,
+    url: task.url ?? "",
+    body: desc,
+    steps: assembleSteps(DRIVER_FLOW, cycleDir, fill),
+    driverPane: panes.driver,
+    workerPane: panes.worker,
+    reviewPane: panes.review,
+    verifyPane: panes.verify,
+    reviewTool,
+    reviewCmd: reviewToolCmd(reviewTool),
+    // El Brain planea y el Reviewer juzga → ambos van al modelo de planner; el Implementer
+    // ejecuta contra un plan cerrado → modelo de worker. En modo Driver NO hay switch
+    // plan→impl (cada rol vive en su pane), así que estos son los modelos definitivos:
+    // si no llegan hasta aquí, el override por repo/UI se pierde en silencio.
+    brainModel: models.planner || DEFAULT_DRIVER_MODELS.planner,
+    reviewerModel: models.planner || DEFAULT_DRIVER_MODELS.planner,
+    implModel: models.worker || DEFAULT_DRIVER_MODELS.worker,
+  });
 }
 
 /** Complex DM tasks (implement-something-new) → orchestrate via /tmux-worker-loop. */

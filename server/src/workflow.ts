@@ -100,6 +100,33 @@ function slug(s: string): string {
 export const RESERVED_KEYS = ["verify", "evidence"];
 
 /**
+ * Stepper fijo del modo Driver (como RESEARCH_STAGES: desacoplado del workflow.json componible).
+ *
+ * Tres restricciones que dictan estas keys, todas con dientes:
+ * 1. `verifyAfter: null` es OBLIGATORIO. Con valor no nulo, pollLive dispara spawnVerifier, que
+ *    crea una sesión tmux ENTERA aparte — anulando en silencio el modelo de 4 panes.
+ * 2. La etapa de verificación NO se llama "verify": es RESERVED_KEY y liveMapFor la trataría
+ *    como el paso sintético del verificador, clavándola en review para siempre.
+ * 3. El switch de modelo (maybeSwitchModel teclea /model en el pane ACTIVO) NO debe correr aquí:
+ *    en modo driver los modelos los maneja el skill. OJO: omitir `role:"impl"` NO es suficiente —
+ *    implStageIndex cae al match por key "implementing" (workflow.ts:164), así que esta etapa SÍ
+ *    califica. Lo que de verdad lo apaga son los dos guards de launchDriverLive: switchEnabled:false
+ *    persistido en models.json (sobrevive reinicios) y el early-return por mode==="driver".
+ */
+export const DRIVER_STAGES: WfStage[] = [
+  { key: "planning",     label: "Plan",        icon: "📋", instruction: "el BRAIN escribe plan.md (aún no lo apruebes)." },
+  { key: "plan-review",  label: "Review plan", icon: "🔥", instruction: "el REVIEWER ataca el plan; relaya los hallazgos al Brain hasta que quede limpio." },
+  { key: "implementing", label: "Impl",        icon: "⌨️", instruction: "mandaste PLAN APPROVED; el IMPLEMENTER ejecuta en ciclos RED→GREEN→REFACTOR (rgr.log)." },
+  { key: "diff-review",  label: "Review diff", icon: "🔥", instruction: "el REVIEWER ataca el diff + los tests y AUDITA los refactors de rgr.log; relaya y repite." },
+  { key: "verifying",    label: "Verify",      icon: "🔎", instruction: "verificas tú: KB, suites y rgr.log contra el objetivo del ticket." },
+  { key: "done",         label: "Done",        icon: "✓",  instruction: "escribe {ev}/summary.md (comentario listo para el ticket)." },
+];
+export const DRIVER_FLOW: { stages: WfStage[]; verifyAfter: string | null } = {
+  stages: DRIVER_STAGES,
+  verifyAfter: null,
+};
+
+/**
  * Validate + normalize a workflow config (slug keys, dedupe, reserved-key check,
  * ≥1 stage, verifyAfter must match a stage). Throws on invalid input. Shared by
  * saveWorkflow (global) and the per-repo override store (repo-config.ts) so the

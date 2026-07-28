@@ -4,12 +4,18 @@ import {
   eligibleVerifyStages,
   gateHoldsDone,
   implStageIndex,
+  liveMapFor,
+  DRIVER_FLOW,
+  DRIVER_STAGES,
+  RESERVED_KEYS,
   shouldSwitchModel,
+  stepperFor,
   stripVerifyFields,
   validateStages,
   verifyGateCap,
   type WfStage,
 } from "./workflow.js";
+
 
 const IMPL_FLOW: WfStage[] = [
   { key: "planning", label: "Plan", icon: "📋" },
@@ -177,4 +183,63 @@ test("validateStages: preserves role:'impl' and drops other role values", () => 
   assert.equal(out.stages[1].role, "impl");
   assert.equal(out.stages[0].role, undefined);
   assert.equal(out.stages[2].role, undefined);
+});
+
+// ---- Modo Driver: el flow fijo debe mapear bien contra la maquinaria del workflow ----
+
+test("DRIVER_FLOW: verifyAfter null ⇒ stepperFor NO inserta el paso sintético 'verify'", () => {
+  // Si se colara, pollLive dispararía spawnVerifier y crearía una sesión tmux aparte,
+  // anulando en silencio el modelo de 4 panes.
+  const stepper = stepperFor(DRIVER_STAGES, DRIVER_FLOW.verifyAfter);
+  assert.equal(DRIVER_FLOW.verifyAfter, null);
+  assert.equal(stepper.length, DRIVER_STAGES.length);
+  assert.equal(stepper.some((s) => s.key === "verify"), false);
+});
+
+test("DRIVER_STAGES: ninguna key choca con RESERVED_KEYS", () => {
+  for (const s of DRIVER_STAGES) assert.equal(RESERVED_KEYS.includes(s.key), false, s.key);
+});
+
+test("DRIVER_STAGES: ninguna etapa lleva role:'impl'", () => {
+  assert.equal(DRIVER_STAGES.some((s) => s.role === "impl"), false);
+});
+
+// TRAMPA REAL: implStageIndex cae al match por KEY ("implementing") cuando nadie declara
+// role:"impl" (workflow.ts:164). Omitir el role NO basta para evitar el switch de modelo —
+// el driver tiene una etapa keyeada "implementing" y por lo tanto SÍ es candidata.
+// Lo que de verdad protege son los dos guards del lanzamiento driver, verificados abajo.
+test("implStageIndex: encuentra 'implementing' por key aunque no haya role:'impl'", () => {
+  assert.equal(implStageIndex(DRIVER_STAGES), 2);
+});
+
+test("DRIVER_STAGES: ninguna etapa lleva verifyCmd (los gates P2 son del engine, no del driver)", () => {
+  assert.equal(DRIVER_STAGES.some((s) => s.verifyCmd), false);
+});
+
+test("liveMapFor(DRIVER_FLOW): 'done' cierra la tarjeta; las intermedias la dejan corriendo", () => {
+  const map = liveMapFor(DRIVER_STAGES, DRIVER_FLOW.verifyAfter);
+  assert.deepEqual(
+    { task: map.get("done")!.task, worker: map.get("done")!.worker },
+    { task: "done", worker: "done" }
+  );
+  for (const k of ["planning", "plan-review", "implementing", "diff-review", "verifying"]) {
+    assert.equal(map.get(k)!.task, "running", k);
+    assert.equal(map.get(k)!.worker, "busy", k);
+  }
+});
+
+// El guard REAL nº1: launchDriverLive persiste switchEnabled:false (models.json), así que
+// sobrevive a un reinicio del server — que es cuando worker.mode todavía no se reconstruyó.
+test("shouldSwitchModel: switchEnabled=false lo apaga en TODAS las etapas driver", () => {
+  for (const s of DRIVER_STAGES) {
+    assert.equal(shouldSwitchModel(false, false, DRIVER_STAGES, s.key), false, s.key);
+  }
+});
+
+// Y esto documenta por qué ese guard es imprescindible: con switchEnabled=true el switch SÍ
+// dispararía en implementing y más allá, tecleando /model en el pane activo de la ventana.
+test("shouldSwitchModel: con switchEnabled=true dispararía desde 'implementing' (por eso el guard)", () => {
+  assert.equal(shouldSwitchModel(true, false, DRIVER_STAGES, "planning"), false);
+  assert.equal(shouldSwitchModel(true, false, DRIVER_STAGES, "implementing"), true);
+  assert.equal(shouldSwitchModel(true, false, DRIVER_STAGES, "done"), true);
 });

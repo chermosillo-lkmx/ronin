@@ -35,6 +35,28 @@ function hasModelFlag(cmd: string): boolean {
   return tokens.some((t) => t === "--model" || t.startsWith("--model="));
 }
 
+/**
+ * Herramienta del pane de review en modo driver. ALLOWLIST cerrada, no regex: el valor
+ * termina siendo un comando que el driver teclea en un pane, y llega de dos orígenes que
+ * NO son de confianza — el body de la petición HTTP y una opción de usuario de tmux (que
+ * tmux almacena verbatim, sin validar: `@cowork-review-tool` puede contener cualquier cosa
+ * si alguien la reescribe). Cualquier valor desconocido cae al default seguro "codex".
+ */
+export function sanitizeReviewTool(v: unknown): "codex" | "agent" {
+  return v === "agent" ? "agent" : "codex";
+}
+
+/**
+ * Comando que el DRIVER debe arrancar en el pane de review. Es texto para el prompt (lo teclea
+ * el driver, no lo ejecuta el servidor), así que se queda en el comando pelado — igual que el
+ * bootstrap del propio skill (`SKILL.md:80`: `send-keys "cd $cwd && claude"`). A propósito NO
+ * usa CLAUDE_CMD/startCommand: este módulo es de helpers puros sin imports, y meterle config.ts
+ * le agregaría carga de .env como efecto de importación.
+ */
+export function reviewToolCmd(tool: "codex" | "agent"): string {
+  return tool === "agent" ? "claude" : "codex";
+}
+
 /** Whether a launch of this task source should switch to the Worker model at plan→impl. */
 export function launchSwitchEnabled(source: string): boolean {
   return source !== "pr"; // PR review has an impl stage in the default flow but must stay on Planner (B1)

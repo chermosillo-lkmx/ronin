@@ -3,12 +3,15 @@ import { MODEL_GROUPS, MODEL_INHERIT, isKnownModel } from "./models";
 import {
   attachWorker,
   evidenceFileUrl,
+  focusPane,
   getEvidence,
   getHistory,
   getConnectorSettings,
   getPane,
   getRepoConfig,
   getRepos,
+  getWorkerPanes,
+  type PanesResult,
   getTaskDescription,
   getReposConfig,
   getTerminalUrl,
@@ -24,6 +27,7 @@ import {
   launchPrReview,
   launchResearch,
   launchTask,
+  type LaunchOverrides,
   generateReport,
   listReports,
   getReport,
@@ -40,7 +44,7 @@ import {
   workerInput,
   type Evidence,
 } from "./api";
-import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, Priority, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, Snapshot, Task, TaskSource, TaskStatus, WfStage, WfStep, WorkflowConfig, Worker, WorkerState } from "./types";
+import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PaneRole, PaneStatus, Priority, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, Snapshot, Task, TaskSource, TaskStatus, WfStage, WfStep, WorkflowConfig, Worker, WorkerState } from "./types";
 
 const PRIO_NUM: Record<Priority, number> = { urgent: 1, high: 2, normal: 3, low: 4, none: 0 };
 
@@ -374,12 +378,32 @@ function WorkerRow({ worker, task, actions = [], onOpen }: { worker: Worker; tas
         <span className="stage">{worker.repo} · {worker.stage}</span>
       </div>
       <div className="row-side">
+        {/* Salud del driver: precede al genérico "⚠ responder" porque dice QUÉ hacer
+            (relanzar / esperar el reset / revisar si falta un sentinel). */}
+        {worker.driverDown && (
+          <span className="pill driver-down" title="El claude del pane driver murió. Los panes worker/review/verify pueden seguir corriendo: entra a la terminal para rescatar el trabajo, o para el worker.">
+            ✖ driver caído
+          </span>
+        )}
+        {worker.parked && (
+          <span className="pill parked" title="El worker se auto-parqueó por límite de uso. Espera al reset y mándale RESUME desde la terminal.">
+            ⏸ parqueado{worker.parked.resetAt ? ` · ${worker.parked.resetAt}` : ""}
+          </span>
+        )}
+        {worker.stalled && (
+          <span className="pill stalled" title="Sin cambios de etapa ni actividad. Quizá el driver olvidó hacer touch del sentinel; la etapa mostrada puede estar rancia.">
+            ⏳ sin avance {worker.stalled.minutes}m
+          </span>
+        )}
         {worker.contextPressure && (
           <span className="pill ctx-pressure" title={`Presión de contexto: ${worker.contextPressure.note}. Considera /clear o compactar.`}>
             🧠 contexto{worker.contextPressure.tokens ? ` ${worker.contextPressure.tokens}k` : ""}
           </span>
         )}
-        {worker.needsInput && <span className="pill needs-pill">⚠ responder</span>}
+        {worker.needsInput && !worker.driverDown && !worker.parked && (
+          <span className="pill needs-pill">⚠ responder</span>
+        )}
+        {worker.mode === "driver" && <span className="pill research">🖥️ driver · {worker.reviewTool ?? "codex"}</span>}
         {worker.kind === "research" && <span className="pill research">🔍 investigación</span>}
         {worker.kind === "action" && (
           <span className="pill research">⚡ {actions.find((a) => a.key === worker.actionKey)?.label ?? "acción"}</span>
@@ -528,6 +552,28 @@ function TaskDetailWindow({ worker, task, stages, onClose }: { worker: Worker; t
             <section className="drawer-sec">
               <h4>▸ LOOP</h4>
               <Pipeline stageKey={worker.stageKey} stages={worker.stages ?? stages} failedKey={worker.verifyFailure?.stageKey} />
+              {/* Salud del driver: sin esto, un driver caído a media corrida no muestra NINGUNA
+                  señal si abres la ventana de detalle en vez de la pestaña ⌘ Sessions. */}
+              {worker.driverDown && (
+                <div className="ctx-note driver-note">
+                  ✖ <b>Driver caído</b>: el claude del pane driver murió, pero los panes
+                  worker/review/verify pueden seguir corriendo. Abre la terminal para rescatar el
+                  trabajo, o para el worker.
+                </div>
+              )}
+              {worker.parked && (
+                <div className="ctx-note parked-note">
+                  ⏸ <b>Worker parqueado</b> por límite de uso
+                  {worker.parked.resetAt ? ` (reset ~${worker.parked.resetAt})` : ""} — espera al
+                  reset y mándale <code>RESUME</code> desde la terminal.
+                </div>
+              )}
+              {worker.stalled && (
+                <div className="ctx-note">
+                  ⏳ Sin avance desde hace {worker.stalled.minutes}m — puede que el driver haya
+                  olvidado marcar el centinela; la etapa de arriba podría estar rancia.
+                </div>
+              )}
               {worker.contextPressure && (
                 <div className="ctx-note" title="Detectado en la terminal del worker">
                   🧠 Presión de contexto: {worker.contextPressure.note}
@@ -636,11 +682,13 @@ function ModelSelect({ value, onChange }: { value: string; onChange: (v: string)
 }
 
 /** Pre-launch step: turn workflow stages on/off for this run. */
-function LaunchModal({ task, onClose }: { task: Task; onClose: () => void }) {
+function LaunchModal({ task, onClose, live }: { task: Task; onClose: () => void; live: boolean }) {
   const [wf, setWf] = useState<WorkflowConfig | null>(null);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
   const [plannerModel, setPlannerModel] = useState("");
   const [workerModel, setWorkerModel] = useState("");
+  const [driver, setDriver] = useState(false);
+  const [reviewTool, setReviewTool] = useState<"codex" | "agent">("codex");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -661,14 +709,21 @@ function LaunchModal({ task, onClose }: { task: Task; onClose: () => void }) {
 
   async function go() {
     if (!wf) return;
-    const keys = wf.stages.filter((s) => enabled.has(s.key)).map((s) => s.key);
-    if (!keys.length) return;
+    // En modo Driver el flow es fijo (DRIVER_FLOW) y el skill maneja sus modelos → se ignoran
+    // los toggles de etapas y los selects, que además se muestran deshabilitados.
+    const keys = driver ? [] : wf.stages.filter((s) => enabled.has(s.key)).map((s) => s.key);
+    if (!driver && !keys.length) return;
     setBusy(true);
     try {
-      const models: { plannerModel?: string; workerModel?: string } = {};
-      if (plannerModel.trim()) models.plannerModel = plannerModel.trim();
-      if (workerModel.trim()) models.workerModel = workerModel.trim();
-      await launchTask(task.id, keys, models);
+      const opts: LaunchOverrides = {};
+      if (driver) {
+        opts.mode = "driver";
+        opts.reviewTool = reviewTool;
+      } else {
+        if (plannerModel.trim()) opts.plannerModel = plannerModel.trim();
+        if (workerModel.trim()) opts.workerModel = workerModel.trim();
+      }
+      await launchTask(task.id, driver ? undefined : keys, opts);
       onClose();
     } finally {
       setBusy(false);
@@ -690,7 +745,44 @@ function LaunchModal({ task, onClose }: { task: Task; onClose: () => void }) {
         </header>
 
         {!wf && <div className="empty">cargando workflow…</div>}
+
         {wf && (
+          <div className="launch-modes">
+            <label className={`launch-mode ${!driver ? "on" : ""}`}>
+              <input type="radio" checked={!driver} onChange={() => setDriver(false)} />
+              <span className="wf-tlabel">Lanzar (rápido)</span>
+              <span className="wf-tinstr">el tablero maneja el loop · sin tokens de orquestación</span>
+            </label>
+            <label className={`launch-mode ${driver ? "on" : ""} ${!live ? "disabled" : ""}`}>
+              <input type="radio" checked={driver} disabled={!live} onChange={() => setDriver(true)} />
+              <span className="wf-tlabel">Lanzar (Driver)</span>
+              <span className="wf-tinstr">
+                {live
+                  ? "4 panes tmux: driver · worker · review · verify"
+                  : "requiere modo live (npm run dev:live)"}
+              </span>
+            </label>
+            {driver && (
+              <>
+                <div className="launch-radio">
+                  <span>Review:</span>
+                  {(["codex", "agent"] as const).map((t) => (
+                    <label key={t} className={`launch-tool ${reviewTool === t ? "on" : ""}`}>
+                      <input type="radio" checked={reviewTool === t} onChange={() => setReviewTool(t)} />
+                      {t === "codex" ? "Codex" : "Agent (claude)"}
+                    </label>
+                  ))}
+                </div>
+                <div className="launch-warn">
+                  ⚠️ lanza un driver Claude real — consume tokens durante todo el ciclo
+                  plan→review→impl→verify, no sólo el worker.
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {wf && !driver && (
           <div className="wf-toggles">
             {wf.stages.map((s) => (
               <label key={s.key} className={`wf-toggle ${enabled.has(s.key) ? "on" : ""}`}>
@@ -710,7 +802,7 @@ function LaunchModal({ task, onClose }: { task: Task; onClose: () => void }) {
           </div>
         )}
 
-        {wf && (
+        {wf && !driver && (
           <div className="repos-editor">
             <div className="drawer-sub">Modelos (override para esta corrida; vacío = default por repo)</div>
             <div className="repos-default">
@@ -725,9 +817,11 @@ function LaunchModal({ task, onClose }: { task: Task; onClose: () => void }) {
         )}
 
         <div className="modal-foot">
-          <span className="muted">{enabled.size} paso(s) activo(s)</span>
-          <button className="btn copy" onClick={go} disabled={busy || !wf || enabled.size === 0}>
-            {busy ? "lanzando…" : "▷ lanzar"}
+          <span className="muted">
+            {driver ? `driver · review: ${reviewTool}` : `${enabled.size} paso(s) activo(s)`}
+          </span>
+          <button className="btn copy" onClick={go} disabled={busy || !wf || (!driver && enabled.size === 0)}>
+            {busy ? "lanzando…" : driver ? "▷ lanzar driver" : "▷ lanzar"}
           </button>
         </div>
       </div>
@@ -1298,7 +1392,7 @@ function ReposSection() {
   );
 }
 
-/** Editor de las 6 plantillas de prompt editables (/api/prompts). Sin overrides = default. */
+/** Editor de las 7 plantillas de prompt editables (/api/prompts). Sin overrides = default. */
 function PromptsSection() {
   const [cfg, setCfg] = useState<PromptTemplate[] | null>(null);
   const [sel, setSel] = useState<string>("");
@@ -1792,6 +1886,292 @@ function SettingsView({ onBack, onActionsChanged }: { onBack: () => void; onActi
   );
 }
 
+/** Badge de salud de un worker driver. Precedencia: caído > parqueado > atascado (§ driverHealth). */
+function healthPill(w: Worker) {
+  if (w.driverDown) return <span className="pill driver-down">✖ driver caído</span>;
+  if (w.parked) return <span className="pill parked">⏸ parqueado{w.parked.resetAt ? ` · ${w.parked.resetAt}` : ""}</span>;
+  if (w.stalled) return <span className="pill stalled">⏳ sin avance {w.stalled.minutes}m</span>;
+  if (w.state === "done") return <span className="pill">✓ done</span>;
+  if (w.needsInput) return <span className="pill idle">◐ necesita input</span>;
+  return <span className="pill">● live</span>;
+}
+
+const PANE_LABEL: Record<PaneRole, string> = {
+  driver: "driver",
+  worker: "worker",
+  review: "review",
+  verify: "verify",
+};
+
+/**
+ * Badge de estado de un pane. `if/else` sobre lo que el server ya calculó (paneStatus en tmux.ts):
+ * el dashboard no reimplementa la lógica de los skills. "shell" es "sin arrancar", NO "caído" —
+ * review y verify nacen como shells y el driver los arranca cuando los necesita.
+ */
+function paneStatusPill(status: PaneStatus) {
+  if (status === "working") return <span className="pill run">● trabajando</span>;
+  if (status === "idle") return <span className="pill idle">◐ idle</span>;
+  if (status === "shell") return <span className="pill">○ sin arrancar</span>;
+  return <span className="pill driver-down">✖ no disponible</span>;
+}
+
+/**
+ * Vista ⌘ Sessions: los tickets en modo Driver. El área principal muestra el iframe ttyd con los 4
+ * panes reales (tmux resuelve layout y mouse) o, si se selecciona un pane de la tira, SÓLO ese pane
+ * como texto legible. Es una vista FILTRADA sobre los mismos workers del Board, no una fuente de
+ * datos paralela.
+ */
+function SessionsView({
+  snap,
+  onBack,
+  onOpenBoard,
+}: {
+  snap: Snapshot | null;
+  onBack: () => void;
+  onOpenBoard: () => void;
+}) {
+  const list = (snap?.workers ?? [])
+    .filter((w) => w.mode === "driver")
+    .sort((a, b) => b.startedAt - a.startedAt);
+  const [selId, setSelId] = useState<string | null>(null);
+  // El seleccionado puede desaparecer (stop / muerte de sesión). Se DERIVA en render en vez de
+  // sincronizarse con un efecto: así la caída al siguiente es automática y la lista vacía es un
+  // caso natural, no uno especial.
+  const sel = list.find((w) => w.id === selId) ?? list[0] ?? null;
+  const task = sel ? snap?.tasks.find((t) => t.id === sel.taskId) : undefined;
+  const [ttydUrl, setTtydUrl] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [panes, setPanes] = useState<PanesResult | null>(null);
+  const [pickedRole, setPickedRole] = useState<PaneRole | null>(null);
+  const [paneText, setPaneText] = useState("cargando pane…");
+  const [paneErr, setPaneErr] = useState<string | null>(null);
+
+  // El rol seleccionado se DERIVA en render, igual que la sesión: si el pane desaparece (layout
+  // degradado, pane muerto) la vista cae sola a los 4 panes en vez de quedarse clavada en un
+  // target que ya no existe.
+  const selRole =
+    pickedRole && panes?.panes.some((p) => p.role === pickedRole && p.status !== "gone")
+      ? pickedRole
+      : null;
+
+  useEffect(() => {
+    setTtydUrl(null);
+    setPanes(null);
+    setPickedRole(null);
+    setPaneErr(null);
+    if (!sel) return;
+    let alive = true;
+    getTerminalUrl(sel.id).then((u) => { if (alive) setTtydUrl(u); });
+    return () => { alive = false; };
+  }, [sel?.id]);
+
+  // Un solo poll para la tira de panes; el server cachea las capturas, así que varias pestañas
+  // sobre la misma sesión no multiplican los `capture-pane`.
+  useEffect(() => {
+    if (!sel) return;
+    let alive = true;
+    const tick = async () => {
+      const p = await getWorkerPanes(sel.id);
+      if (alive) setPanes(p);
+    };
+    tick();
+    const id = setInterval(tick, 1500);
+    return () => { alive = false; clearInterval(id); };
+  }, [sel?.id]);
+
+  // Texto del pane enfocado. Aquí es donde se arregla de verdad "el texto se ve chiquito": el
+  // tamaño lo pone el CSS del dashboard, no ttyd (que fija su fontSize al arrancar el proceso).
+  useEffect(() => {
+    if (!sel || !selRole) return;
+    let alive = true;
+    setPaneText("cargando pane…");
+    const tick = async () => {
+      const p = await getPane(sel.id, selRole);
+      if (alive && p) setPaneText(p.pane || "(pane vacío)");
+    };
+    tick();
+    const id = setInterval(tick, 1500);
+    return () => { alive = false; clearInterval(id); };
+  }, [sel?.id, selRole]);
+
+  /** Envuelve las acciones de zoom para mostrar el error tipado del server en vez de tragárselo. */
+  async function run(fn: () => Promise<void>) {
+    setBusy(true);
+    setPaneErr(null);
+    try {
+      await fn();
+    } catch (e) {
+      setPaneErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function backToGrid() {
+    setPickedRole(null);
+    // Sólo se des-zoomea si hay algo que deshacer: volver a los 4 panes es una operación local del
+    // navegador y no debe mover el pane activo COMPARTIDO de los demás clientes attachados.
+    if (panes?.zoomed) void run(() => focusPane(sel!.id, null));
+  }
+
+  // Fallback a modo rápido: el ticket ya tiene task.workerId apuntando al driver, así que un
+  // launch directo devolvería ese mismo worker sin hacer nada (guard de launchLive). Hay que
+  // parar el driver primero — por eso el confirm: mata los 4 panes.
+  async function relaunchFast() {
+    if (!sel || !task) return;
+    if (!confirm("¿Parar el driver (mata los 4 panes) y relanzar en modo rápido?")) return;
+    setBusy(true);
+    try {
+      await stopWorker(sel.id);
+      await launchTask(task.id);
+      onOpenBoard();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="settings-view">
+      <header className="drawer-head">
+        <div>
+          <div className="drawer-title">⌘ Sessions</div>
+          <div className="drawer-sub">tickets en modo Driver · 4 panes tmux por sesión</div>
+        </div>
+        <button className="drawer-close" onClick={onBack}>✕</button>
+      </header>
+
+      <div className="sessions-wrap">
+        <aside className="sessions-side">
+          {list.length === 0 && (
+            <div className="sessions-empty">
+              sin sesiones Driver activas.
+              <br />
+              <span className="muted">actívalas en ▷ Lanzar → “Lanzar (Driver)”.</span>
+            </div>
+          )}
+          {list.map((w) => {
+            const t = snap?.tasks.find((x) => x.id === w.taskId);
+            return (
+              <button
+                key={w.id}
+                className={`sessions-item ${w.id === sel?.id ? "on" : ""}`}
+                onClick={() => setSelId(w.id)}
+              >
+                <div className="sessions-item-top">
+                  {t && <span className={`srcbadge ${t.source}`}>{TASK_SOURCE_BADGE[t.source]}</span>}
+                  <span className="sessions-item-title">{t?.title ?? w.taskId}</span>
+                </div>
+                <div className="sessions-item-meta">
+                  {healthPill(w)}
+                  <span className="muted">{w.stage}</span>
+                </div>
+              </button>
+            );
+          })}
+        </aside>
+
+        <section className="sessions-main">
+          {!sel && <div className="empty">selecciona una sesión</div>}
+          {sel && (
+            <>
+              <div className="sessions-head">
+                <div className="sessions-head-title">
+                  {task?.url ? (
+                    <a href={task.url} target="_blank" rel="noreferrer">{task.title}</a>
+                  ) : (
+                    <span>{task?.title ?? sel.taskId}</span>
+                  )}
+                  <span className="pill">review: {sel.reviewTool ?? "codex"}</span>
+                  {healthPill(sel)}
+                </div>
+                <div className="sessions-head-actions">
+                  <button className="btn view" onClick={relaunchFast} disabled={busy || sel.state === "done"}>
+                    ▷ Lanzar (rápido)
+                  </button>
+                  <button className="btn" onClick={() => stopWorker(sel.id)} disabled={busy}>
+                    ■ stop
+                  </button>
+                </div>
+              </div>
+              {/* Tira de panes: rol + estado + última línea. Seleccionar uno filtra la vista. */}
+              {panes ? (
+                <div className="sessions-panes">
+                  {panes.panes.map((p) => (
+                    <button
+                      key={p.role}
+                      className={`sessions-pane ${p.role === selRole ? "on" : ""}`}
+                      onClick={() => setPickedRole(p.role === selRole ? null : p.role)}
+                      disabled={p.status === "gone"}
+                      title={p.paneId}
+                    >
+                      <div className="sessions-pane-top">
+                        <span className="sessions-pane-role">{PANE_LABEL[p.role]}</span>
+                        {paneStatusPill(p.status)}
+                        {panes.zoomed === p.role && <span className="pill">⤢ zoom</span>}
+                      </div>
+                      <div className="sessions-pane-hint">{p.hint || "—"}</div>
+                      {p.contextPressure && (
+                        <div className="sessions-pane-hint">🧠 {p.contextPressure.note}</div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty">
+                  no se pudieron resolver los 4 panes (layout degradado) — la vista de 4 panes sigue
+                  disponible
+                </div>
+              )}
+
+              {/* El zoom es estado de la VENTANA tmux, no del cliente: no hay forma de que un
+                  cliente vea un solo pane sin afectar a los demás. Se avisa, no se esconde. */}
+              {panes?.zoomed && (
+                <div className="ctx-note sessions-zoom-note">
+                  ⤢ <b>zoom activo</b> en «{PANE_LABEL[panes.zoomed]}» — el zoom es estado de la
+                  ventana tmux: lo ven <b>todos</b> los clientes attachados (otras pestañas y
+                  Terminal.app).
+                </div>
+              )}
+              {paneErr && <div className="ctx-note driver-note">✖ {paneErr}</div>}
+
+              {selRole ? (
+                <>
+                  <div className="sessions-pane-actions">
+                    <button className="btn view" onClick={backToGrid} disabled={busy}>
+                      ↩ ver los 4 panes
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={() => run(() => focusPane(sel.id, selRole))}
+                      disabled={busy || panes?.zoomed === selRole}
+                    >
+                      ⤢ zoom en el iframe
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={() => run(() => attachWorker(sel.id, selRole))}
+                      disabled={busy}
+                    >
+                      🖥 abrir Terminal (este pane)
+                    </button>
+                  </div>
+                  <pre className="term sessions-pane-term">{paneText}</pre>
+                </>
+              ) : ttydUrl ? (
+                // key: sin esto React reusa el <iframe> y el cambio de src deja attacheada la
+                // sesión tmux anterior.
+                <iframe key={sel.id} className="ttyd sessions-term" src={ttydUrl} title="4 panes" />
+              ) : (
+                <div className="empty">conectando terminal… (¿ttyd instalado? brew install ttyd)</div>
+              )}
+            </>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 /** Vista 📊 Reportes: generar diario/semanal, lista de anteriores y visor del markdown con copiar. */
 function ReportsView({ onBack }: { onBack: () => void }) {
   const [list, setList] = useState<ReportMeta[]>([]);
@@ -1895,7 +2275,7 @@ export function App() {
   const [adhocBusy, setAdhocBusy] = useState(false);
   const [prOpen, setPrOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
-  const [view, setView] = useState<"board" | "settings" | "reports">("board");
+  const [view, setView] = useState<"board" | "settings" | "reports" | "sessions">("board");
   const [launchFor, setLaunchFor] = useState<Task | null>(null);
   const [previewTask, setPreviewTask] = useState<Task | null>(null);
   const [actions, setActions] = useState<CustomAction[]>([]);
@@ -2072,6 +2452,9 @@ export function App() {
         <button className="refresh" onClick={() => setView("reports")} title="reportes de resumen (diario/semanal)">
           📊
         </button>
+        <button className="refresh" onClick={() => { setOpenWorkerId(null); setView("sessions"); }} title="sesiones driver (4 panes tmux)">
+          ⌘
+        </button>
         <button className="refresh wf-btn" onClick={() => setView("settings")} title="configuración (repos, workflows)">
           ⚙
         </button>
@@ -2082,6 +2465,8 @@ export function App() {
         <SettingsView onBack={() => setView("board")} onActionsChanged={refreshActions} />
       ) : view === "reports" ? (
         <ReportsView onBack={() => setView("board")} />
+      ) : view === "sessions" ? (
+        <SessionsView snap={snap} onBack={() => setView("board")} onOpenBoard={() => setView("board")} />
       ) : (
         <>
       <main className="body">
@@ -2196,7 +2581,7 @@ export function App() {
         <TaskDetailWindow worker={openWorker} task={openTask} stages={snap?.stages} onClose={() => setOpenWorkerId(null)} />
       )}
 
-      {launchFor && <LaunchModal task={launchFor} onClose={() => setLaunchFor(null)} />}
+      {launchFor && <LaunchModal task={launchFor} onClose={() => setLaunchFor(null)} live={snap?.mode === "live"} />}
 
       {previewTask && (
         <TaskPreviewModal task={previewTask} actions={actions} onClose={() => setPreviewTask(null)} onLaunch={setLaunchFor} />
