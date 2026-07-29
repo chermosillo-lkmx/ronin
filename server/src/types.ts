@@ -123,3 +123,26 @@ export interface WfStep {
   label: string;
   icon: string;
 }
+
+// ---- Inventario tmux (F1). Espejo manual en web/src/types.ts ----
+// El espejo es manual y el desajuste es SILENCIOSO: esto viaja como JSON, sin validación en la
+// frontera. Si cambias uno, cambia el otro en el mismo commit.
+
+export interface TmuxPaneInfo {
+  id: string;            // "%12" — identidad estable; NUNCA el índice: tmux los renumera al
+                         // morir un pane y acabarías apuntando a otro sin ningún error visible
+  windowIndex: number;
+  command: string;       // claude renombra su proceso a la versión ("2.1.220"), no a "claude"
+  title: string;
+  role: string | null;   // @cowork-role; null = sin rol asignado
+  active: boolean;
+}
+
+export interface TmuxSessionInfo {
+  name: string;
+  kind: "managed" | "foreign";
+  windows: number;
+  panes: TmuxPaneInfo[];
+  createdAt: number;     // epoch ms (tmux da segundos; se multiplica al parsear)
+  attached: boolean;
+}
