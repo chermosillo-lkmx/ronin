@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { classifySession, isSafeSessionName, parsePaneList, parseSessionList } from "./sessions.js";
+import { buildInventory, classifySession, isSafeSessionName, parsePaneList, parseSessionList } from "./sessions.js";
 
 // Salidas de `tmux list-sessions -F` y `tmux list-panes -a -F` con los formatos de sessions.ts.
 const SESSIONS = [
@@ -100,4 +100,44 @@ test("isSafeSessionName: rechaza lo que no puede ir en una ruta", () => {
   assert.equal(isSafeSessionName("../../etc"), false);
   assert.equal(isSafeSessionName("a/b"), false);
   assert.equal(isSafeSessionName(""), false);
+});
+
+test("buildInventory: une sesiones y panes, y clasifica", () => {
+  const inv = buildInventory(SESSIONS, PANES, (n) => n === "cowork-CU-42-driver");
+  assert.equal(inv.length, 3);
+  const managed = inv.find((s) => s.name === "cowork-CU-42-driver")!;
+  assert.equal(managed.kind, "managed");
+  assert.equal(managed.panes.length, 2);
+  assert.equal(managed.panes[0].role, "driver");
+
+  const foreign = inv.find((s) => s.name === "dev-scratch")!;
+  assert.equal(foreign.kind, "foreign");
+  assert.equal(foreign.panes.length, 2);
+});
+
+test("buildInventory: una sesión sin panes listados queda con array vacío, no undefined", () => {
+  // list-sessions y list-panes son DOS llamadas: una sesión puede morir entre ambas, y la UI
+  // itera `s.panes` sin guardas.
+  const inv = buildInventory(SESSIONS, "", () => false);
+  assert.equal(inv.length, 3);
+  for (const s of inv) assert.deepEqual(s.panes, []);
+});
+
+test("buildInventory: no inventa sesiones a partir de panes huérfanos", () => {
+  // Si list-panes trae una sesión que list-sessions no listó, no se materializa: la lista de
+  // sesiones es la autoridad sobre qué existe.
+  const inv = buildInventory("solo-esta\t1\t1753747200\t0", PANES, () => false);
+  assert.equal(inv.length, 1);
+  assert.equal(inv[0].name, "solo-esta");
+});
+
+test("buildInventory: un nombre inseguro nunca llega al probe de cycle dir", () => {
+  // El resultado seguro para un nombre raro es "ajena": ni se construye la ruta.
+  let probed: string[] = [];
+  const inv = buildInventory("../../etc\t1\t1753747200\t0", "", (n) => {
+    probed.push(n);
+    return true;
+  });
+  assert.equal(inv[0].kind, "foreign");
+  assert.deepEqual(probed, []);
 });

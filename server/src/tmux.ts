@@ -26,6 +26,37 @@ export async function listSessions(): Promise<string[]> {
   }
 }
 
+/**
+ * Formatos del inventario completo (F1). Se parsean en sessions.ts; aquí sólo se ejecutan,
+ * porque este módulo es el dueño de `tmux` en el repo.
+ */
+const INVENTORY_SESSION_FMT =
+  "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}";
+const INVENTORY_PANE_FMT =
+  "#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_title}\t#{@cowork-role}\t#{pane_active}";
+
+/**
+ * stdout crudo de `list-sessions` con los 4 campos del inventario. "" si no hay servidor tmux:
+ * "no hay sesiones" es la respuesta correcta, no un error que la UI tenga que distinguir.
+ * SÓLO LECTURA — `list-sessions` contra un servidor muerto sale con código 1 sin arrancar uno.
+ */
+export async function listSessionsRaw(): Promise<string> {
+  try {
+    return (await pexec("tmux", ["list-sessions", "-F", INVENTORY_SESSION_FMT])).stdout;
+  } catch {
+    return "";
+  }
+}
+
+/** stdout crudo de `list-panes -a` con los 7 campos del inventario. "" si falla. SÓLO LECTURA. */
+export async function listPanesRaw(): Promise<string> {
+  try {
+    return (await pexec("tmux", ["list-panes", "-a", "-F", INVENTORY_PANE_FMT])).stdout;
+  } catch {
+    return "";
+  }
+}
+
 export async function hasSession(name: string): Promise<boolean> {
   try {
     await pexec("tmux", ["has-session", "-t", name]);

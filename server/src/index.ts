@@ -25,6 +25,7 @@ import { fetchClickUpDescription, testClickUp } from "./clickup.js";
 import { testJira } from "./jira.js";
 import { testGitLab } from "./gitlab.js";
 import { corsOptions, requireLocalOrigin } from "./security.js";
+import { listAllSessions } from "./sessions.js";
 
 const app = express();
 app.use(cors(corsOptions));
@@ -318,6 +319,14 @@ app.get("/api/workers/:id/panes", async (req, res) => {
     return res.status(409).json({ error: "layout degradado: no se pudieron resolver los 4 panes" });
   }
   res.json(result);
+});
+
+// Inventario tmux completo: gestionadas por Ronin + ajenas al operador (F1).
+// Sólo lectura: dos `tmux list-*`, ~4 ms cada uno. Sin caché a propósito — es más barato
+// recalcularlo que arriesgarse a mostrarlo rancio (mismo criterio que los badges de salud
+// del driver, que también se derivan en cada poll).
+app.get("/api/sessions", async (_req, res) => {
+  res.json({ sessions: await listAllSessions() });
 });
 
 // Manual re-sync of the board (refresh button)

@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { cycleDirForSession } from "./stages.js";
+import { listPanesRaw, listSessionsRaw } from "./tmux.js";
 import type { TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
 
 /**
@@ -84,4 +87,45 @@ export function isSafeSessionName(name: string): boolean {
  */
 export function classifySession(name: string, hasCycleDir: boolean): "managed" | "foreign" {
   return name.startsWith("cowork-") && hasCycleDir ? "managed" : "foreign";
+}
+
+/**
+ * Compone el inventario. `list-sessions` es la autoridad sobre qué sesiones existen: un pane
+ * cuya sesión no aparezca ahí se descarta en vez de materializar una sesión fantasma (las dos
+ * llamadas a tmux no son atómicas y una sesión puede morir entre ambas).
+ *
+ * `hasCycleDir` se inyecta para poder probar la composición sin tocar el disco.
+ */
+export function buildInventory(
+  sessionsOut: string,
+  panesOut: string,
+  hasCycleDir: (name: string) => boolean
+): TmuxSessionInfo[] {
+  const panes = parsePaneList(panesOut);
+  return parseSessionList(sessionsOut).map((s) => ({
+    ...s,
+    // Un nombre inseguro ni siquiera se convierte en ruta: se clasifica como ajena, que es el
+    // resultado seguro. Ver isSafeSessionName.
+    kind: classifySession(s.name, isSafeSessionName(s.name) && hasCycleDir(s.name)),
+    panes: panes.get(s.name) ?? [],
+  }));
+}
+
+/**
+ * Inventario vivo. Todo lo que ejecuta es `list-sessions` y `list-panes -a`, ambos de sólo
+ * lectura sobre el servidor tmux entero: es lo que permite listar las sesiones ajenas del
+ * operador sin ningún riesgo. F1 lee sesiones ajenas; no les escribe.
+ *
+ * Si `list-panes` falla se devuelve el inventario sin panes en vez de nada: nombres, ventanas y
+ * `kind` siguen siendo útiles.
+ *
+ * OJO con los cycle dirs rancios: `removeCycleDir` sólo corre en un stop limpio (engine.ts:1395),
+ * así que un crash deja el dir atrás. Si un nombre de sesión se reutilizara, el dir muerto
+ * promovería una sesión a "gestionada". Los sufijos `Date.now().toString(36)` lo hacen
+ * improbable; no se limpia aquí porque borrar dirs de otro es exactamente lo que no toca hacer.
+ */
+export async function listAllSessions(): Promise<TmuxSessionInfo[]> {
+  const [sessionsOut, panesOut] = await Promise.all([listSessionsRaw(), listPanesRaw()]);
+  if (!sessionsOut.trim()) return [];
+  return buildInventory(sessionsOut, panesOut, (name) => existsSync(cycleDirForSession(name)));
 }
