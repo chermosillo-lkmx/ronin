@@ -146,3 +146,15 @@ export interface TmuxSessionInfo {
   createdAt: number;     // epoch ms (tmux da segundos; se multiplica al parsear)
   attached: boolean;
 }
+
+// ---- Preflight (F1). Espejo manual en web/src/types.ts ----
+
+export type CheckLevel = "ok" | "warn" | "fail";
+
+export interface PreflightCheck {
+  key: string;
+  label: string;
+  level: CheckLevel;
+  detail: string;
+  note?: string;   // qué hacer; sólo se rellena cuando level !== "ok"
+}

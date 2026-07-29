@@ -25,6 +25,7 @@ import { fetchClickUpDescription, testClickUp } from "./clickup.js";
 import { testJira } from "./jira.js";
 import { testGitLab } from "./gitlab.js";
 import { corsOptions, requireLocalOrigin } from "./security.js";
+import { runPreflight } from "./preflight.js";
 import { listAllSessions } from "./sessions.js";
 
 const app = express();
@@ -327,6 +328,12 @@ app.get("/api/workers/:id/panes", async (req, res) => {
 // del driver, que también se derivan en cada poll).
 app.get("/api/sessions", async (_req, res) => {
   res.json({ sessions: await listAllSessions() });
+});
+
+// Comprobaciones de entorno (F1; F6 añade node-pty y firma/notarizado al mismo registro).
+// Lanza 4 subprocesos, así que NO se pollea: la pantalla lo pide al montar y con un botón.
+app.get("/api/preflight", async (_req, res) => {
+  res.json({ checks: await runPreflight() });
 });
 
 // Manual re-sync of the board (refresh button)
