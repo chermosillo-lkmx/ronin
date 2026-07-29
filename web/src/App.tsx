@@ -46,6 +46,8 @@ import {
 } from "./api";
 import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PaneRole, PaneStatus, Priority, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, Snapshot, Task, TaskSource, TaskStatus, WfStage, WfStep, WorkflowConfig, Worker, WorkerState } from "./types";
 import { SessionsScreen } from "./screens/SessionsScreen";
+import { PreflightScreen } from "./screens/PreflightScreen";
+import { StatusBar } from "./components/StatusBar";
 
 const PRIO_NUM: Record<Priority, number> = { urgent: 1, high: 2, normal: 3, low: 4, none: 0 };
 
@@ -2459,6 +2461,9 @@ export function App() {
         <button className="refresh" onClick={() => setView("sesiones")} title="inventario de TODAS las sesiones tmux (gestionadas + ajenas)">
           ⌘+
         </button>
+        <button className="refresh" onClick={() => setView("preflight")} title="preflight: comprobaciones de entorno (tmux, claude, codex, ttyd, PATH)">
+          ⚙✓
+        </button>
         <button className="refresh wf-btn" onClick={() => setView("settings")} title="configuración (repos, workflows)">
           ⚙
         </button>
@@ -2473,6 +2478,8 @@ export function App() {
         <SessionsView snap={snap} onBack={() => setView("board")} onOpenBoard={() => setView("board")} />
       ) : view === "sesiones" ? (
         <SessionsScreen />
+      ) : view === "preflight" ? (
+        <PreflightScreen />
       ) : (
         <>
       <main className="body">
@@ -2663,6 +2670,7 @@ export function App() {
           </div>
         </div>
       )}
+      <StatusBar />
     </div>
   );
 }

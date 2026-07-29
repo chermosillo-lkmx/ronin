@@ -171,6 +171,10 @@ con `Origin: null` y se rechazarían.
 
 ### ⌘ Sessions
 
+> Convive con **⌘+ Sesiones** (F1), que lista **todas** las sesiones tmux —también las ajenas a
+> Ronin— en sólo lectura. Esta vista (⌘) sigue siendo la de los tickets en modo Driver y se
+> retira en F2, cuando la nueva absorba el stepper y la terminal.
+
 Pestaña de nivel superior junto a 📊 Reportes. Sidebar con los tickets en modo Driver (badge de
 fuente + título + etapa + estado de salud). El header lleva el link del ticket, el badge de
 `reviewTool`, un botón de stop y un fallback **▷ Lanzar (rápido)** (que para el driver y relanza en
@@ -267,10 +271,13 @@ sesiones; `createDriverWindow` arma la ventana de 4 panes), `tasks-source.ts` + 
 workflows por repo), `workflow.ts` (workflow componible), `prompts.ts` (plantillas editables),
 `templates.ts` (construcción de prompts), `curl-config.ts` (creds de curl por proyecto),
 `clickup-chat.ts` / `classify.ts` (DMs), `reports.ts` + `report-git.ts` / `report-worker.ts` /
-`report-schedule.ts` (reportes de resumen), `stages.ts` / `history.ts` / `today.ts` / `order.ts` (estado).
+`report-schedule.ts` (reportes de resumen), `stages.ts` / `history.ts` / `today.ts` / `order.ts` (estado),
+`security.ts` (guard de origen loopback sobre todo /api), `sessions.ts` (inventario tmux
+completo: gestionadas + ajenas), `preflight.ts` (comprobaciones de entorno).
 
 **Web (`web/src/`):** `App.tsx` (tablero + vista ⌘ Sessions + secciones de Configuración + modales), `api.ts`, `types.ts`,
-`styles.css` (tokenizado por tema).
+`styles.css` (tokenizado por tema), `screens/` y `components/` (pantallas nuevas bajo Nocturne),
+`nocturne.css` / `theme-bridge.css` / `screens.css`.
 
 ## Correr
 
@@ -284,6 +291,9 @@ npm run dev:live   # MODO LIVE: lanzar una tarea abre claude en tmux de verdad
 Abre **http://localhost:5180**. Requiere Node, `tmux`, y `claude` (Claude Code) en el PATH.
 `brew install ttyd` para la terminal interactiva embebida (opcional en modo rápido, **necesario**
 para el modo Driver, que se ve entero por el iframe).
+
+La pestaña **⚙✓ Preflight** comprueba desde la app que `tmux`, `claude`, `codex` y `ttyd` estén
+en el PATH que heredó el server, y muestra qué falta y cómo instalarlo.
 
 ### Configuración
 

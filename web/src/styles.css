@@ -63,7 +63,8 @@ body {
 
 h1, h2, h3, h4, .brand, .drawer-title { font-family: "Syne", "IBM Plex Sans", sans-serif; }
 
-.app { max-width: 1200px; margin: 0 auto; padding: 22px 20px 40px; }
+/* padding-bottom 40 → 66: los 26px de la StatusBar fija (F1) más el aire que ya había. */
+.app { max-width: 1200px; margin: 0 auto; padding: 22px 20px 66px; }
 
 /* top bar */
 .bar {

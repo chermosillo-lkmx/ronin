@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/models.ts","./src/types.ts","./src/components/sessionsidebar.tsx","./src/screens/sessionsscreen.tsx"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/models.ts","./src/types.ts","./src/components/sessionsidebar.tsx","./src/components/statusbar.tsx","./src/screens/preflightscreen.tsx","./src/screens/sessionsscreen.tsx"],"version":"5.9.3"}
