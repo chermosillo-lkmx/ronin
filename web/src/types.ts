@@ -167,3 +167,35 @@ export interface ConnectorSettingsInput {
   jira?: { token?: string; baseUrl?: string; email?: string; jql?: string };
   gitlab?: { token?: string; baseUrl?: string; project?: string };
 }
+
+// ---- Inventario tmux + preflight (F1). Espejo MANUAL de server/src/types.ts ----
+// El desajuste sería silencioso: viaja como JSON sin validación en la frontera. Si cambias uno,
+// cambia el otro en el mismo commit.
+
+export interface TmuxPaneInfo {
+  id: string;
+  windowIndex: number;
+  command: string;
+  title: string;
+  role: string | null;
+  active: boolean;
+}
+
+export interface TmuxSessionInfo {
+  name: string;
+  kind: "managed" | "foreign";
+  windows: number;
+  panes: TmuxPaneInfo[];
+  createdAt: number;
+  attached: boolean;
+}
+
+export type CheckLevel = "ok" | "warn" | "fail";
+
+export interface PreflightCheck {
+  key: string;
+  label: string;
+  level: CheckLevel;
+  detail: string;
+  note?: string;
+}

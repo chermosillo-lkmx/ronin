@@ -7,6 +7,7 @@ import { App } from "./App";
 import "./nocturne.css";
 import "./styles.css";
 import "./theme-bridge.css";
+import "./screens.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

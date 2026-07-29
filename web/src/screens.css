@@ -1,0 +1,111 @@
+/* web/src/screens.css
+   Estilos de las pantallas nuevas de F1 (Sesiones, Preflight, barra de estado).
+   Van en un archivo de clases y no en `style={{}}` porque App.tsx tiene 479 `className` y cero
+   estilos inline: meter una segunda convención de estilado en el mismo commit que introduce dos
+   directorios nuevos habría sido un cambio de forma encubierto.
+   Todo color, espacio y radio sale de un token Nocturne. Los únicos px crudos son medidas de
+   layout que el design system no tokeniza (anchos de columna, altura de la barra), igual que
+   `.sessions-side { max-height: 70vh }` en styles.css. */
+
+/* ── Pantalla de Sesiones ─────────────────────────────────────────────── */
+/* 70vh y no 100%: `.app` tiene altura automática, así que un 100% colapsaría a 0. Es el mismo
+   recurso que ya usa la vista ⌘ Sessions existente (styles.css:596,610). */
+.ron-sessions { display: flex; height: 70vh; min-height: 460px; min-width: 0; }
+
+.ron-side {
+  width: 268px; flex: none; display: flex; flex-direction: column; overflow-y: auto;
+  border-right: 1px solid var(--color-divider); background: var(--color-surface);
+}
+/* sticky: `.ron-side` scrollea y el filtro es su primer hijo, así que sin esto desaparece en
+   cuanto bajas — y con 27 gestionadas + 16 ajenas el filtro es la ÚNICA mitigación que tiene el
+   sidebar (D-H). Un control de mitigación que se va con el scroll no mitiga nada. */
+.ron-side-filter {
+  position: sticky; top: 0; z-index: 1;
+  padding: var(--space-3); background: var(--color-surface);
+}
+
+.ron-group { margin-bottom: var(--space-3); }
+.ron-group-title {
+  padding: 0 var(--space-3) var(--space-2);
+  font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--color-neutral-600);
+}
+.ron-group-empty { padding: 0 var(--space-3); font-size: 11px; color: var(--color-neutral-700); }
+
+.ron-row {
+  display: block; width: 100%; text-align: left; font: inherit; cursor: pointer;
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text); background: transparent;
+  border: none; border-left: 2px solid transparent;
+}
+.ron-row:hover { background: color-mix(in srgb, var(--color-text) 5%, transparent); }
+.ron-row.on { background: var(--color-accent-900); border-left-color: var(--color-accent); }
+.ron-row-name {
+  font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ron-row-meta { font-size: 11px; color: var(--color-neutral-500); }
+
+.ron-main { flex: 1; min-width: 0; padding: var(--space-4); overflow: auto; }
+.ron-msg { color: var(--color-neutral-500); }
+.ron-msg.err { color: var(--status-fail); }
+
+.ron-detail-head { margin-bottom: var(--space-4); }
+.ron-detail-head h2 { font-size: 20px; margin: 0; }
+.ron-detail-meta {
+  font-size: 12px; color: var(--color-neutral-500); margin-top: var(--space-1);
+}
+.ron-note {
+  font-size: 12px; color: var(--color-neutral-500); margin-bottom: var(--space-3);
+}
+.ron-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ron-empty-cell { color: var(--color-neutral-600); }
+
+/* ── Pantalla de Preflight ────────────────────────────────────────────── */
+.ron-preflight { padding: var(--space-5); min-height: 460px; }
+.ron-preflight-inner { max-width: 720px; }
+.ron-pf-title { font-size: 25px; margin: 0; }
+.ron-pf-sub { color: var(--color-neutral-500); font-size: 12px; }
+.ron-pf-list { display: grid; gap: var(--space-2); margin: var(--space-4) 0; }
+.ron-pf-row { display: flex; align-items: center; gap: var(--space-2); }
+.ron-pf-label { font-weight: 500; }
+.ron-pf-spacer { flex: 1; }
+.ron-pf-detail {
+  font-size: 12px; color: var(--color-neutral-500);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.ron-pf-note {
+  margin: var(--space-2) 0 0; font-size: 12px; color: var(--color-neutral-400);
+}
+
+/* Punto de estado. El color va por clase y no inline para que los tres estados se puedan
+   auditar de un vistazo — es el dato más importante de la pantalla. */
+.ron-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.ron-dot.ok   { background: var(--status-ok); }
+.ron-dot.warn { background: var(--status-warn); }
+.ron-dot.fail { background: var(--status-fail); }
+
+/* ── Barra de estado ──────────────────────────────────────────────────── */
+/* position:fixed y NO el último hijo de un flex column con height:100vh: `.app` es una columna
+   centrada de max-width 1200px en flujo normal con scroll de documento, y convertirla en flex de
+   altura fija rompería el grid de dos columnas del tablero.
+
+   ÉSTA ES LA EXCEPCIÓN A D-I, y es deliberada: la barra usa los tokens TEMATIZADOS de styles.css
+   (--panel/--line/--muted, definidos en las dos ramas `html[data-theme=…]`), no los de Nocturne, y
+   NO lleva la clase `.nocturne`. Razón: se monta fuera del ternario de vistas, así que se ve en
+   las seis pantallas, siempre. Con tokens Nocturne sería una franja de 26px #232532 pegada al pie
+   del tablero CLARO — el tema por defecto — en el tablero, en Reportes y en Configuración. Eso no
+   es una isla oscura autocontenida como las pantallas nuevas: es una regresión visible sobre
+   pantallas que F1 no debía tocar, y falsificaría el criterio de fase "el claro sigue intacto".
+   Con estos tres tokens la barra sale clara en tema claro y Nocturne en oscuro (el puente ya
+   re-apunta --panel/--line/--muted allí), gratis y sin ramas. */
+.ron-status {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; height: 26px;
+  display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-3);
+  border-top: 1px solid var(--line); background: var(--panel);
+  color: var(--muted); font-size: 11px;
+}
+.ron-status-item { display: flex; align-items: center; gap: var(--space-1); }
+.ron-status-spacer { flex: 1; }
+.ron-status-dot { width: 6px; height: 6px; border-radius: 50%; }
+.ron-status-dot.on  { background: var(--status-ok); }
+.ron-status-dot.off { background: var(--status-fail); }

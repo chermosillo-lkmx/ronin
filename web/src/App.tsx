@@ -45,6 +45,7 @@ import {
   type Evidence,
 } from "./api";
 import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PaneRole, PaneStatus, Priority, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, Snapshot, Task, TaskSource, TaskStatus, WfStage, WfStep, WorkflowConfig, Worker, WorkerState } from "./types";
+import { SessionsScreen } from "./screens/SessionsScreen";
 
 const PRIO_NUM: Record<Priority, number> = { urgent: 1, high: 2, normal: 3, low: 4, none: 0 };
 
@@ -2275,7 +2276,7 @@ export function App() {
   const [adhocBusy, setAdhocBusy] = useState(false);
   const [prOpen, setPrOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
-  const [view, setView] = useState<"board" | "settings" | "reports" | "sessions">("board");
+  const [view, setView] = useState<"board" | "settings" | "reports" | "sessions" | "sesiones" | "preflight">("board");
   const [launchFor, setLaunchFor] = useState<Task | null>(null);
   const [previewTask, setPreviewTask] = useState<Task | null>(null);
   const [actions, setActions] = useState<CustomAction[]>([]);
@@ -2455,6 +2456,9 @@ export function App() {
         <button className="refresh" onClick={() => { setOpenWorkerId(null); setView("sessions"); }} title="sesiones driver (4 panes tmux)">
           ⌘
         </button>
+        <button className="refresh" onClick={() => setView("sesiones")} title="inventario de TODAS las sesiones tmux (gestionadas + ajenas)">
+          ⌘+
+        </button>
         <button className="refresh wf-btn" onClick={() => setView("settings")} title="configuración (repos, workflows)">
           ⚙
         </button>
@@ -2467,6 +2471,8 @@ export function App() {
         <ReportsView onBack={() => setView("board")} />
       ) : view === "sessions" ? (
         <SessionsView snap={snap} onBack={() => setView("board")} onOpenBoard={() => setView("board")} />
+      ) : view === "sesiones" ? (
+        <SessionsScreen />
       ) : (
         <>
       <main className="body">

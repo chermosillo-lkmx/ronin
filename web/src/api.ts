@@ -1,4 +1,4 @@
-import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PaneRole, PaneView, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, Snapshot, WorkflowConfig } from "./types";
+import type { ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PaneRole, PaneView, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, Snapshot, TmuxSessionInfo, WorkflowConfig } from "./types";
 
 /** Subscribe to live snapshots via SSE. Returns an unsubscribe fn. */
 export function subscribeStream(
@@ -344,4 +344,31 @@ export async function listReports(): Promise<ReportMeta[]> {
 export async function getReport(name: string): Promise<{ name: string; markdown: string } | null> {
   const r = await fetch(`/api/reports/${encodeURIComponent(name)}`);
   return r.ok ? r.json() : null;
+}
+
+/**
+ * Inventario tmux completo. Sigue el contrato de los demás GET de este archivo: NO lanza.
+ * `null` = el server no contestó o contestó mal; `[]` = contestó y no hay sesiones. La barra de
+ * estado necesita distinguirlos para poder decir "server sin respuesta" en vez de "0 sesiones",
+ * que es una afirmación distinta y falsa.
+ */
+export async function getSessions(): Promise<TmuxSessionInfo[] | null> {
+  try {
+    const r = await fetch("/api/sessions");
+    // El `?? null` NO es decorativo: un 200 con un cuerpo sin `sessions` devolvería `undefined`,
+    // que no es `null` ni es un array — los consumidores comparan contra `null` y acabarían
+    // haciendo `undefined.find(...)`, o sea pantalla en blanco. Aquí sólo salen dos cosas.
+    return r.ok ? ((await r.json()).sessions ?? null) : null;
+  } catch {
+    return null; // fetch rechaza cuando el server está caído
+  }
+}
+
+export async function getPreflight(): Promise<PreflightCheck[] | null> {
+  try {
+    const r = await fetch("/api/preflight");
+    return r.ok ? ((await r.json()).checks ?? null) : null;
+  } catch {
+    return null;
+  }
 }
