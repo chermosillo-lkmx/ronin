@@ -153,15 +153,21 @@ zoom por cliente. Si dos personas (o dos pestañas) miran la misma sesión, el z
 todas. Está avisado en la UI y mitigado con la vista de texto por defecto, pero no tiene arreglo del
 lado de tmux.
 
-**CSRF desde localhost (pendiente, repo-wide).** El server hace bind a `127.0.0.1`, lo que protege
-de la red pero **no** de una pestaña maliciosa en el navegador del operador: `cors()` va sin
-opciones y responde el preflight de forma permisiva. Las rutas nuevas `/focus` y `/attach`
-comprueban el `Origin` (`requireLocalOrigin`), pero las preexistentes **no**, y son peores:
-`/api/workers/:id/input` **teclea texto arbitrario** en un claude con bypass-permissions, y
-`/api/repo-config/:repo` persiste un `verifyCmd` que después corre como shell. El arreglo de fondo
-es restringir `cors()` a orígenes loopback — es viable (el navegador siempre habla same-origin vía
-el proxy de Vite), pero toca todas las rutas, así que se deja anotado aquí en vez de colarlo en un
-cambio de otra cosa.
+**CSRF desde localhost (cerrado).** El server hace bind a `127.0.0.1` y además restringe
+`cors()` a orígenes loopback (`security.ts`), con un `requireLocalOrigin` montado sobre
+**todo** `/api` y antes de `express.json()`. Una pestaña maliciosa en el navegador del
+operador ya no puede llegar a `/api/workers/:id/input` (que teclea en un claude con
+bypass-permissions) ni a `/api/repo-config/:repo` (que persiste un `verifyCmd` que después
+corre como shell). Ojo con la asimetría: el que bloquea es el **middleware** — `cors()` con un
+origen rechazado no corta la petición, sólo impide que el atacante lea la respuesta. Una
+petición sin `Origin` (curl, `<img>`, EventSource same-origin) sigue pasando, así que
+`POST /api/webhook/dm` **sigue abierto a propósito** para el forwarder de DMs: eso no lo cierra
+este guard. Y un `Origin: null` recibe 403: es el `Origin` de un iframe `sandbox`, o sea de
+contenido que un atacante controla, y aceptarlo haría el guard evadible con tres atributos de
+HTML. **Eso fija una restricción de diseño para F6:** el renderer de Electron se sirve con un
+esquema propio (`app://`, vía `protocol.handle()`) — lo que además pide un CSP estricto — y ese
+esquema se añade al allowlist. Desde `file://` **todas** sus peticiones, GET incluidos, irían
+con `Origin: null` y se rechazarían.
 
 ### ⌘ Sessions
 

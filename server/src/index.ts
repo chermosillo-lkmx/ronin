@@ -24,9 +24,13 @@ import { readConnectorSettings, saveConnectorSettings } from "./settings.js";
 import { fetchClickUpDescription, testClickUp } from "./clickup.js";
 import { testJira } from "./jira.js";
 import { testGitLab } from "./gitlab.js";
+import { corsOptions, requireLocalOrigin } from "./security.js";
 
 const app = express();
-app.use(cors());
+app.use(cors(corsOptions));
+// El guard va ANTES de express.json(): no hay razón para parsear el cuerpo de una petición
+// que vamos a rechazar por origen. Cubre las 42 rutas de /api y también sus OPTIONS.
+app.use("/api", requireLocalOrigin);
 app.use(express.json());
 
 /**
@@ -43,36 +47,6 @@ function launchOpts(body: any): LaunchOpts {
   if (body?.mode === "driver") o.mode = "driver";
   if (body?.reviewTool === "codex" || body?.reviewTool === "agent") o.reviewTool = body.reviewTool;
   return o;
-}
-
-/**
- * Rechaza un POST cross-site desde el navegador del operador. El bind a 127.0.0.1 protege de la
- * red, pero NO de una pestaña maliciosa en el mismo navegador: `cors()` va sin opciones, así que
- * responde el preflight de forma permisiva.
- *
- * Un POST cross-site SIEMPRE manda `Origin`; la app legítima llega por el proxy de Vite, que
- * reenvía `Origin: http://localhost:5180`. Sin `Origin` (curl, mismo origen) se deja pasar, para
- * no romper el uso desde terminal.
- *
- * ALCANCE: sólo cubre las rutas nuevas con efecto físico visible (zoom compartido / abrir
- * Terminal.app). Las preexistentes —/input, que TECLEA en un claude con bypass-permissions, /stop,
- * /custom, /repo-config— siguen expuestas: cerrarlo bien es restringir `cors()` para todo el
- * server, un cambio de postura que no corresponde a este requerimiento (documentado en el README).
- */
-function requireLocalOrigin(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const origin = req.get("origin");
-  if (origin) {
-    let host: string;
-    try {
-      host = new URL(origin).hostname;
-    } catch {
-      return res.status(403).json({ error: "origen no permitido" });
-    }
-    if (host !== "localhost" && host !== "127.0.0.1" && host !== "[::1]" && host !== "::1") {
-      return res.status(403).json({ error: "origen no permitido" });
-    }
-  }
-  next();
 }
 
 /** Mapea el resultado tipado de focusPane/attachWorker a su HTTP. Ver plan §2.6. */
@@ -322,7 +296,7 @@ app.post("/api/workers/:id/stop", async (req, res) => {
 // Open a visible Terminal attached to the worker's tmux session (live mode).
 // `role` (modo driver) zoomea ese pane ANTES de abrir, para que la terminal nativa lo muestre a
 // pantalla completa. Si el zoom no se pudo aplicar, no se abre nada (ver attachWorker).
-app.post("/api/workers/:id/attach", requireLocalOrigin, async (req, res) => {
+app.post("/api/workers/:id/attach", async (req, res) => {
   const role = parsePaneRoleParam(req.body?.role);
   if (!role.ok) return res.status(400).json({ error: "rol inválido" });
   sendFocusResult(res, await attachWorker(req.params.id, role.role));
@@ -330,7 +304,7 @@ app.post("/api/workers/:id/attach", requireLocalOrigin, async (req, res) => {
 
 // Zoom de tmux sobre un pane concreto (`role: null` → volver a los 4 panes).
 // OJO: el zoom es estado de la VENTANA, no del cliente — lo ven todos los attachados.
-app.post("/api/workers/:id/focus", requireLocalOrigin, async (req, res) => {
+app.post("/api/workers/:id/focus", async (req, res) => {
   const role = parsePaneRoleParam(req.body?.role);
   if (!role.ok) return res.status(400).json({ error: "rol inválido" });
   sendFocusResult(res, await focusPane(req.params.id, role.role));
