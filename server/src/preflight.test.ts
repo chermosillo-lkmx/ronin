@@ -1,6 +1,10 @@
 import { strict as assert } from "node:assert";
+import { mkdtempSync, rmSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { binCheck, pathCheck } from "./preflight.js";
+import { binCheck, pathCheck, runPreflight, which } from "./preflight.js";
 
 test("binCheck: binario con versión → ok, y el detalle lleva ruta y versión", () => {
   const c = binCheck("tmux", "tmux", "/opt/homebrew/bin/tmux", "3.6", "brew install tmux");
@@ -38,4 +42,50 @@ test("pathCheck: un PATH vacío → fail (el modo de fallo de Electron)", () => 
   assert.equal(c.level, "fail");
   assert.equal(c.detail, "vacío");
   assert.match(c.note ?? "", /login shell/i);
+});
+
+test("which: un directorio con el nombre del binario NO cuenta como encontrado (F20)", async () => {
+  // accessSync(X_OK) sobre un directorio significa "atravesable" y pasa: sin el isFile() de
+  // which(), esto devolvería la ruta del directorio como si fuera el binario. Directorio real
+  // en un tmpdir, no un mock — mismo recurso que worktree.test.ts.
+  const dir = mkdtempSync(join(tmpdir(), "preflight-test-"));
+  try {
+    await mkdir(join(dir, "tmux"));
+    assert.equal(which("tmux", dir), "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("which: encuentra un binario real cuando la entrada del PATH sí es un archivo", async () => {
+  // Control positivo: el test de arriba no pasaría por casualidad (p. ej. porque which()
+  // siempre devolviera "").
+  const dir = mkdtempSync(join(tmpdir(), "preflight-test-"));
+  try {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const bin = join(dir, "fake-bin");
+    writeFileSync(bin, "#!/bin/sh\necho hi\n");
+    chmodSync(bin, 0o755);
+    assert.equal(which("fake-bin", dir), bin);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runPreflight: versionOf recibe la ruta que which() resolvió, nunca el nombre del binario (F19)", async () => {
+  // La forma defectuosa del borrador era versionOf(b.bin, flag): resuelve el PATH dos veces y
+  // puede acabar consultando un binario distinto del que el `detail` reporta. Inyectando un
+  // `which` falso se puede diferenciar sin fixtures ni tocar el entorno real.
+  const seenPaths: string[] = [];
+  const fakeWhich = (bin: string) => `/fake/${bin}`;
+  const fakeVersionOf = async (path: string) => {
+    seenPaths.push(path);
+    return "9.9";
+  };
+  const checks = await runPreflight({ which: fakeWhich, versionOf: fakeVersionOf });
+  const tmuxCheck = checks.find((c) => c.key === "tmux")!;
+  assert.equal(tmuxCheck.detail, "/fake/tmux · 9.9");
+  // Si el código volviera a `versionOf(b.bin, flag)`, seenPaths traería "tmux", "claude", … (los
+  // nombres desnudos de BINS), nunca las rutas fake — y esta aserción reventaría.
+  assert.deepEqual(seenPaths.sort(), ["/fake/claude", "/fake/codex", "/fake/tmux", "/fake/ttyd"]);
 });

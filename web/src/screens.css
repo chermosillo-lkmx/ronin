@@ -89,15 +89,19 @@
    centrada de max-width 1200px en flujo normal con scroll de documento, y convertirla en flex de
    altura fija rompería el grid de dos columnas del tablero.
 
-   ÉSTA ES LA EXCEPCIÓN A D-I, y es deliberada: la barra usa los tokens TEMATIZADOS de styles.css
-   (--panel/--line/--muted, definidos en las dos ramas `html[data-theme=…]`), no los de Nocturne, y
-   NO lleva la clase `.nocturne`. Razón: se monta fuera del ternario de vistas, así que se ve en
-   las seis pantallas, siempre. Con tokens Nocturne sería una franja de 26px #232532 pegada al pie
-   del tablero CLARO — el tema por defecto — en el tablero, en Reportes y en Configuración. Eso no
-   es una isla oscura autocontenida como las pantallas nuevas: es una regresión visible sobre
-   pantallas que F1 no debía tocar, y falsificaría el criterio de fase "el claro sigue intacto".
-   Con estos tres tokens la barra sale clara en tema claro y Nocturne en oscuro (el puente ya
-   re-apunta --panel/--line/--muted allí), gratis y sin ramas. */
+   ÉSTA ES LA EXCEPCIÓN A D-I, y es deliberada: la barra ENTERA — incluido su punto de estado —
+   usa los tokens TEMATIZADOS de styles.css (--panel/--line/--muted/--ok/--danger, definidos en
+   las dos ramas `html[data-theme=…]`), nunca los de Nocturne, y no lleva la clase `.nocturne`.
+   Razón: se monta fuera del ternario de vistas, así que se ve en las seis pantallas, siempre. Con
+   tokens Nocturne sería una franja de 26px #232532 pegada al pie del tablero CLARO — el tema por
+   defecto — en el tablero, en Reportes y en Configuración. Eso no es una isla oscura autocontenida
+   como las pantallas nuevas: es una regresión visible sobre pantallas que F1 no debía tocar, y
+   falsificaría el criterio de fase "el claro sigue intacto".
+   Con estos tokens la barra sale clara en tema claro y Nocturne en oscuro (el puente ya re-apunta
+   --panel/--line/--muted/--ok/--danger allí), gratis y sin ramas.
+   OJO: `--status-ok`/`--status-fail` (los que usa `.ron-dot` dentro de `.nocturne`) NO valen aquí
+   — no están tematizados y dan 2.20:1 / 2.95:1 sobre el `--panel` claro, bajo el piso de 3:1 para
+   un elemento gráfico. `--ok`/`--danger` sí están tematizados y dan 4.54:1 / 5.47:1. */
 .ron-status {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; height: 26px;
   display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-3);
@@ -107,5 +111,5 @@
 .ron-status-item { display: flex; align-items: center; gap: var(--space-1); }
 .ron-status-spacer { flex: 1; }
 .ron-status-dot { width: 6px; height: 6px; border-radius: 50%; }
-.ron-status-dot.on  { background: var(--status-ok); }
-.ron-status-dot.off { background: var(--status-fail); }
+.ron-status-dot.on  { background: var(--ok); }
+.ron-status-dot.off { background: var(--danger); }

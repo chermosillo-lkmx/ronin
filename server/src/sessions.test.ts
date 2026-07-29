@@ -23,7 +23,9 @@ test("parseSessionList: nombre, ventanas, creación en ms y attached", () => {
 
 test("parseSessionList: una sesión llamada '0' no se pierde", () => {
   // tmux nombra con enteros las sesiones sin nombre: en esta máquina hay 12 así
-  // (`2`, `10`, `14`, `83`, …). Un `if (!name)` las tiraría todas.
+  // (`2`, `10`, `14`, `83`, …). `name` es siempre un string y `if (!name)` sería equivalente a la
+  // comparación explícita del código — pero una simplificación futura a `!Number(name)` o
+  // `!+name` sí convertiría "0" en 0 y tiraría la sesión, y este test lo atrapa.
   const out = parseSessionList(SESSIONS);
   assert.ok(out.some((s) => s.name === "0"));
 });
@@ -100,6 +102,9 @@ test("isSafeSessionName: rechaza lo que no puede ir en una ruta", () => {
   assert.equal(isSafeSessionName("../../etc"), false);
   assert.equal(isSafeSessionName("a/b"), false);
   assert.equal(isSafeSessionName(""), false);
+  // "/" ya lo mata el charset del regex; pero "." SÍ está permitido en el charset, así que sin
+  // el `!name.includes("..")` un nombre como ".." pasaría el regex solo y sería "seguro".
+  assert.equal(isSafeSessionName(".."), false);
 });
 
 test("buildInventory: une sesiones y panes, y clasifica", () => {

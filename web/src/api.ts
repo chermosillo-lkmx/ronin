@@ -367,6 +367,8 @@ export async function getSessions(): Promise<TmuxSessionInfo[] | null> {
 export async function getPreflight(): Promise<PreflightCheck[] | null> {
   try {
     const r = await fetch("/api/preflight");
+    // Mismo `?? null` que `getSessions` y por el mismo motivo: un 200 sin `checks` en el cuerpo
+    // da `undefined`, no `null` ni array, y `PreflightScreen` compara contra `null`.
     return r.ok ? ((await r.json()).checks ?? null) : null;
   } catch {
     return null;

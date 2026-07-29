@@ -16,14 +16,25 @@ import type { TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
  * los dos, así que el delimitador no se puede romper desde fuera.
  */
 
-/** `#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}` */
+/**
+ * `#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}`
+ *
+ * A diferencia de `parsePaneList` (que DESCARTA una línea sin `%N` en vez de inventar un
+ * target), una línea de sesión sin TABs suficientes se conserva como entrada degradada
+ * (`windows: 0, createdAt: 0, attached: false`) en vez de descartarse. No es inconsistencia: acá
+ * `name` es el único campo que siempre puede rescatarse solo (es lo primero antes del primer
+ * TAB), así que degradar preserva "una sesión existe con este nombre" incluso si el resto de
+ * campos se perdió — mientras que en panes, sin `%N` no hay identidad estable que rescatar.
+ */
 export function parseSessionList(stdout: string): Omit<TmuxSessionInfo, "kind" | "panes">[] {
   const out: Omit<TmuxSessionInfo, "kind" | "panes">[] = [];
   for (const line of (stdout ?? "").split("\n")) {
     if (!line.trim()) continue;
     const [name, windows, created, attached] = line.split("\t");
     // `name` puede ser "0": tmux nombra así las sesiones sin nombre y en esta máquina hay 12
-    // con nombre entero. Comparar contra undefined/"" explícitamente, nunca con falsy.
+    // con nombre entero. `name` es siempre un string, así que `if (!name)` sería equivalente
+    // aquí — la comparación explícita es para que una simplificación futura a `!Number(name)` o
+    // `!+name` (que sí convertiría "0" en 0 y tiraría la sesión) se vea como el error que es.
     if (name === undefined || name === "") continue;
     out.push({
       name,

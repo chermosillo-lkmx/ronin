@@ -61,9 +61,12 @@ export function pathCheck(entries: string[]): PreflightCheck {
  * pasa. Sin esta comprobación, un `<dir>/tmux` que fuera una carpeta daría `level:"ok"` con la
  * ruta de la carpeta y la versión del tmux de verdad que `execvp` encontraría más adelante en
  * el PATH: un check en verde describiendo dos binarios distintos.
+ *
+ * `path` recibe `process.env.PATH` por defecto pero es un parámetro: así queda pura, exportable
+ * y comprobable con un directorio real de un tmpdir, sin tocar el entorno del proceso de test.
  */
-function which(bin: string): string {
-  for (const dir of (process.env.PATH ?? "").split(":").filter(Boolean)) {
+export function which(bin: string, path: string = process.env.PATH ?? ""): string {
+  for (const dir of path.split(":").filter(Boolean)) {
     const full = join(dir, bin);
     try {
       if (!statSync(full).isFile()) continue;
@@ -113,12 +116,20 @@ const BINS: { key: string; label: string; bin: string; flag: string; note: strin
  * que `execvp` caiga a su `/usr/bin:/bin` por defecto. Con un PATH vacío esto reportará
  * `tmux: fail` mientras el engine sigue corriendo tan campante — y eso es justo lo que se
  * quiere ver: el check existe para señalar un entorno frágil, no para imitarlo.
+ *
+ * `resolve` se inyecta (por defecto los `which`/`versionOf` reales) para poder comprobar, sin
+ * fixtures ni tocar el entorno real, que `versionOf` recibe SIEMPRE la ruta que `which` resolvió
+ * y nunca el nombre desnudo del binario — la forma defectuosa del borrador (`versionOf(b.bin, …)`)
+ * resuelve el PATH dos veces y puede acabar consultando un binario distinto del que `detail`
+ * reporta.
  */
-export async function runPreflight(): Promise<PreflightCheck[]> {
+export async function runPreflight(
+  resolve: { which: typeof which; versionOf: typeof versionOf } = { which, versionOf }
+): Promise<PreflightCheck[]> {
   const bins = await Promise.all(
     BINS.map(async (b) => {
-      const path = which(b.bin);
-      return binCheck(b.key, b.label, path, await versionOf(path, b.flag), b.note);
+      const path = resolve.which(b.bin);
+      return binCheck(b.key, b.label, path, await resolve.versionOf(path, b.flag), b.note);
     })
   );
   return [...bins, pathCheck((process.env.PATH ?? "").split(":").filter(Boolean))];
