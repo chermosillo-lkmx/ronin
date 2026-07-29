@@ -1,0 +1,50 @@
+/* web/src/theme-bridge.css
+   Re-apunta las custom properties de styles.css a los tokens de Nocturne, para que el tablero y
+   los reportes existentes adopten el tema sin reescribir sus reglas.
+
+   DOS COSAS QUE HAY QUE ENTENDER ANTES DE TOCAR ESTE ARCHIVO:
+
+   1. El selector NO puede ser `:root`. styles.css no tokeniza ahí (en `:root` sólo pone
+      --term-bg/--term-ink/--accent/--accent-ink): lo demás vive bajo `html[data-theme="light"]`
+      y `html[data-theme="dark"]`, que outspecifican a `:root`. Un puente en `:root` es código
+      muerto: no pinta ni un píxel.
+   2. Por eso este archivo se importa DESPUÉS de styles.css: misma especificidad, gana el último.
+      Moverlo antes lo desactiva en silencio.
+
+   Sólo se re-apunta el tema OSCURO. Nocturne es un sistema sólo-oscuro y el default de la app es
+   claro, con un toggle que es una función shippeada (README). Re-apuntar los dos temas mataría el
+   claro; re-apuntar sólo el oscuro convierte a Nocturne en "el tema oscuro de Ronin" y deja el
+   toggle funcionando.
+
+   NO se mapean --accent ni --accent-2: en tema oscuro styles.css hace `--lkmx: var(--accent)` y
+   `--lkmx2: var(--accent-2)`, así que re-apuntarlos borraría los colores de marca de LKMX del
+   header — justo lo que se quería evitar.
+
+   NO se mapea --btn-bg: styles.css lo usa para `background` Y para `border-color` en `.btn.launch`
+   y `.btn.copy`. Ponerlo transparente no deja un botón de contorno: deja el CTA ▷ Lanzar sin borde
+   ni fondo.
+
+   Esto es un puente, no un destino: conforme cada pantalla vieja se rehaga bajo Nocturne, su
+   variable sale de aquí. Rollback completo = borrar el import de main.tsx. */
+html[data-theme="dark"] {
+  /* Fondos y superficies */
+  --bg: var(--color-bg);
+  --panel: var(--color-surface);
+  --panel-2: var(--color-neutral-900);
+  --surface: var(--color-neutral-900);
+  --surface-2: var(--color-neutral-800);
+
+  /* Texto */
+  --ink: var(--color-text);
+  --ink-strong: var(--color-neutral-100);
+  --muted: var(--color-neutral-500);
+
+  /* Líneas */
+  --line: var(--color-divider);
+  --line-2: var(--color-neutral-700);
+
+  /* Estados */
+  --ok: var(--status-ok);
+  --warn: var(--status-warn);
+  --danger: var(--status-fail);
+}
