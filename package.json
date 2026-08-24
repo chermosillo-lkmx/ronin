@@ -2,6 +2,7 @@
   "name": "claude-cowork",
   "version": "0.1.0",
   "private": true,
+  "main": "desktop/dist/main/index.js",
   "description": "Dashboard local de tareas que orquesta workers Claude vía tmux + integraciones (ClickUp/Jira/GitLab)",
   "workspaces": [
     "server",
@@ -10,9 +11,30 @@
   "scripts": {
     "dev": "concurrently -n SERVER,WEB -c cyan,magenta \"npm run dev -w server\" \"npm run dev -w web\"",
     "dev:live": "concurrently -n SERVER,WEB -c cyan,magenta \"npm run dev:live -w server\" \"npm run dev -w web\"",
-    "start": "npm run dev"
+    "start": "npm run dev",
+    "build:server": "npm run build -w server",
+    "build:desktop": "tsc -p tsconfig.desktop.json",
+    "package:desktop": "npm run build -w web && npm run build:server && npm run build:desktop && electron-builder --config electron-builder.yml",
+    "package:desktop:dir": "npm run build -w web && npm run build:server && npm run build:desktop && electron-builder --config electron-builder.yml --dir",
+    "test:desktop": "node --import tsx --test desktop/main/backend-supervisor.test.ts desktop/main/renderer-readiness.test.ts desktop/main/window-security.test.ts desktop/main/pty.test.ts desktop/main/ipc.test.ts desktop/main/session-name.test.ts desktop/main/capability-path.test.ts desktop/main/smoke.test.ts desktop/main/bootstrap.test.ts desktop/main/app-protocol.test.ts desktop/main/tmux-path.test.ts desktop/main/index.test.ts desktop/preload/index.test.ts desktop/test/electron-launcher.test.mjs",
+    "dev:electron": "npm run build:server && npm run build:desktop && concurrently --kill-others --success first -n VITE,ELECTRON \"npm run dev -w web\" \"node desktop/electron-launcher.mjs desktop/dist/main/index.js --dev\"",
+    "tests:all": "node scripts/run-tests.mjs all",
+    "tests:failed": "node scripts/run-tests.mjs failed",
+    "tests:repo": "node scripts/run-tests.mjs repo",
+    "tests:suite": "node scripts/run-tests.mjs suite",
+    "test:electron": "npm run build -w web && npm run build:server && npm run build:desktop && node desktop/test/run-electron-smoke.mjs"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "@types/node": "22.10.5",
+    "concurrently": "9.1.2",
+    "electron": "43.2.0",
+    "electron-builder": "^25.1.8",
+    "tsx": "4.19.2",
+    "typescript": "5.7.3"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "node-pty": "^1.1.0"
   }
 }
