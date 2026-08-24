@@ -22,7 +22,9 @@ export interface Task {
 export interface Worker {
   id: string;
   label: string;
-  kind?: "task" | "research" | "action";
+  kind?: "task" | "research" | "action" | "adopted";
+  origin?: "ronin" | "adopted"; // ausente = "ronin"
+  adoptedPane?: string;   // %N registrado en la adopción (F2)
   actionKey?: string;    // set cuando kind === "action" (qué CustomAction lo lanzó)
   repo: string;
   taskId: string;
@@ -51,6 +53,31 @@ export interface DriverPanes {
   worker: string;
   review: string;
   verify: string;
+}
+
+export type TmuxDiagnosticCode = "TMUX_NOT_FOUND" | "TMUX_SERVER_UNREACHABLE" | "TMUX_INVENTORY_FAILED";
+
+export interface TmuxDiagnostic {
+  code: TmuxDiagnosticCode;
+  detail: string;
+}
+
+export interface TmuxInventoryResult {
+  sessions: TmuxSessionInfo[];
+  diagnostic: TmuxDiagnostic | null;
+}
+
+// Espejo de server/src/types.ts (T2). El detalle persistido de una adopción; la autoridad
+// real vive en tmux (@cowork-adopted), esto sólo informa a la UI.
+export interface AdoptionRecord {
+  version: 1;
+  session: string;
+  repo: string;
+  cwd: string;
+  paneId: string;
+  sessionCreatedAt: number;
+  adoptedAt: number;
+  workflow: WorkflowConfig;
 }
 
 // Espejo de server/src/types.ts (que a su vez re-exporta PaneRole/PaneStatus de tmux.ts, donde
@@ -117,6 +144,18 @@ export interface WorkflowConfig {
   verifyAfter: string | null;
 }
 
+export interface WorkflowCatalogItem {
+  id: string;
+  name: string;
+  config: WorkflowConfig;
+  updatedAt: number;
+}
+
+export interface WorkflowCatalog {
+  version: 1;
+  items: WorkflowCatalogItem[];
+}
+
 export interface PromptTemplate {
   key: string;
   label: string;
@@ -154,6 +193,25 @@ export interface RepoOverrideConfig {
   plannerModel: string;              // "" = hereda COWORK_PLANNER_MODEL
   workerModel: string;               // "" = hereda COWORK_WORKER_MODEL
   usesDefaultWorkflow: boolean;
+  skills: SkillRef[];
+}
+
+export type SkillRoot = "global" | "repo-claude" | "repo-skills";
+export interface SkillRef {
+  root: SkillRoot;
+  name: string;
+  sourceRepo?: string;
+}
+export interface SkillSummary {
+  ref: SkillRef;
+  name: string;
+  description: string;
+  valid: boolean;
+  error?: string;
+}
+export interface SkillDocument extends SkillSummary {
+  content: string;
+  valid: true;
 }
 
 export interface ConnectorSettings {
@@ -181,6 +239,12 @@ export interface TmuxPaneInfo {
   active: boolean;
 }
 
+/** Etiqueta local para operar una sesión sin alterar su identificador real en tmux. */
+export interface SessionPresentation {
+  title: string;
+  repo: string | null;
+}
+
 export interface TmuxSessionInfo {
   name: string;
   kind: "managed" | "foreign";
@@ -188,6 +252,8 @@ export interface TmuxSessionInfo {
   panes: TmuxPaneInfo[];
   createdAt: number;
   attached: boolean;
+  adopted: boolean; // derivado de @cowork-adopted en el inventario (T3)
+  presentation?: SessionPresentation;
 }
 
 export type CheckLevel = "ok" | "warn" | "fail";
@@ -198,4 +264,106 @@ export interface PreflightCheck {
   level: CheckLevel;
   detail: string;
   note?: string;
+}
+
+// ---- Test harness (espejo de server/src/test-harness/model.ts + service.ts; sólo formas PÚBLICAS) ----
+
+export type TestSuite = "unit" | "e2e" | "api" | "browser";
+export type TestRunStatus = "queued" | "running" | "passed" | "failed" | "error" | "timeout" | "cancelled" | "blocked";
+export type TestCellState = "unconfigured" | "never_run" | TestRunStatus;
+
+export interface TestCommandSpec {
+  program: string;
+  args: string[];
+}
+
+export interface TestSuiteConfig {
+  command: TestCommandSpec;
+  cwd?: string;
+  timeoutMs: number;
+  junitPath?: string;
+  coberturaPath?: string;
+  lcovPath?: string;
+}
+
+/** Perfil tal como lo publica el server: NOMBRES de variable, nunca valores. */
+export interface TestPublicProfile {
+  name: string;
+  variables: string[];
+  apiBaseUrl?: string;
+  allowedOrigins: string[];
+  allowMutations: boolean;
+}
+
+export interface TestRepoConfig {
+  repo: string;
+  configured: boolean;
+  profiles: TestPublicProfile[];
+  suites: Partial<Record<TestSuite, TestSuiteConfig>>;
+}
+
+export interface TestCoverage {
+  status: "reported" | "not_reported" | "invalid" | "not_applicable";
+  lines?: number;
+  branches?: number;
+  reason?: string;
+}
+
+export interface TestTotals {
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  errors: number;
+}
+
+export interface TestRun {
+  runId: string;
+  batchId?: string;
+  repo: string;
+  suite: TestSuite;
+  profile: string;
+  status: TestRunStatus;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  exitCode?: number | null;
+  command?: TestCommandSpec;
+  cwd?: string;
+  totals?: TestTotals;
+  totalsReason?: string;
+  coverage?: TestCoverage;
+  failures?: { name: string; classname?: string; message: string }[];
+  stdout?: string;
+  stderr?: string;
+  artifacts?: string[];
+  reason?: string;
+}
+
+export interface TestMatrixCell {
+  suite: TestSuite;
+  state: TestCellState;
+  runId?: string;
+  finishedAt?: string;
+  durationMs?: number;
+  totals?: TestTotals;
+  coverage?: TestCoverage;
+  reason?: string;
+}
+
+export interface TestMatrixRow {
+  repo: string;
+  configured: boolean;
+  profiles: string[];
+  cells: Record<TestSuite, TestMatrixCell>;
+}
+
+export type TestSelection =
+  | { kind: "suites"; repo: string; profile: string; suites: TestSuite[] }
+  | { kind: "all"; profile: string }
+  | { kind: "failed"; profile: string };
+
+export interface TestStartResult {
+  batchId?: string;
+  runIds: string[];
 }

@@ -88,3 +88,15 @@ test("run journal persists runs and batches, and artifactsDir is created lazily"
     assert.equal(again.getRun("r1")?.status, "running");
   });
 });
+
+test("saveRepo keeps a stored variable value when the input sends null for that key (masked round-trip)", () => {
+  withDir((dir) => {
+    const store = createHarnessStore({ directory: dir, repos: () => ["api"] });
+    store.saveRepo("api", CONFIG);
+    store.saveRepo("api", { profiles: [{ name: "dev", variables: { TOKEN: null, NEW: "fresh" } }], suites: {} });
+    assert.deepEqual(store.readRepo("api").config.profiles[0].variables, { TOKEN: "actual-secret", NEW: "fresh" });
+    // null sin valor previo (perfil nuevo o clave nueva) simplemente se omite
+    store.saveRepo("api", { profiles: [{ name: "qa", variables: { TOKEN: null } }], suites: {} });
+    assert.deepEqual(store.readRepo("api").config.profiles[0].variables, {});
+  });
+});

@@ -11,6 +11,12 @@
 /* 70vh y no 100%: `.app` tiene altura automática, así que un 100% colapsaría a 0. Es el mismo
    recurso que ya usa la vista ⌘ Sessions existente (styles.css:596,610). */
 .ron-sessions { display: flex; height: 70vh; min-height: 460px; min-width: 0; }
+.ron-terminal-section { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; min-height: 360px; }
+.ron-terminal-head { margin-bottom: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.ron-terminal-head h3 { margin: 0; font-size: 0.9rem; color: var(--color-text); }
+.ron-pane-selected td { background: color-mix(in srgb, var(--color-accent) 7%, transparent); }
+.ron-pane-button { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.ron-pane-button:hover { color: var(--color-accent); text-decoration: underline; }
 
 .ron-side {
   width: 268px; flex: none; display: flex; flex-direction: column; overflow-y: auto;
@@ -48,6 +54,7 @@
 .ron-main { flex: 1; min-width: 0; padding: var(--space-4); overflow: auto; }
 .ron-msg { color: var(--color-neutral-500); }
 .ron-msg.err { color: var(--status-fail); }
+.ron-msg.ok { color: var(--status-ok); }
 
 .ron-detail-head { margin-bottom: var(--space-4); }
 .ron-detail-head h2 { font-size: 20px; margin: 0; }
@@ -113,3 +120,85 @@
 .ron-status-dot { width: 6px; height: 6px; border-radius: 50%; }
 .ron-status-dot.on  { background: var(--ok); }
 .ron-status-dot.off { background: var(--danger); }
+
+/* ── T14/T15: pantalla del editor de workflow (Stepper/Grafo/JSON) ───────── */
+.ron-wf-editor { max-width: 900px; margin: 0 auto; padding: var(--space-4); }
+.ron-wf-editor-head { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; }
+.ron-wf-editor-head h2 { margin: 0; font-size: 20px; }
+.wf-target-select {
+  padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm);
+  border: 1px solid var(--color-divider); background: var(--color-surface); color: var(--color-text);
+}
+.wf-inherit-check { display: flex; align-items: center; gap: var(--space-1); font-size: 12px; color: var(--color-neutral-500); }
+
+.wf-view-tabs { display: flex; gap: var(--space-2); margin-bottom: var(--space-3); }
+.wf-view-tab-active { color: var(--color-accent); border-color: var(--color-accent); }
+
+.wf-graph { width: 100%; max-width: 100%; height: auto; overflow: visible; }
+.wf-graph-node rect { fill: var(--color-surface); stroke: var(--color-divider); stroke-width: 1.5; }
+.wf-graph-node text { fill: var(--color-text); font-size: 12px; }
+.wf-graph-node-impl rect { stroke: var(--color-accent); }
+.wf-graph-node-verify rect { stroke-dasharray: 4 3; }
+.wf-graph-edge { stroke: var(--color-neutral-500); stroke-width: 1.5; fill: none; }
+.wf-graph-edge-verify { stroke-dasharray: 4 3; }
+.wf-graph-arrowhead { fill: var(--color-neutral-500); }
+.wf-graph-gate-dot { fill: var(--status-warn); }
+
+.wf-json-editor { display: flex; flex-direction: column; gap: var(--space-2); }
+.wf-json-textarea {
+  width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  padding: var(--space-2); border-radius: var(--radius-sm); border: 1px solid var(--color-divider);
+  background: var(--color-surface); color: var(--color-text); resize: vertical;
+}
+.wf-json-error { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+.wf-field-error code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-right: var(--space-1); }
+.wf-editor-actions { display: flex; gap: var(--space-2); margin-top: var(--space-3); }
+
+/* ── Pruebas (test harness) ───────────────────────────────────────────── */
+.ron-tests { padding: var(--space-5); display: grid; gap: var(--space-4); min-height: 460px; }
+.ron-tests-head { display: flex; align-items: flex-end; gap: var(--space-2); flex-wrap: wrap; }
+.ron-tests-profile { display: flex; flex-direction: column; font-size: 11px; gap: 4px; color: var(--color-neutral-500); }
+.ron-tests-profile input { min-width: 140px; }
+.ron-tests-matrix-card { overflow-x: auto; }
+.ron-tests-matrix th:first-child { min-width: 200px; }
+.ron-tests-row-selected { outline: 1px solid color-mix(in srgb, var(--color-text) 20%, transparent); }
+.ron-tests-repo { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; background: none; border: 0; color: inherit; cursor: pointer; padding: 0; text-align: left; }
+.ron-tests-repo small { color: var(--color-neutral-500); font-size: 11px; }
+.ron-tests-cell { display: flex; align-items: flex-start; gap: var(--space-1); }
+.ron-tests-cell-main { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; background: none; border: 0; color: inherit; cursor: pointer; padding: 0; text-align: left; }
+.ron-tests-cell-state { font-weight: 500; }
+.ron-tests-cell-state.muted { color: var(--color-neutral-500); font-weight: 400; }
+.ron-tests-cell-meta, .ron-tests-run-meta, .ron-tests-run-time {
+  font-size: 11px; color: var(--color-neutral-500);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.ron-tests-cell-reason { flex-basis: 100%; font-size: 11px; color: var(--color-neutral-400); }
+.ron-dot.muted { background: var(--color-neutral-500); opacity: 0.4; }
+.ron-tests-lower { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr); gap: var(--space-4); align-items: start; }
+.ron-tests-history, .ron-tests-detail { padding: var(--space-3); }
+.ron-tests-section-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+.ron-tests-runs { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 480px; overflow-y: auto; }
+.ron-tests-run { display: grid; grid-template-columns: auto 1fr; column-gap: var(--space-2); align-items: center; width: 100%; background: none; border: 0; border-radius: 6px; color: inherit; cursor: pointer; padding: 6px; text-align: left; }
+.ron-tests-run:hover, .ron-tests-run.selected { background: color-mix(in srgb, var(--color-text) 6%, transparent); }
+.ron-tests-run-name { font-weight: 500; }
+.ron-tests-run-meta, .ron-tests-run-time { grid-column: 2; }
+.ron-tests-meta { display: grid; grid-template-columns: max-content 1fr; gap: 4px var(--space-3); margin: 0 0 var(--space-3); font-size: 13px; }
+.ron-tests-meta dt { color: var(--color-neutral-500); }
+.ron-tests-meta dd { margin: 0; overflow-wrap: anywhere; }
+.ron-tests-artifact { margin-right: var(--space-2); }
+.ron-tests-failures ul { margin: var(--space-1) 0 0; padding-left: var(--space-4); font-size: 13px; }
+.ron-tests-output pre {
+  margin: var(--space-2) 0 0; padding: var(--space-2); max-height: 320px; overflow: auto; font-size: 11px;
+  background: color-mix(in srgb, var(--color-text) 5%, transparent); border-radius: 6px; white-space: pre-wrap;
+}
+.ron-tests-stderr { color: var(--status-fail); }
+.ron-tests-form { display: grid; gap: var(--space-3); }
+.ron-tests-form fieldset { border: 1px solid var(--color-divider); border-radius: 8px; padding: var(--space-2) var(--space-3); display: grid; gap: var(--space-2); }
+.ron-tests-form legend { font-size: 12px; font-weight: 500; padding: 0 4px; }
+.ron-tests-form label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--color-neutral-500); }
+.ron-tests-form input, .ron-tests-form textarea { font: inherit; font-size: 13px; }
+.ron-tests-form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ron-tests-profile-row { display: grid; grid-template-columns: 160px 1fr auto; gap: var(--space-2); align-items: end; }
+.ron-tests-suite-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+.ron-tests-form-actions { display: flex; justify-content: flex-end; }

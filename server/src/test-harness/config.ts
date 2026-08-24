@@ -116,9 +116,33 @@ export function createHarnessStore(options: HarnessStoreOptions = {}) {
     return { repo: key, configured: cfg !== undefined, config: cfg ? clone(cfg) : EMPTY_CONFIG() };
   }
 
+  /**
+   * La UI nunca recibe valores de variable, así que al reenviar la config manda `null` en las
+   * claves cuyo valor quiere CONSERVAR. Se sustituyen aquí por el valor guardado (por nombre de
+   * perfil) antes de validar; sin valor previo, la clave se omite.
+   */
+  function mergeKeptVariables(key: string, input: unknown): unknown {
+    if (typeof input !== "object" || input === null || !Array.isArray((input as { profiles?: unknown }).profiles)) return input;
+    const stored = config[key]?.profiles ?? [];
+    const profiles = ((input as { profiles: unknown[] }).profiles).map((p) => {
+      if (typeof p !== "object" || p === null) return p;
+      const prof = p as { name?: unknown; variables?: unknown };
+      if (typeof prof.variables !== "object" || prof.variables === null) return p;
+      const previous = stored.find((s) => s.name === prof.name)?.variables ?? {};
+      const variables: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(prof.variables as Record<string, unknown>)) {
+        if (v === null) {
+          if (previous[k] !== undefined) variables[k] = previous[k];
+        } else variables[k] = v;
+      }
+      return { ...prof, variables };
+    });
+    return { ...(input as object), profiles };
+  }
+
   function saveRepo(repo: string, input: unknown): RepoHarness {
     const key = parseId(repoKey(repo), "repo");
-    const parsed = parseRepoHarnessConfig(input);
+    const parsed = parseRepoHarnessConfig(mergeKeptVariables(key, input));
     const previous = config[key];
     config[key] = parsed;
     try {
