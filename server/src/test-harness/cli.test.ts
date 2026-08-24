@@ -68,3 +68,49 @@ test("CLI never prints profile variable values", async () => {
   await runCli(["all", "--profile", "dev"], h, o);
   assert.equal(JSON.stringify(o).includes("s3cr3t"), false);
 });
+
+// ---- Integración: el CLI COMPILADO sobre un fixture real (JUnit + Cobertura escritos por node) ----
+
+test("built CLI all --profile dev exits 0 and persists real unit totals and coverage, not placeholders", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, resolve } = await import("node:path");
+  const pexec = promisify(execFile);
+  const root = resolve(import.meta.dirname, "..", "..", "..");
+  const cli = join(root, "server", "dist", "test-harness", "cli-entry.js");
+  if (!existsSync(cli)) await pexec("npm", ["run", "build:server", "--silent"], { cwd: root });
+
+  const dir = mkdtempSync(join(tmpdir(), "ronin-cli-int-"));
+  try {
+    const data = join(dir, "data");
+    const repo = join(dir, "repo", "svc");
+    mkdirSync(data, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(repo, "run.js"), [
+      "const fs = require('fs'); fs.mkdirSync('out', { recursive: true });",
+      `fs.writeFileSync('out/junit.xml', '<testsuite tests="3"><testcase name="a"/><testcase name="b"/><testcase name="c"><skipped/></testcase></testsuite>');`,
+      `fs.writeFileSync('out/cov.xml', '<coverage line-rate="0.6125"/>');`,
+    ].join("\n"));
+    writeFileSync(join(data, "repos.json"), JSON.stringify({ _default: join(dir, "repo"), fixture: join(dir, "repo") }));
+    writeFileSync(join(data, "test-harness.json"), JSON.stringify({
+      fixture: { profiles: [{ name: "dev", variables: { TOKEN: "cli-secret" } }], suites: { unit: { command: { program: process.execPath, args: ["run.js"] }, cwd: "svc", junitPath: "out/junit.xml", coberturaPath: "out/cov.xml" } } },
+    }));
+    const env = { ...process.env, COWORK_DATA_DIR: data, COWORK_ALLOWED_ROOTS: dir };
+    const { stdout } = await pexec(process.execPath, [cli, "all", "--profile", "dev"], { cwd: root, env });
+    assert.match(stdout, /fixture\s+unit\s+passed/);
+    assert.match(stdout, /2\/3 ok 1 skip/);
+    assert.match(stdout, /cov 61\.25%/);
+    assert.equal(stdout.includes("cli-secret"), false);
+    const journal = JSON.parse(readFileSync(join(data, "test-runs.json"), "utf8"));
+    assert.equal(journal.runs[0].coverage.lines, 61.25);
+    assert.equal(journal.runs[0].totals.total, 3);
+    assert.equal(journal.batches[0].runIds[0], journal.runs[0].runId);
+
+    // exit 2 cuando el perfil no existe (bloqueado) — sin agente, sin server
+    await assert.rejects(pexec(process.execPath, [cli, "suite", "fixture", "unit", "--profile", "qa"], { cwd: root, env }), (e: { code: number; stdout: string }) => e.code === 2 && /bloqueada|blocked/.test(e.stdout));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

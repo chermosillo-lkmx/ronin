@@ -250,6 +250,56 @@ sobre los mismos registros, no una fuente de datos paralela.
 - Visor de markdown con **toggle compacto/completo** y copiar; los reportes se guardan en
   `server/data/reports` (gitignored). Nombres tipo `daily-YYYY-MM-DD` / `weekly-YYYY-Www`.
 
+### Pruebas (⚗ test harness)
+- Matriz **repo × suite** (`Unit · E2E · API/OpenAPI · Browser`) con una fila por repo de `repos.json`.
+  Una celda sin configurar dice *sin configurar*; nunca cuenta como verde. La cobertura sólo se
+  muestra si se leyó un **Cobertura XML** o **LCOV** real; si no, *no reportada* (jamás un 0%).
+- Cada corrida persiste conteos JUnit, cobertura, fallos, salida acotada y **copias** de los
+  artefactos en `server/data/test-artifacts/<runId>/`, así el historial no cambia si el repo se
+  vuelve a correr. Estados: `queued · running · passed · failed · error · timeout · cancelled · blocked`.
+- Los comandos son `program + args` — **sin shell** — en la carpeta del repo (o `cwd` relativa
+  para monorepos), con un entorno mínimo (`PATH`, `HOME`, locale) más las **variables del
+  perfil**. Los valores del perfil nunca vuelven a la UI ni al journal (se redactan antes de
+  persistir). Este corte ejecuta `unit`/`e2e`/`browser`; `api` (OpenAPI/curl) queda para después.
+- Desde terminal o CI, sin agente ni server HTTP (construye el server si hace falta):
+
+  ```bash
+  npm run tests:all -- --profile dev
+  npm run tests:repo -- ant-liebre-api --profile dev
+  npm run tests:suite -- ant-liebre-api unit --profile dev
+  npm run tests:failed -- --profile dev          # reintenta sólo lo que falló con ese perfil
+  npm run tests:all -- --profile dev --json      # resumen JSON (sin stdout/stderr)
+  ```
+
+  Espera a que todas las corridas terminen y sale con `0` (todo ok), `1` (failed/error/timeout/
+  cancelled), `2` (bloqueada: perfil o suite sin configurar) o `64` (argumentos inválidos).
+  `RONIN_SKIP_BUILD=1` reutiliza `server/dist` sin recompilar.
+- Configuración en `server/data/test-harness.json` (local, **gitignored**, se edita desde la
+  pantalla ⚗ o a mano), indexada por la clave del repo en `repos.json`:
+
+  ```json
+  {
+    "ant-liebre-api": {
+      "profiles": [{ "name": "dev", "variables": { "PATH": "/usr/local/bin:/usr/bin:/bin", "DATABASE_URL": "…" } }],
+      "suites": {
+        "unit": {
+          "command": { "program": ".venv/bin/pytest", "args": ["-q", "--junitxml=reports/junit.xml", "--cov=src", "--cov-report=xml:reports/coverage.xml"] },
+          "cwd": "ant-liebre-api",
+          "timeoutMs": 900000,
+          "junitPath": "reports/junit.xml",
+          "coberturaPath": "reports/coverage.xml"
+        }
+      }
+    }
+  }
+  ```
+
+  `program` relativo se resuelve contra `cwd`; `junitPath`/`coberturaPath`/`lcovPath` deben quedar
+  dentro del repo (se rechazan `..`, absolutas y symlinks que escapen). Para vitest:
+  `npx vitest run --reporter=junit --outputFile=reports/junit.xml` (+ `--coverage.reporter=lcov`
+  con `@vitest/coverage-v8` instalado). Al reenviar la config desde la UI, una variable con valor
+  `null` conserva el valor ya guardado.
+
 ### DMs (opcional)
 - **Webhook** `POST /api/webhook/dm {text}` — clasifica el mensaje con `claude -p` y auto-lanza un
   worker si es una tarea. Source-agnostic (Slack / ClickUp / un forwarder).
@@ -292,8 +342,38 @@ Abre **http://localhost:5180**. Requiere Node, `tmux`, y `claude` (Claude Code) 
 `brew install ttyd` para la terminal interactiva embebida (opcional en modo rápido, **necesario**
 para el modo Driver, que se ve entero por el iframe).
 
-La pestaña **⚙✓ Preflight** comprueba desde la app que `tmux`, `claude`, `codex` y `ttyd` estén
-en el PATH que heredó el server, y muestra qué falta y cómo instalarlo.
+La pestaña **⚙✓ Preflight** comprueba desde la app que `tmux`, `claude`, `codex`, `ttyd` y
+`node-pty` estén disponibles en el entorno del server, y muestra qué falta y cómo corregirlo.
+
+### Desktop Electron
+
+```bash
+npm run dev:electron  # Vite + Electron; espera Vite hasta 30 s antes de navegar
+npm run test:electron # build web/server/desktop y smoke de producción local
+npm run package:desktop:dir # paquete sin instalador, útil para validar recursos/nativos
+npm run package:desktop # DMG/ZIP en macOS; NSIS/portable en Windows; AppImage/deb en Linux
+```
+
+El Main sirve el renderer desde `app://ronin` con CSP estricta, `contextIsolation`,
+`nodeIntegration:false` y un bridge allowlisted `window.roninDesktop.terminal`. La pantalla de
+Sesiones usa `xterm.js` + `node-pty` para adjuntar a tmux en modo lectura; los destinos son IDs
+`%N`, el PTY se cierra sin matar la sesión tmux y cualquier intento de escritura se rechaza hasta
+que exista adopción/autorización explícita. En desarrollo, una barrera reintenta Vite y la
+navegación dentro de un límite global de 30 s; si se agota, muestra recuperación para reintentar o
+cerrar en vez de dejar una ventana vacía. El backend es un hijo local supervisado: `PORT` debe ser
+un entero entre 1024 y 65535 (por defecto 8787), el hijo publica su puerto validado y el Main
+espera health tokenizado antes de crear la ventana. Al cerrar, se destruyen PTYs/ventana y se
+espera el cierre del hijo.
+
+Los paquetes reconstruyen `node-pty` para la ABI de Electron, lo mantienen fuera del asar y
+resuelven los datos editables bajo `userData`; sólo defaults no sensibles entran al paquete.
+
+El smoke exige una sesión gráfica local compatible y sólo es válido si produce una única línea
+`RONIN_SMOKE:PASS`. En el host de esta implementación queda
+`BLOCKED_ENVIRONMENT_GUI_BEFORE_APP_CODE`: Electron aborta con `SIGABRT` en
+LaunchServices/`NSApplication` antes de ejecutar código de la app. No es un PASS ni un fallo
+atribuido a la aplicación. La firma/notarización sigue diferida; workflows, pruebas, skills,
+preflight y la autorización de escritura quedan como siguientes bloques del producto.
 
 ### Configuración
 
@@ -306,6 +386,8 @@ secretos: `.env`, `settings.json`, `curl-env.json`, `repo-config.json`.
 | `COWORK_MODE` | `simulated` | `live` activa tmux real |
 | `COWORK_LIEBRE_ROOT` | `.../code/lkmx/liebre` | raíz de los repos |
 | `COWORK_CLAUDE_CMD` | `claude --permission-mode bypassPermissions` | comando del worker |
+| `COWORK_CLAUDE_TERMINAL_CMD` | `claude` | comando interactivo para una terminal normal de Claude |
+| `COWORK_CODEX_CMD` | `codex` | comando interactivo para una terminal normal de Codex |
 | `COWORK_PLANNER_MODEL` | `opus` | modelo con el que **arranca** el pane (Planner/advisor; `--model`) |
 | `COWORK_WORKER_MODEL` | `sonnet` | modelo al que se cambia en la fase de impl (Worker; `/model` tras "PLAN APPROVED") |
 | `COWORK_WORKTREE_HOME` | `~/.cowork/worktrees` | base de los git worktrees efímeros por worker (P1) |
