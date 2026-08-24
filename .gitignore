@@ -1,5 +1,7 @@
 node_modules/
+.worktrees/
 dist/
+release/
 *.log
 .env
 .DS_Store
@@ -10,8 +12,13 @@ server/data/order.json
 server/data/curl-env.json
 server/data/settings.json
 server/data/repo-config.json
+server/data/capability-token
 # datos reales / config local — NO publicar
 server/data/clickup-seed.json
 server/data/jira-seed.json
 server/data/repos.json
 server/data/reports/
+# test harness: config con secretos locales, journal y artefactos copiados
+server/data/test-harness.json
+server/data/test-runs.json
+server/data/test-artifacts/
