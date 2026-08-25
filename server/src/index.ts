@@ -54,6 +54,11 @@ import { dataPath } from "./data-dir.js";
 import { createHarnessStore } from "./test-harness/config.js";
 import { HarnessValidationError, parseSelection } from "./test-harness/model.js";
 import { createTestHarnessService, HarnessError, type TestHarnessService } from "./test-harness/service.js";
+import { runClaudeP } from "./claude-p.js";
+import { createAnalyzer, type Analyzer } from "./workflow-insights/analyzer.js";
+import { InsightsError, parseRange, type ProposalStatus } from "./workflow-insights/model.js";
+import { collectSignals, defaultSignalDeps } from "./workflow-insights/signals.js";
+import { createProposalStore, type ProposalStore } from "./workflow-insights/store.js";
 
 /** T11: an invalid workflow gets an actionable {path, code} alongside the message; any other
  *  thrown error keeps the plain {error} shape every other 400 in this file already uses. */
@@ -73,14 +78,41 @@ function respondValidate(res: express.Response, build: () => ReturnType<typeof v
   }
 }
 
+/** Workflow insights: los errores tipados ya traen status + code; cualquier otro es un 500. */
+function respondInsightsError(res: express.Response, e: unknown): void {
+  const status = e instanceof InsightsError ? e.status : 500;
+  const code = e instanceof InsightsError ? e.code : "INTERNAL";
+  res.status(status).json({ error: (e as Error).message, code });
+}
+
+function isProposalStatus(value: unknown): value is ProposalStatus {
+  return value === "proposed" || value === "accepted" || value === "dismissed";
+}
+
 export interface CreateAppOptions {
   /** Inyección para tests: un harness con store aislado. Por defecto usa server/data. */
   harness?: TestHarnessService;
+  /**
+   * Inyección para tests: store + analyzer de workflow insights aislados. `catalogDirectory`
+   * redirige el catálogo que leen las propuestas y en el que escribe `accept`, para que un
+   * test nunca toque `server/data/workflows.json`.
+   */
+  insights?: { store: ProposalStore; analyzer: Analyzer; catalogDirectory?: string };
 }
 
 export function createApp(options: CreateAppOptions = {}): express.Express {
 const app = express();
 const harness = options.harness ?? createTestHarnessService({ store: createHarnessStore() });
+const insightsCatalogDir = options.insights?.catalogDirectory;
+const insightsStore = options.insights?.store ?? createProposalStore();
+const analyzer =
+  options.insights?.analyzer ??
+  createAnalyzer({
+    store: insightsStore,
+    signals: (range) => collectSignals(range, defaultSignalDeps),
+    catalogNames: () => loadWorkflowCatalog(insightsCatalogDir).items.map((item) => item.name),
+    runClaude: (prompt) => runClaudeP(prompt, { timeoutMs: 300_000, maxBytes: 256 * 1024 }),
+  });
 const sessionPresentations = createSessionPresentationStore(dataPath("session-presentations.json"), listRepos);
 app.use(cors(corsOptions));
 // Los tres guards van ANTES de express.json(): no hay razón para parsear el cuerpo de una
@@ -441,6 +473,80 @@ app.post("/api/workflows/import", (req, res) => {
     res.status(201).json(importWorkflowCatalogItem(req.body?.name, req.body?.config ?? req.body));
   } catch (e) {
     res.status(400).json(workflowErrorBody(e));
+  }
+});
+
+// ---- Workflow insights: analizar el trabajo reciente y proponer workflows nuevos ----
+// Rutas literales (`analyze`, `analyses/:id`, `proposals/…`) montadas JUNTAS y después de
+// `/import`: el único parámetro hermano es `PUT /api/workflows/:id`, que no puede capturarlas
+// por método, pero mantenerlas agrupadas evita que un futuro `GET /api/workflows/:id` las coma.
+
+// `analyzer.start()` sólo persiste el análisis `running` y devuelve su id: el modelo corre
+// suelto, así que la ruta contesta 202 y el cliente sondea `/analyses/:id`.
+app.post("/api/workflows/analyze", (req, res) => {
+  try {
+    res.status(202).json({ analysisId: analyzer.start(parseRange(req.body ?? {})) });
+  } catch (e) {
+    respondInsightsError(res, e);
+  }
+});
+
+app.get("/api/workflows/analyses/:id", (req, res) => {
+  const analysis = insightsStore.getAnalysis(req.params.id);
+  if (!analysis) {
+    res.status(404).json({ error: "análisis no encontrado", code: "ANALYSIS_NOT_FOUND" });
+    return;
+  }
+  res.json(analysis);
+});
+
+app.get("/api/workflows/proposals", (req, res) => {
+  const status = req.query.status;
+  if (status !== undefined && !isProposalStatus(status)) {
+    res.status(400).json({ error: `status "${String(status)}" inválido: proposed|accepted|dismissed`, code: "INVALID_STATUS" });
+    return;
+  }
+  res.json(insightsStore.listProposals(status));
+});
+
+// Aceptar = materializar la propuesta en el catálogo. El 409 se comprueba ANTES de escribir el
+// catálogo: reaceptar una propuesta ya aceptada debe chocar con su estado, no crear un segundo
+// item ni disfrazarse de 400 WORKFLOW_NAME_EXISTS. El nombre del cuerpo permite renombrarla al
+// aceptar (el catálogo revalida y rechaza duplicados con su propio 400).
+app.post("/api/workflows/proposals/:id/accept", (req, res) => {
+  const proposal = insightsStore.getProposal(req.params.id);
+  if (!proposal) {
+    res.status(404).json({ error: `propuesta "${req.params.id}" no encontrada`, code: "PROPOSAL_NOT_FOUND" });
+    return;
+  }
+  if (proposal.status !== "proposed") {
+    res.status(409).json({ error: `propuesta "${proposal.id}" ya no está en estado "proposed"`, code: "PROPOSAL_NOT_PROPOSED" });
+    return;
+  }
+  let item;
+  try {
+    item = createWorkflowCatalogItem(req.body?.name ?? proposal.name, proposal.config, insightsCatalogDir);
+  } catch (e) {
+    res.status(400).json(workflowErrorBody(e));
+    return;
+  }
+  try {
+    // El item ya está en disco: si la transición falla, se reporta el error real en vez de un
+    // 201 mentiroso — la propuesta sigue `proposed` y reintentar chocará con WORKFLOW_NAME_EXISTS,
+    // que es visible, en vez de dejar el catálogo y el journal en desacuerdo en silencio.
+    insightsStore.transition(proposal.id, "accepted", item.id);
+  } catch (e) {
+    respondInsightsError(res, e);
+    return;
+  }
+  res.status(201).json(item);
+});
+
+app.post("/api/workflows/proposals/:id/dismiss", (req, res) => {
+  try {
+    res.json(insightsStore.transition(req.params.id, "dismissed"));
+  } catch (e) {
+    respondInsightsError(res, e);
   }
 });
 

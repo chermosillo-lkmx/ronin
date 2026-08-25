@@ -866,3 +866,71 @@ test("GET /api/tests/config and PUT /api/tests/config/:repo validate and never e
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- Workflow insights: /api/workflows/analyze + propuestas. El análisis corre en background
+// (202 + sondeo), y `accept` escribe en el CATÁLOGO: el test inyecta store, analyzer y un
+// `catalogDirectory` en tmpdir para no tocar nunca `server/data/workflows.json`.
+
+async function insightsApp() {
+  const { mkdirSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { createProposalStore } = await import("./workflow-insights/store.js");
+  const { createAnalyzer } = await import("./workflow-insights/analyzer.js");
+  const { loadWorkflowCatalog } = await import("./workflow-catalog.js");
+
+  const dir = mkdtempSync(join(tmpdir(), "ronin-api-insights-"));
+  const catalogDir = join(dir, "catalog");
+  mkdirSync(catalogDir, { recursive: true });
+
+  const store = createProposalStore(dir);
+  const proposals = {
+    proposals: [
+      {
+        name: "hotfix-express",
+        rationale: "varios arreglos urgentes en la misma semana",
+        evidence: ["RON-1"],
+        config: {
+          stages: [
+            { key: "diagnose", label: "Diagnóstico", icon: "🔎" },
+            { key: "fix", label: "Arreglo", icon: "🛠", role: "impl" },
+          ],
+          verifyAfter: null,
+        },
+      },
+    ],
+  };
+  const analyzer = createAnalyzer({
+    store,
+    signals: async () => ({ range: { from: "", to: "" }, tasks: [], commits: {}, evidence: [] }),
+    catalogNames: () => loadWorkflowCatalog(catalogDir).items.map((item) => item.name),
+    runClaude: async () => `<PROPOSALS>${JSON.stringify(proposals)}</PROPOSALS>`,
+  });
+
+  return { app: createApp({ insights: { store, analyzer, catalogDirectory: catalogDir } }), store, analyzer, dir };
+}
+
+test("POST /api/workflows/analyze returns 202 and the analysis becomes done with one proposal; accept creates a catalog item once", async () => {
+  const token = ensureCapabilityToken();
+  const { app, analyzer, dir } = await insightsApp();
+  try {
+    const bad = await invokeRequest(app, "POST", "/api/workflows/analyze", { headers: { "x-ronin-capability": token }, body: { from: "x" } });
+    assert.equal(bad.status, 400);
+    const started = await invokeRequest(app, "POST", "/api/workflows/analyze", { headers: { "x-ronin-capability": token }, body: {} });
+    assert.equal(started.status, 202);
+    const id = (started.body as any).analysisId;
+    await analyzer.waitFor(id);
+    const a = await invokeRequest(app, "GET", `/api/workflows/analyses/${id}`);
+    assert.equal((a.body as any).status, "done");
+    const list = await invokeRequest(app, "GET", "/api/workflows/proposals?status=proposed");
+    const pid = (list.body as any)[0].id;
+    const accepted = await invokeRequest(app, "POST", `/api/workflows/proposals/${pid}/accept`, { headers: { "x-ronin-capability": token }, body: {} });
+    assert.equal(accepted.status, 201);
+    assert.ok((accepted.body as any).id);
+    const again = await invokeRequest(app, "POST", `/api/workflows/proposals/${pid}/accept`, { headers: { "x-ronin-capability": token }, body: {} });
+    assert.equal(again.status, 409);
+    assert.equal((await invokeRequest(app, "POST", "/api/workflows/proposals/nope/dismiss", { headers: { "x-ronin-capability": token } })).status, 404);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
