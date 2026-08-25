@@ -367,3 +367,31 @@ export interface TestStartResult {
   batchId?: string;
   runIds: string[];
 }
+
+// ---- Workflow insights (espejo de server/src/workflow-insights/model.ts) ----
+export type ProposalStatus = "proposed" | "accepted" | "dismissed";
+
+export interface WorkflowProposal {
+  id: string;
+  analysisId: string;
+  name: string;
+  rationale: string;
+  evidence: string[];
+  config: WorkflowConfig;
+  status: ProposalStatus;
+  createdAt: string;
+  catalogId?: string;          // sólo al aceptar
+}
+
+export interface WorkflowAnalysis {
+  id: string;
+  from: string;                // ISO
+  to: string;                  // ISO
+  status: "running" | "done" | "error";
+  createdAt: string;
+  finishedAt?: string;
+  proposalIds: string[];
+  discarded: { name?: string; reason: string }[];
+  error?: string;
+  signals: { tasks: number; commits: number; evidenceFiles: number };
+}

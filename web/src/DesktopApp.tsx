@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getRepoConfig, getRepos, getTmuxInventory, getWorkflowCatalog, listLocalSkills, readLocalSkill, saveRepoSkillAssociations, updateWorkflow, WorkflowSaveError } from "./api";
+import { acceptWorkflowProposal, analyzeWorkflows, createWorkflow, dismissWorkflowProposal, getRepoConfig, getRepos, getTmuxInventory, getWorkflowAnalysis, getWorkflowCatalog, getWorkflowProposals, listLocalSkills, readLocalSkill, saveRepoSkillAssociations, updateWorkflow, WorkflowSaveError } from "./api";
 import { AdoptDialog } from "./components/AdoptDialog";
+import { ProposalList } from "./components/ProposalList";
 import { CloseSessionDialog } from "./components/CloseSessionDialog";
 import { NewSessionDialog } from "./components/NewSessionDialog";
 import { NativeTerminal } from "./components/NativeTerminal";
@@ -12,12 +13,83 @@ import { WorkflowJsonEditor } from "./components/WorkflowJsonEditor";
 import { adoptServerConfig, cancel as cancelDraft, createWorkflowDraft, setJsonText, setStages, switchView, type DraftView, type WorkflowDraftState } from "./components/workflow-draft";
 import { createLocalSkill, downloadLocalSkill, saveLocalSkill } from "./api";
 import { TestsScreen } from "./screens/TestsScreen";
-import type { RepoOverrideConfig, SkillDocument, SkillRef, SkillSummary, TmuxDiagnostic, TmuxSessionInfo, WorkflowCatalogItem } from "./types";
+import type { RepoOverrideConfig, SkillDocument, SkillRef, SkillSummary, TmuxDiagnostic, TmuxSessionInfo, WorkflowAnalysis, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
 
 type DesktopView = "sessions" | "terminals" | "workflows" | "tests" | "skills";
 const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
+/** Plantilla mínima de "＋ Nuevo": el loop más corto que sigue siendo un workflow (plan →
+ *  implementación → pruebas). Sin `verifyCmd`: eso sólo existe como override por repo. */
+const NEW_WORKFLOW_TEMPLATE: WorkflowConfig = { stages: [{ key: "planning", label: "Plan", icon: "📋" }, { key: "implementing", label: "Impl", icon: "⌨️", role: "impl" }, { key: "tests", label: "Tests", icon: "🧪" }], verifyAfter: null };
+
 function refKey(ref: SkillRef): string { return `${ref.root}:${ref.sourceRepo ?? ""}:${ref.name}`; }
+
+function isoDay(offsetDays = 0): string { return new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10); }
+
+export interface WorkflowInsights {
+  analysis: WorkflowAnalysis | null;
+  proposals: WorkflowProposal[];
+  busy: boolean;
+  error: string | null;
+  start: (range: { from?: string; to?: string }) => Promise<void>;
+  accept: (id: string) => Promise<string | null>;
+  dismiss: (id: string) => Promise<void>;
+  refresh: () => Promise<void>;
+}
+
+/** Estado compartido entre el workspace (botones) y el inspector (panel). El análisis corre en
+ *  el server, así que aquí sólo se sondea cada 3 s mientras `running` y, al terminar, se recargan
+ *  las propuestas pendientes. Los fallos se guardan como texto: nunca se descarta un análisis. */
+function useWorkflowInsights(): WorkflowInsights {
+  const [analysis, setAnalysis] = useState<WorkflowAnalysis | null>(null);
+  const [proposals, setProposals] = useState<WorkflowProposal[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const poll = useRef<number | undefined>(undefined);
+
+  const refresh = useCallback(async () => { setProposals(await getWorkflowProposals("proposed")); }, []);
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  // Sólo se reprograma mientras el estado siga siendo `running`: al pasar a done/error el efecto
+  // se limpia y el timer muere, sin dejar un poll huérfano contra un análisis ya terminado.
+  useEffect(() => {
+    const id = analysis?.id;
+    if (!id || analysis?.status !== "running") return;
+    let alive = true;
+    const tick = async () => {
+      const next = await getWorkflowAnalysis(id);
+      if (!alive) return;
+      if (next) setAnalysis(next);
+      if (!next || next.status === "running") { poll.current = window.setTimeout(tick, 3000); return; }
+      if (next.status === "done") await refresh();
+    };
+    poll.current = window.setTimeout(tick, 3000);
+    return () => { alive = false; window.clearTimeout(poll.current); };
+  }, [analysis?.id, analysis?.status, refresh]);
+
+  const start = useCallback(async (range: { from?: string; to?: string }) => {
+    setBusy(true); setError(null);
+    try { const { analysisId } = await analyzeWorkflows(range); setAnalysis(await getWorkflowAnalysis(analysisId) ?? { id: analysisId, from: range.from ?? "", to: range.to ?? "", status: "running", createdAt: new Date().toISOString(), proposalIds: [], discarded: [], signals: { tasks: 0, commits: 0, evidenceFiles: 0 } }); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }, []);
+
+  const accept = useCallback(async (id: string) => {
+    setBusy(true); setError(null);
+    try { const created = await acceptWorkflowProposal(id); setProposals((list) => list.filter((item) => item.id !== id)); return created.id; }
+    catch (e) { setError((e as Error).message); return null; }
+    finally { setBusy(false); }
+  }, []);
+
+  const dismiss = useCallback(async (id: string) => {
+    setBusy(true); setError(null);
+    try { await dismissWorkflowProposal(id); setProposals((list) => list.filter((item) => item.id !== id)); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }, []);
+
+  return { analysis, proposals, busy, error, start, accept, dismiss, refresh };
+}
 
 export function DesktopApp() {
   const [view, setView] = useState<DesktopView>("sessions");
@@ -27,6 +99,8 @@ export function DesktopApp() {
   const [filter, setFilter] = useState("");
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [presentationSession, setPresentationSession] = useState<TmuxSessionInfo | null>(null);
+  const [acceptedWorkflowId, setAcceptedWorkflowId] = useState<string | undefined>(undefined);
+  const insights = useWorkflowInsights();
   const timer = useRef<number | undefined>(undefined);
 
   const refreshInventory = useCallback(async () => {
@@ -74,13 +148,13 @@ export function DesktopApp() {
         </aside>
         <main className="ronin-workspace">
           {(view === "sessions" || view === "terminals") && <SessionWorkspace session={current} diagnostic={diagnostic} terminalGrid={view === "terminals"} onRefresh={refreshInventory} onNew={() => setNewSessionOpen(true)} />}
-          {view === "workflows" && <WorkflowWorkspace onLaunch={() => setNewSessionOpen(true)} />}
+          {view === "workflows" && <WorkflowWorkspace insights={insights} selectId={acceptedWorkflowId} onLaunch={() => setNewSessionOpen(true)} />}
           {view === "skills" && <SkillsWorkspace />}
           {view === "tests" && <TestsScreen />}
         </main>
         <aside className="ronin-inspector">
           {(view === "sessions" || view === "terminals") && <SessionInspector session={current} diagnostic={diagnostic} />}
-          {view === "workflows" && <WorkflowInspector />}
+          {view === "workflows" && <WorkflowInspector insights={insights} onAccepted={setAcceptedWorkflowId} />}
           {view === "skills" && <SkillsInspector />}
           {view === "tests" && <TestsInspector />}
         </aside>
@@ -142,16 +216,26 @@ function SessionInspector({ session, diagnostic }: { session: TmuxSessionInfo | 
 }
 
 function WorkflowContext() { return <div className="ronin-context-head"><span className="ronin-eyebrow">workflows</span><h2>Loops guardados</h2><p className="ronin-context-copy">Grafo, stepper y JSON editan el mismo workflow.</p></div>; }
-function WorkflowWorkspace({ onLaunch }: { onLaunch: () => void }) {
+function WorkflowWorkspace({ insights, selectId, onLaunch }: { insights: WorkflowInsights; selectId?: string; onLaunch: () => void }) {
   const [catalog, setCatalog] = useState<WorkflowCatalogItem[]>([]); const [id, setId] = useState(""); const [draft, setDraft] = useState<WorkflowDraftState | null>(null); const [saving, setSaving] = useState(false); const [message, setMessage] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false); const [newName, setNewName] = useState(""); const [rangeOpen, setRangeOpen] = useState(false); const [from, setFrom] = useState(() => isoDay(-14)); const [to, setTo] = useState(() => isoDay());
   useEffect(() => { void getWorkflowCatalog().then((result) => { const items = result?.items ?? []; setCatalog(items); setId(items[0]?.id ?? ""); }); }, []);
+  // Una propuesta aceptada ya vive en el catálogo del server: se recarga y se abre en el editor.
+  useEffect(() => { if (!selectId) return; void getWorkflowCatalog().then((result) => { const items = result?.items ?? []; setCatalog(items); if (items.some((item) => item.id === selectId)) setId(selectId); }); }, [selectId]);
   useEffect(() => { const item = catalog.find((candidate) => candidate.id === id); if (item) setDraft(createWorkflowDraft(item.config)); }, [catalog, id]);
   const current = catalog.find((item) => item.id === id);
+  const running = insights.analysis?.status === "running";
   async function save() { if (!draft || !id || draft.jsonError) return; setSaving(true); setMessage(null); try { const updated = await updateWorkflow(id, { config: { stages: draft.stages, verifyAfter: draft.verifyAfter } }); setCatalog((items) => items.map((item) => item.id === updated.id ? updated : item)); setDraft(adoptServerConfig(draft, updated.config)); setMessage("Workflow guardado."); } catch (error) { const e = error as WorkflowSaveError; setMessage(e.message); } finally { setSaving(false); } }
-  if (!draft || !current) return <div className="ronin-empty-workspace"><span>workflows</span><h1>Cargando workflows…</h1></div>;
-  return <div className="ronin-workflow-workspace"><header className="ronin-view-header"><div><select value={id} onChange={(event) => setId(event.target.value)}>{catalog.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><p><code>workflow.json · id inmutable {current.id}</code></p></div><div className="ronin-header-actions"><div className="ronin-segment">{(["graph", "stepper", "json"] as DraftView[]).map((item) => <button className={draft.view === item ? "active" : ""} key={item} onClick={() => setDraft(switchView(draft, item))}>{item === "graph" ? "Grafo" : item === "stepper" ? "Stepper" : "JSON"}</button>)}</div><button className="n-btn n-btn-primary" onClick={onLaunch}>▷ Lanzar</button></div></header><div className={`ronin-workflow-canvas ${draft.view === "graph" ? "graph" : ""}`}>{draft.view === "graph" && <WorkflowGraph stages={draft.stages} verifyAfter={draft.verifyAfter} />}{draft.view === "stepper" && <StageEditor stages={draft.stages} verifyAfter={draft.verifyAfter} allowVerifyCmd={false} onStages={(stages) => setDraft(setStages(draft, stages, draft.verifyAfter))} onVerifyAfter={(verifyAfter) => setDraft(setStages(draft, draft.stages, verifyAfter))} />}{draft.view === "json" && <WorkflowJsonEditor jsonText={draft.jsonText} jsonError={draft.jsonError} onChange={(text) => setDraft(setJsonText(draft, text))} />}</div><footer className="ronin-editor-footer">{message && <span>{message}</span>}<span className="ronin-footer-spacer" /><button className="n-btn n-btn-secondary" onClick={() => setDraft(cancelDraft(draft))}>Cancelar</button><button className="n-btn n-btn-primary" disabled={saving || Boolean(draft.jsonError)} onClick={() => void save()}>{saving ? "Guardando…" : "Guardar"}</button></footer></div>;
+  async function create() { const name = newName.trim(); if (!name) return setMessage("El nombre es obligatorio."); setMessage(null); try { const item = await createWorkflow(name, NEW_WORKFLOW_TEMPLATE); setCatalog((items) => [...items, item]); setId(item.id); setCreating(false); setNewName(""); } catch (error) { setMessage((error as WorkflowSaveError).message); } }
+  const newModal = creating ? <div className="ronin-inline-modal"><div><h2>Nuevo workflow</h2><label>Nombre<input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="hotfix-rapido" /></label><p className="ronin-form-note">Se crea con la plantilla mínima: Plan → Impl → Tests.</p><footer><button className="n-btn n-btn-secondary" onClick={() => { setCreating(false); setNewName(""); }}>Cancelar</button><button className="n-btn n-btn-primary" onClick={() => void create()}>Crear</button></footer></div></div> : null;
+  const headerActions = <><button className="n-btn n-btn-secondary" onClick={() => setCreating(true)}>＋ Nuevo</button><button className="n-btn n-btn-secondary" onClick={() => setRangeOpen((open) => !open)}>✦ Analizar flujo reciente</button></>;
+  const rangeRow = rangeOpen ? <div className="ronin-analyze-range"><label>desde<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>hasta<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label><button className="n-btn n-btn-primary" disabled={!from || !to || insights.busy || running} onClick={() => void insights.start({ from: new Date(from).toISOString(), to: new Date(to).toISOString() })}>{running ? "Analizando…" : "Analizar"}</button>{insights.error && <span className="ronin-form-error">{insights.error}</span>}</div> : null;
+  if (!draft || !current) return <div className="ronin-empty-workspace"><span>workflows</span><h1>{catalog.length ? "Cargando workflows…" : "Sin workflows"}</h1><p>Crea uno desde la plantilla mínima (Plan → Impl → Tests) o pide un análisis del trabajo reciente.</p><div className="ronin-header-actions">{headerActions}</div>{rangeRow}{message && <p className="ronin-form-error">{message}</p>}{newModal}</div>;
+  return <div className="ronin-workflow-workspace"><header className="ronin-view-header"><div><select value={id} onChange={(event) => setId(event.target.value)}>{catalog.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><p><code>workflow.json · id inmutable {current.id}</code></p></div><div className="ronin-header-actions">{headerActions}<div className="ronin-segment">{(["graph", "stepper", "json"] as DraftView[]).map((item) => <button className={draft.view === item ? "active" : ""} key={item} onClick={() => setDraft(switchView(draft, item))}>{item === "graph" ? "Grafo" : item === "stepper" ? "Stepper" : "JSON"}</button>)}</div><button className="n-btn n-btn-primary" onClick={onLaunch}>▷ Lanzar</button></div></header>{rangeRow}<div className={`ronin-workflow-canvas ${draft.view === "graph" ? "graph" : ""}`}>{draft.view === "graph" && <WorkflowGraph stages={draft.stages} verifyAfter={draft.verifyAfter} />}{draft.view === "stepper" && <StageEditor stages={draft.stages} verifyAfter={draft.verifyAfter} allowVerifyCmd={false} onStages={(stages) => setDraft(setStages(draft, stages, draft.verifyAfter))} onVerifyAfter={(verifyAfter) => setDraft(setStages(draft, draft.stages, verifyAfter))} />}{draft.view === "json" && <WorkflowJsonEditor jsonText={draft.jsonText} jsonError={draft.jsonError} onChange={(text) => setDraft(setJsonText(draft, text))} />}</div><footer className="ronin-editor-footer">{message && <span>{message}</span>}<span className="ronin-footer-spacer" /><button className="n-btn n-btn-secondary" onClick={() => setDraft(cancelDraft(draft))}>Cancelar</button><button className="n-btn n-btn-primary" disabled={saving || Boolean(draft.jsonError)} onClick={() => void save()}>{saving ? "Guardando…" : "Guardar"}</button></footer>{newModal}</div>;
 }
-function WorkflowInspector() { return <div className="ronin-inspector-inner"><span className="ronin-eyebrow">workflow</span><h2>Edición en caliente</h2><p>El Grafo, Stepper y JSON son tres vistas del mismo borrador. Sólo un guardado válido actualiza la configuración persistida.</p><span className="ronin-inspector-status managed">◆ Configuración local</span></div>; }
+function WorkflowInspector({ insights, onAccepted }: { insights: WorkflowInsights; onAccepted: (id: string) => void }) {
+  return <div className="ronin-inspector-inner"><span className="ronin-eyebrow">workflow</span><h2>Propuestas</h2><p>El Grafo, Stepper y JSON son tres vistas del mismo borrador. Sólo un guardado válido actualiza la configuración persistida.</p>{insights.error && <p className="ronin-form-error">{insights.error}</p>}<ProposalList proposals={insights.proposals} analysis={insights.analysis} busy={insights.busy} onAccept={(id) => void insights.accept(id).then((catalogId) => { if (catalogId) onAccepted(catalogId); })} onDismiss={(id) => void insights.dismiss(id)} /><span className="ronin-inspector-status managed">◆ Configuración local</span></div>;
+}
 
 function SkillsContext() { return <div className="ronin-context-head"><span className="ronin-eyebrow">skills</span><h2>SKILL.md locales</h2><p className="ronin-context-copy">Explora, valida y asocia skills por repositorio.</p></div>; }
 function SkillsWorkspace() {

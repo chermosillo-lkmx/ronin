@@ -1,4 +1,4 @@
-import type { TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PaneRole, PaneView, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionPresentation, SkillDocument, SkillRef, SkillSummary, Snapshot, TmuxInventoryResult, TmuxSessionInfo, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig } from "./types";
+import type { TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PaneRole, PaneView, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionPresentation, SkillDocument, SkillRef, SkillSummary, Snapshot, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
 
 /** Subscribe to live snapshots via SSE. Returns an unsubscribe fn. */
 export function subscribeStream(
@@ -686,4 +686,50 @@ export async function cancelTestRun(runId: string): Promise<{ cancelled: boolean
 export async function retryTestRun(runId: string): Promise<TestStartResult> {
   const r = await fetch(`/api/tests/runs/${encodeURIComponent(runId)}/retry`, { method: "POST" });
   return harnessJson(r, "no se pudo reintentar");
+}
+
+// ---- Workflow insights. El análisis corre en background: `analyzeWorkflows` sólo devuelve el
+// id y la UI sondea `getWorkflowAnalysis`. Los GET devuelven null/[] ante un fallo de red (como
+// `getTestsMatrix`); los POST lanzan con el mensaje del server. `status=""` sería un 400, así
+// que el filtro vacío se omite en vez de mandarse.
+export async function analyzeWorkflows(range: { from?: string; to?: string } = {}): Promise<{ analysisId: string }> {
+  const r = await fetch("/api/workflows/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(range),
+  });
+  return harnessJson(r, "no se pudo iniciar el análisis");
+}
+
+export async function getWorkflowAnalysis(id: string): Promise<WorkflowAnalysis | null> {
+  try {
+    const r = await fetch(`/api/workflows/analyses/${encodeURIComponent(id)}`);
+    return r.ok ? r.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getWorkflowProposals(status?: ProposalStatus): Promise<WorkflowProposal[]> {
+  try {
+    const r = await fetch(`/api/workflows/proposals${status ? `?status=${encodeURIComponent(status)}` : ""}`);
+    return r.ok ? r.json() : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 201 con el item de catálogo recién creado; 409 si la propuesta ya no está en `proposed`. */
+export async function acceptWorkflowProposal(id: string, name?: string): Promise<WorkflowCatalogItem> {
+  const r = await fetch(`/api/workflows/proposals/${encodeURIComponent(id)}/accept`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(name ? { name } : {}),
+  });
+  return harnessJson(r, "no se pudo aceptar la propuesta");
+}
+
+export async function dismissWorkflowProposal(id: string): Promise<WorkflowProposal> {
+  const r = await fetch(`/api/workflows/proposals/${encodeURIComponent(id)}/dismiss`, { method: "POST" });
+  return harnessJson(r, "no se pudo descartar la propuesta");
 }
