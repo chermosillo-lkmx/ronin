@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runClaudeP } from "./claude-p.js";
 import { readHistory } from "./history.js";
 import { commitsFor, type Commit } from "./report-git.js";
 import { findCycleEvidence } from "./report-worker.js";
@@ -120,32 +120,6 @@ function buildPrompt(period: string, done: WorkedTask[], wip: WorkedTask[], comm
     `\n## COMMITS POR REPO\n${commitBlock}`,
   ].join("\n");
 }
-/**
- * Ejecuta `claude -p` con el prompt por STDIN (no por argv) para evitar E2BIG en periodos
- * cargados: el prompt puede pesar cientos de KB y ARG_MAX en macOS ronda 1MB. timeout + cap de salida.
- */
-function runClaudeP(input: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const MAX = 4 << 20;
-    const child = spawn("claude", ["-p"], { stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "", stderr = "", settled = false;
-    const done = (fn: () => void) => { if (!settled) { settled = true; clearTimeout(timer); fn(); } };
-    const timer = setTimeout(() => done(() => { child.kill("SIGTERM"); reject(new Error("claude -p excedió el tiempo límite")); }), 120000);
-    child.stdout.on("data", (d) => {
-      stdout += d;
-      if (stdout.length > MAX) done(() => { child.kill("SIGTERM"); reject(new Error("claude -p excedió el límite de salida")); });
-    });
-    child.stderr.on("data", (d) => { stderr += d; });
-    child.on("error", (e) => done(() => reject(e))); // p.ej. claude no está en PATH (ENOENT)
-    child.on("close", (code) => done(() => {
-      if (code !== 0) return reject(new Error(`claude -p salió con código ${code}: ${stderr.trim().slice(0, 200)}`));
-      resolve(stdout);
-    }));
-    child.stdin.on("error", () => { /* EPIPE si el proceso muere antes de leer stdin */ });
-    child.stdin.end(input);
-  });
-}
-
 function extractReport(stdout: string): string {
   const m = stdout.match(/<REPORT>([\s\S]*?)<\/REPORT>/i);
   if (m && m[1].trim()) return m[1].trim();
