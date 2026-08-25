@@ -25,6 +25,10 @@ const parser = new XMLParser({
   parseAttributeValue: false,
   parseTagValue: false,
   trimValues: true,
+  // Un JUnit de pytest real trae miles de `&quot;`/`&amp;` en mensajes; el default (1000
+  // expansiones totales) lo rechazaba. Se sube ese contador y se conservan el resto de
+  // límites (tamaño de entidad, profundidad, longitud expandida) contra billion-laughs.
+  processEntities: { enabled: true, maxTotalExpansions: 1_000_000, maxEntityCount: 1_000_000 },
 });
 
 type Node = Record<string, unknown>;

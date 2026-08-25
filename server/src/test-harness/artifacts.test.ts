@@ -69,3 +69,10 @@ test("boundOutput keeps the tail and marks truncation", () => {
   assert.ok(out.endsWith("a".repeat(10)));
   assert.equal(boundOutput("short", 10), "short");
 });
+
+test("summarizeJUnit handles a real-size pytest report with more than 1000 XML entities", () => {
+  const cases = Array.from({ length: 600 }, (_, i) => `<testcase name="t${i}" classname="m"><failure message="a &quot;b&quot; &amp; c">x</failure></testcase>`).join("");
+  const result = summarizeJUnit(`<testsuite tests="600">${cases}</testsuite>`);
+  assert.equal(result.totals.failed, 600);
+  assert.equal(result.failures[0].message, 'a "b" & c');
+});
