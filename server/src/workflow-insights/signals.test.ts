@@ -3,7 +3,7 @@ import test from "node:test";
 import type { Commit } from "../report-git.js";
 import type { HistoryEvent } from "../history.js";
 import type { AnalysisRange } from "./model.js";
-import { collectSignals, type SignalDeps } from "./signals.js";
+import { collectSignals, truncateUtf8Bytes, type SignalDeps } from "./signals.js";
 
 const from = Date.parse("2026-08-10T00:00:00Z");
 const to = Date.parse("2026-08-24T00:00:00Z");
@@ -99,4 +99,41 @@ test("collectSignals dedupes evidence by resolved cwd and keeps the first repo k
   const s = await collectSignals(range, deps);
   assert.equal(s.evidence.length, 1);
   assert.equal(s.evidence[0].repo, "alpha");
+});
+
+test("collectSignals caps evidence GLOBALLY across repos (not per repo) and keeps global mtime-desc order", async () => {
+  const cwdA = "/repos/repoA", cwdB = "/repos/repoB";
+  // 10 files per repo (under the old per-repo cap of 15, so a per-repo cut would keep
+  // ALL 20 — only a global cut to LIMITS.evidenceFiles=15 trims this). mtimes interleaved
+  // across A/B so neither repo's own files form a trivially-correct global top 15.
+  const filesA = Array.from({ length: 10 }, (_, i) => ({ name: `EVIDENCIA-a${i}.md`, mtime: from + i * 2 })); // offsets 0,2,...,18
+  const filesB = Array.from({ length: 10 }, (_, i) => ({ name: `EVIDENCIA-b${i}.md`, mtime: from + i * 2 + 1 })); // offsets 1,3,...,19
+  const files = { [cwdA]: filesA, [cwdB]: filesB };
+  const fileContents: Record<string, string> = {};
+  for (const f of filesA) fileContents[`${cwdA}/${f.name}`] = "a";
+  for (const f of filesB) fileContents[`${cwdB}/${f.name}`] = "b";
+  const resolveCwd = (repo: string) => (repo === "repoA" ? { cwd: cwdA, real: true } : { cwd: cwdB, real: true });
+  const deps = fakeDeps({ repos: ["repoA", "repoB"], resolveCwd, files, fileContents });
+
+  const s = await collectSignals(range, deps);
+
+  assert.equal(s.evidence.length, 15);
+  const mtimes = s.evidence.map((e) => e.mtime);
+  assert.deepEqual(mtimes, [...mtimes].sort((a, b) => b - a)); // orden global desc, no por repo
+  // el corte global se queda con los 15 mtimes más altos del conjunto combinado (offsets 5..19),
+  // no con "hasta 15 de cada repo" (que aquí habría devuelto los 20).
+  assert.deepEqual(
+    [...mtimes].sort((a, b) => a - b),
+    Array.from({ length: 15 }, (_, i) => from + 5 + i),
+  );
+});
+
+test("truncateUtf8Bytes never splits a UTF-8 codepoint and stays within the byte cap", () => {
+  const s = "😀".repeat(10); // emoji de 4 bytes cada uno → 40 bytes totales
+  const buf = Buffer.from(s, "utf8");
+  for (let max = 0; max <= buf.length + 2; max++) {
+    const out = truncateUtf8Bytes(buf, max);
+    assert.ok(Buffer.byteLength(out) <= max, `max=${max} produjo ${Buffer.byteLength(out)} bytes`);
+    assert.ok(!out.includes("�"), `max=${max} produjo un carácter de reemplazo`);
+  }
 });

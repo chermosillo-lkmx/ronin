@@ -65,9 +65,36 @@ function defaultReadDir(dir: string): { name: string; mtime: number }[] {
   return readdirSync(dir).map((name) => ({ name, mtime: statSync(join(dir, name)).mtimeMs }));
 }
 
+/**
+ * Corta `buf` a lo sumo `maxBytes` sin partir una secuencia UTF-8 a la mitad (lo que
+ * emitiría U+FFFD y podría hacer que `Buffer.byteLength(resultado)` exceda `maxBytes`).
+ * Camina byte a byte desde el inicio calculando el largo de cada secuencia por su byte
+ * líder; se detiene antes del primer carácter que no quepa completo.
+ */
+export function truncateUtf8Bytes(buf: Buffer, maxBytes: number): string {
+  if (buf.length <= maxBytes) return buf.toString("utf8");
+  let i = 0;
+  while (i < maxBytes) {
+    const byte = buf[i];
+    let len: number;
+    if ((byte & 0x80) === 0x00) len = 1;
+    else if ((byte & 0xe0) === 0xc0) len = 2;
+    else if ((byte & 0xf0) === 0xe0) len = 3;
+    else if ((byte & 0xf8) === 0xf0) len = 4;
+    else {
+      // byte de continuación huérfano / inválido: avanza uno para no trabarse
+      i++;
+      continue;
+    }
+    if (i + len > maxBytes) break; // el próximo carácter no cabe completo
+    i += len;
+  }
+  return buf.subarray(0, i).toString("utf8");
+}
+
 function defaultReadFile(file: string, maxBytes: number): string {
   const buf = readFileSync(file);
-  return buf.subarray(0, maxBytes).toString("utf8");
+  return truncateUtf8Bytes(buf, maxBytes);
 }
 
 export const defaultSignalDeps: SignalDeps = {
@@ -132,31 +159,51 @@ async function collectCommits(deps: SignalDeps, range: AnalysisRange): Promise<S
   return out;
 }
 
+interface EvidenceCandidate {
+  repo: string;
+  cwd: string;
+  name: string;
+  mtime: number;
+}
+
 function collectEvidence(deps: SignalDeps, range: AnalysisRange): EvidenceSignal[] {
   const readDir = deps.readDir ?? defaultReadDir;
   const readFile = deps.readFile ?? defaultReadFile;
   const fromMs = range.from.getTime();
   const toMs = range.to.getTime();
   const seenCwd = new Set<string>();
-  const evidence: EvidenceSignal[] = [];
+  const candidates: EvidenceCandidate[] = [];
 
+  // Paso 1: recolecta candidatos de TODOS los repos primero — LIMITS.evidenceFiles
+  // es un tope global, no por repo (si se cortara dentro del loop, N repos con 15
+  // archivos cada uno devolverían 15×N).
   for (const repo of deps.repos()) {
     try {
       const { cwd, real } = deps.resolveCwd(repo);
       if (!real || seenCwd.has(cwd)) continue;
       seenCwd.add(cwd);
 
-      const entries = readDir(cwd)
-        .filter((e) => EVIDENCE_NAME.test(e.name) && e.mtime >= fromMs && e.mtime <= toMs)
-        .sort((a, b) => b.mtime - a.mtime)
-        .slice(0, LIMITS.evidenceFiles);
-
-      for (const entry of entries) {
-        const excerpt = readFile(join(cwd, entry.name), LIMITS.evidenceBytes);
-        evidence.push({ repo, file: entry.name, mtime: entry.mtime, excerpt });
-      }
+      const entries = readDir(cwd).filter(
+        (e) => EVIDENCE_NAME.test(e.name) && e.mtime >= fromMs && e.mtime < toMs, // [from,to), igual que readHistory
+      );
+      for (const e of entries) candidates.push({ repo, cwd, name: e.name, mtime: e.mtime });
     } catch {
       /* best-effort: omite este repo (carpeta faltante, sin permisos, etc.) */
+    }
+  }
+
+  // Paso 2: UN solo orden global por mtime desc y UN solo corte a LIMITS.evidenceFiles,
+  // y solo entonces se leen los archivos — nunca se lee más de LIMITS.evidenceFiles.
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  const top = candidates.slice(0, LIMITS.evidenceFiles);
+
+  const evidence: EvidenceSignal[] = [];
+  for (const c of top) {
+    try {
+      const excerpt = readFile(join(c.cwd, c.name), LIMITS.evidenceBytes);
+      evidence.push({ repo: c.repo, file: c.name, mtime: c.mtime, excerpt });
+    } catch {
+      /* best-effort: omite este archivo (borrado entre el listado y la lectura, etc.) */
     }
   }
 
