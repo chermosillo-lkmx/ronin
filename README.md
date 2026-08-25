@@ -300,6 +300,28 @@ sobre los mismos registros, no una fuente de datos paralela.
   con `@vitest/coverage-v8` instalado). Al reenviar la config desde la UI, una variable con valor
   `null` conserva el valor ya guardado.
 
+### Workflows: crear y proponer con Claude (✦)
+- **＋ Nuevo** — crea un workflow desde una plantilla mínima de 3 etapas (**Plan → Impl → Tests**) y
+  lo abre directo en el editor (Grafo / Stepper / JSON), listo para nombrarlo y ajustarlo.
+- **✦ Analizar flujo reciente** — corre un análisis en segundo plano sobre un rango de fechas
+  (default **últimos 14 días**) y propone workflows nuevos a partir de patrones reales de trabajo:
+  - **Señales**: eventos de `history.jsonl` (lanzamientos/paradas/completados por tarea), `git log`
+    de cada repo configurado, y archivos de evidencia (`EVIDENCIA-*.md` / `research.md`) tocados en
+    el rango — acotado a **80 tareas / 60 commits por repo / 15 archivos de evidencia × 3 KB** cada
+    uno para que el prompt no crezca sin límite.
+  - Las señales arman un prompt que se manda a **`claude -p` headless** (timeout de **5 minutos**);
+    la salida se parsea como JSON y cada propuesta se valida una por una.
+  - Las propuestas se guardan como **borradores** en `server/data/workflow-proposals.json`
+    (**gitignored**, nunca se commitean) y **no entran al catálogo** de workflows hasta que el
+    operador las revisa y pulsa **Aceptar** en el panel de Propuestas; **Descartar** las cierra sin
+    tocar nada más.
+  - Una propuesta que trae `verifyCmd` (shell arbitrario, sólo permitido en overrides por-repo) o que
+    choca de nombre con un workflow ya existente se **descarta automáticamente con un motivo legible**
+    en vez de tumbar el análisis completo; el resto del lote se sigue procesando igual.
+  - El prompt sólo lleva texto de historia/commits/evidencia del propio repo — **nunca tokens ni
+    variables de entorno** — y toda la salida del modelo se trata como **no confiable** hasta pasar
+    la validación de `validateStages`.
+
 ### DMs (opcional)
 - **Webhook** `POST /api/webhook/dm {text}` — clasifica el mensaje con `claude -p` y auto-lanza un
   worker si es una tarea. Source-agnostic (Slack / ClickUp / un forwarder).
