@@ -43,7 +43,7 @@ function newId(prefix: string): string {
 function slugName(value: unknown): string {
   return String(value ?? "")
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -65,22 +65,25 @@ export function createAnalyzer(deps: AnalyzerDeps) {
   const { store, signals, catalogNames, runClaude } = deps;
   const now = deps.now ?? (() => new Date());
   const waiters = new Map<string, Array<() => void>>();
+  /**
+   * Ids ya resueltos, en memoria. No basta con mirar el `status` del store: si la escritura
+   * terminal falla, el análisis se queda `running` en disco para siempre y un `waitFor`
+   * posterior (p. ej. el de una ruta HTTP) se colgaría sin que nadie vaya a despertarlo.
+   */
+  const settled = new Set<string>();
 
   function settle(id: string): void {
+    settled.add(id);
     const list = waiters.get(id) ?? [];
     waiters.delete(id);
     for (const w of list) w();
   }
 
-  function finish(analysis: WorkflowAnalysis): void {
-    store.upsertAnalysis(analysis);
-    settle(analysis.id);
-  }
-
   /**
-   * Valida el lote COMPLETO antes de tocar el store: si algo revienta a mitad de camino
-   * (p. ej. el store falla al escribir) no queremos un análisis `error` con propuestas
-   * huérfanas ya persistidas.
+   * Valida el lote COMPLETO antes de tocar el store, para que una propuesta inválida no deje
+   * a las anteriores ya escritas. La escritura en sí sigue siendo una por una (el store no
+   * tiene transacciones), así que `run()` lleva la cuenta de las que sí entraron y las enlaza
+   * igual en `proposalIds` si una escritura posterior revienta: nunca una propuesta huérfana.
    */
   function review(analysisId: string, raw: unknown[], createdAt: string): { proposals: WorkflowProposal[]; discarded: WorkflowAnalysis["discarded"] } {
     const proposals: WorkflowProposal[] = [];
@@ -93,7 +96,9 @@ export function createAnalyzer(deps: AnalyzerDeps) {
         continue;
       }
       const entry = candidate as Record<string, unknown>;
-      const name = slugName(entry.name);
+      // Sólo un string puede ser un nombre: coercer `{}` daría "[object Object]" → "object-object",
+      // un slug plausible salido de basura.
+      const name = typeof entry.name === "string" ? slugName(entry.name) : "";
       if (!name) {
         discarded.push({ reason: "nombre vacío" });
         continue;
@@ -125,21 +130,35 @@ export function createAnalyzer(deps: AnalyzerDeps) {
   }
 
   async function run(analysis: WorkflowAnalysis): Promise<void> {
+    const persisted: string[] = [];
     try {
       const collected = await signals({ from: new Date(analysis.from), to: new Date(analysis.to) });
       const parsed = extractProposalsJson(await runClaude(buildPrompt(collected, catalogNames())));
       const { proposals, discarded } = review(analysis.id, proposalsOf(parsed), now().toISOString());
-      for (const proposal of proposals) store.upsertProposal(proposal);
-      finish({
+      for (const proposal of proposals) {
+        store.upsertProposal(proposal);
+        persisted.push(proposal.id);
+      }
+      store.upsertAnalysis({
         ...analysis,
         status: "done",
         finishedAt: now().toISOString(),
-        proposalIds: proposals.map((p) => p.id),
+        proposalIds: persisted,
         discarded,
         signals: countSignals(collected),
       });
     } catch (e) {
-      finish({ ...analysis, status: "error", finishedAt: now().toISOString(), error: (e as Error).message });
+      try {
+        // `proposalIds: persisted` incluso al fallar: si reventó a mitad de las escrituras, las
+        // que sí entraron quedan enlazadas a su análisis en vez de sueltas en el journal.
+        store.upsertAnalysis({ ...analysis, status: "error", finishedAt: now().toISOString(), proposalIds: persisted, error: (e as Error).message });
+      } catch (writeError) {
+        // El store está roto; no hay a dónde escalar esto y relanzar sólo produciría un
+        // unhandledRejection que tumbaría el proceso — el `finally` sigue soltando a los waiters.
+        console.error(`[workflow-insights] no se pudo marcar el análisis ${analysis.id} como error:`, writeError);
+      }
+    } finally {
+      settle(analysis.id);
     }
   }
 
@@ -160,6 +179,7 @@ export function createAnalyzer(deps: AnalyzerDeps) {
   }
 
   function waitFor(id: string): Promise<void> {
+    if (settled.has(id)) return Promise.resolve();
     const analysis = store.getAnalysis(id);
     if (!analysis) return Promise.reject(new InsightsError(`análisis desconocido: ${id}`, "ANALYSIS_NOT_FOUND", 404));
     if (analysis.status !== "running") return Promise.resolve();

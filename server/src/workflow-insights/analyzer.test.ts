@@ -130,6 +130,8 @@ test("empty names, non-objects and in-batch duplicates are discarded; rationale 
       wrap([
         "no soy un objeto",
         { name: "   ", rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: null } },
+        // un `name` que no es string NO se coerciona: "[object Object]" daría el slug plausible "object-object"
+        { name: {}, rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: null } },
         {
           name: "triage",
           rationale: "x".repeat(500),
@@ -143,10 +145,11 @@ test("empty names, non-objects and in-batch duplicates are discarded; rationale 
     await analyzer.waitFor(id);
     const a = store.getAnalysis(id)!;
     assert.equal(a.proposalIds.length, 1);
-    assert.equal(a.discarded.length, 3);
+    assert.equal(a.discarded.length, 4);
     assert.match(a.discarded.map((d) => d.reason).join(), /propuesta inválida/);
-    assert.match(a.discarded.map((d) => d.reason).join(), /nombre vacío/);
+    assert.equal(a.discarded.filter((d) => d.reason === "nombre vacío").length, 2);
     assert.match(a.discarded.map((d) => d.reason).join(), /ya existe/);
+    assert.ok(!a.discarded.some((d) => d.name === "object-object"));
     const p = store.getProposal(a.proposalIds[0])!;
     assert.equal(p.rationale.length, 400);
     assert.equal(p.evidence.length, 20);
@@ -169,5 +172,97 @@ test("waitFor on a finished analysis resolves immediately and unknown ids reject
     await analyzer.waitFor(id);
     assert.equal(store.getAnalysis(id)?.createdAt, "2026-08-24T12:00:00.000Z");
     await assert.rejects(() => analyzer.waitFor("an-desconocido"), /desconocido/);
+  });
+});
+
+/** Envuelve un store real haciendo fallar escrituras concretas, para simular un disco roto. */
+function brittleStore(store: ProposalStore, fail: { analysisFromCall?: number; proposalAtCall?: number }): ProposalStore {
+  let analyses = 0;
+  let proposals = 0;
+  return {
+    ...store,
+    upsertAnalysis(analysis) {
+      analyses += 1;
+      if (fail.analysisFromCall !== undefined && analyses >= fail.analysisFromCall) throw new Error("ENOSPC: no queda espacio en el dispositivo");
+      store.upsertAnalysis(analysis);
+    },
+    upsertProposal(proposal) {
+      proposals += 1;
+      if (fail.proposalAtCall !== undefined && proposals === fail.proposalAtCall) throw new Error("ENOSPC: no queda espacio en el dispositivo");
+      store.upsertProposal(proposal);
+    },
+  };
+}
+
+/** Falla en vez de colgar el suite si `waitFor` nunca resuelve. */
+async function settlesWithin(promise: Promise<void>, ms = 2000): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("waitFor nunca resolvió: los waiters quedaron colgados")), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+test("a store that cannot write the terminal analysis still releases waiters and never rejects unhandled", async () => {
+  await withStore(async (real) => {
+    // Falla en la 2ª escritura y en TODAS las siguientes: revienta tanto el cierre `done`
+    // como el intento de marcar `error`, que es donde run() podría escapar sin capturar.
+    const store = brittleStore(real, { analysisFromCall: 2 });
+    const logged: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => void logged.push(args);
+    let unhandled: unknown;
+    const onUnhandled = (reason: unknown): void => void (unhandled = reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const analyzer = createAnalyzer({
+        store,
+        signals: async () => SIGNALS,
+        catalogNames: () => [],
+        runClaude: async () => wrap([{ name: "triage", rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: null } }]),
+      });
+      const id = analyzer.start(range);
+      await settlesWithin(analyzer.waitFor(id));
+      // Un waitFor POSTERIOR al fallo tampoco puede colgarse, aunque en disco siga "running".
+      assert.equal(real.getAnalysis(id)?.status, "running");
+      await settlesWithin(analyzer.waitFor(id));
+      await new Promise((r) => setImmediate(r));
+      assert.equal(unhandled, undefined);
+      assert.equal(logged.length, 1);
+      assert.match(String(logged[0][0]), /no se pudo marcar el análisis/);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      console.error = originalError;
+    }
+  });
+});
+
+test("a write failing mid-batch still links the proposals that made it to disk", async () => {
+  await withStore(async (real) => {
+    const store = brittleStore(real, { proposalAtCall: 2 });
+    const analyzer = createAnalyzer({
+      store,
+      signals: async () => SIGNALS,
+      catalogNames: () => [],
+      runClaude: async () =>
+        wrap(
+          ["uno", "dos", "tres"].map((name) => ({ name, rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: null } }))
+        ),
+    });
+    const id = analyzer.start(range);
+    await settlesWithin(analyzer.waitFor(id));
+    const a = real.getAnalysis(id)!;
+    assert.equal(a.status, "error");
+    assert.match(a.error!, /ENOSPC/);
+    const survivors = real.listProposals("proposed");
+    assert.equal(survivors.length, 1);
+    assert.equal(survivors[0].name, "uno");
+    assert.deepEqual(a.proposalIds, [survivors[0].id]);
   });
 });
