@@ -56,3 +56,25 @@ test("ProposalList disables both actions while busy", () => {
   const html = renderToString(createElement(ProposalList, { proposals: [P], analysis: A, busy: true, onAccept: () => {}, onDismiss: () => {} }));
   assert.equal(html.split("disabled=\"\"").length - 1, 2);
 });
+
+test("ProposalList renders the stage chain with instructions, in order", () => {
+  const proposal: WorkflowProposal = {
+    ...P,
+    config: {
+      stages: [
+        { key: "plan", label: "Plan", icon: "📝" },
+        { key: "impl", label: "Impl", icon: "⌨️", role: "impl", instruction: "Ejecuta pytest antes de abrir PR" },
+      ],
+      verifyAfter: "impl",
+    },
+  };
+  const html = renderToString(createElement(ProposalList, { proposals: [proposal], analysis: null, busy: false, onAccept: () => {}, onDismiss: () => {} }));
+  assert.match(html, /Ejecuta pytest antes de abrir PR/);
+  const planIndex = html.indexOf(">plan<");
+  const implIndex = html.indexOf(">impl<");
+  const instructionIndex = html.indexOf("Ejecuta pytest antes de abrir PR");
+  assert.ok(planIndex >= 0 && implIndex >= 0 && instructionIndex >= 0);
+  assert.ok(planIndex < implIndex);
+  assert.ok(implIndex < instructionIndex);
+  assert.match(html, /verifyAfter: impl/);
+});
