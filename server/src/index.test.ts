@@ -972,3 +972,27 @@ test("POST /api/workflows/analyze returns 202 and the analysis becomes done with
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- Foco de pane por sesión: el clic en la lista de panes mueve la ventana/pane activos de tmux ----
+
+test("POST /api/sessions/:name/panes/:paneId/focus valida y cambia la ventana activa (ttyd la sigue)", async () => {
+  const token = ensureCapabilityToken();
+  await withIsolatedSocket(async (socket) => {
+    await createSession("t-focus", "/tmp");
+    await pexec("tmux", ["-L", socket, "new-window", "-t", "t-focus"], { env: envWithoutTmux() });
+    const { stdout } = await pexec("tmux", ["-L", socket, "list-panes", "-s", "-t", "t-focus", "-F", "#{window_index} #{pane_id}"], { env: envWithoutTmux() });
+    const win0 = stdout.trim().split("\n").find((l) => l.startsWith("0 "))!.split(" ")[1];
+    // tras new-window la ventana activa es la 1; pedimos foco al pane de la ventana 0
+    await adoptSession({ session: "t-focus", repo: "monorepo", confirm: true, paneId: win0, expectedSessionCreatedAt: await liveSessionCreatedAt(socket, "t-focus") });
+    const app = createApp();
+    const headers = { "x-ronin-capability": token };
+    assert.equal((await invokeRequest(app, "POST", "/api/sessions/t-focus/panes/nope/focus", { headers })).status, 400);
+    assert.equal((await invokeRequest(app, "POST", `/api/sessions/no-such-session/panes/${encodeURIComponent("%1")}/focus`, { headers })).status, 404);
+    const ok = await invokeRequest(app, "POST", `/api/sessions/t-focus/panes/${encodeURIComponent(win0)}/focus`, { headers });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    const active = await pexec("tmux", ["-L", socket, "display-message", "-p", "-t", "t-focus", "#{window_index} #{pane_id}"], { env: envWithoutTmux() });
+    assert.equal(active.stdout.trim(), `0 ${win0}`);
+    await releaseAdoption("t-focus");
+    rmSync(cycleDirForSession("t-focus"), { recursive: true, force: true });
+  });
+});

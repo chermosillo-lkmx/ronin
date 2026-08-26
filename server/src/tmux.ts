@@ -268,7 +268,7 @@ export async function readPaneGeometry(target: string): Promise<PaneGeometry | n
  */
 export async function listSessionPaneIds(session: string): Promise<string[] | null> {
   try {
-    const { stdout } = await pexec("tmux", tmuxArgs("list-panes", "-t", session, "-F", "#{pane_id}"));
+    const { stdout } = await pexec("tmux", tmuxArgs("list-panes", "-s", "-t", session, "-F", "#{pane_id}"));
     return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
   } catch {
     return null;
@@ -285,6 +285,16 @@ export type PaneMembership = "in-session" | "elsewhere" | "session-not-found" | 
  * (nunca tocar) de "ya no existe en ningún lado". Compartida por las rutas HTTP de pane
  * (index.ts) y por la I/O de workers adoptados/driver (engine.ts) — una sola implementación.
  */
+/**
+ * Activa la ventana y el pane indicados en su sesión. Es estado de la VENTANA tmux, compartido:
+ * lo ven todos los clientes adjuntos (ttyd, Terminal.app). `select-window` acepta un pane como
+ * target y resuelve su ventana; después `select-pane` lo activa dentro de ella.
+ */
+export async function focusSessionPane(paneId: string): Promise<void> {
+  await pexec("tmux", tmuxArgs("select-window", "-t", paneId));
+  await pexec("tmux", tmuxArgs("select-pane", "-t", paneId));
+}
+
 export async function paneMembership(session: string, paneId: string): Promise<PaneMembership> {
   const paneIds = await listSessionPaneIds(session);
   if (paneIds === null) return "session-not-found";
@@ -344,7 +354,7 @@ export async function createDriverWindow(
 
   // El pane inicial de una sesión recién creada es determinístico; se lee su %N para no
   // depender nunca de índices (que tmux renumera al morir un pane).
-  const { stdout: first } = await pexec("tmux", tmuxArgs("list-panes", "-t", session, "-F", "#{pane_id}"));
+  const { stdout: first } = await pexec("tmux", tmuxArgs("list-panes", "-s", "-t", session, "-F", "#{pane_id}"));
   const driver = parsePaneId(first.split("\n")[0] ?? "");
   if (!driver) throw new Error("no se pudo resolver el pane driver");
 
@@ -380,7 +390,7 @@ export async function createDriverWindow(
   // <session>` — incluido el fallback de sendWhenReady — escribiría en el pane equivocado.
   await tmuxOptional(["select-pane", "-t", driver]);
 
-  const { stdout: all } = await pexec("tmux", tmuxArgs("list-panes", "-t", session, "-F", "#{pane_id}"));
+  const { stdout: all } = await pexec("tmux", tmuxArgs("list-panes", "-s", "-t", session, "-F", "#{pane_id}"));
   const count = all.split("\n").filter((l) => l.trim()).length;
   if (count !== PANE_ROLES.length) throw new Error(`la ventana driver quedó con ${count} pane(s), no 4`);
 

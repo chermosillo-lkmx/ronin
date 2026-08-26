@@ -202,3 +202,16 @@
 .ron-tests-profile-row { display: grid; grid-template-columns: 160px 1fr auto; gap: var(--space-2); align-items: end; }
 .ron-tests-suite-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
 .ron-tests-form-actions { display: flex; justify-content: flex-end; }
+
+/* ── Modal Nocturne (AdoptDialog) ───────────────────────────────────────── */
+/* Sin estas reglas el diálogo se pintaba inline al final del workspace y "se perdía". */
+.ron-modal-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: rgba(5, 6, 12, 0.64); }
+.ron-modal {
+  width: 420px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow: auto;
+  display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4);
+  border: 1px solid var(--color-divider); border-radius: 12px; background: var(--color-surface); box-shadow: var(--shadow-lg);
+}
+.ron-modal h2 { margin: 0; font-size: 18px; }
+.ron-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--color-neutral-400); }
+.ron-field input, .ron-field select { height: 28px; border: 1px solid var(--color-divider); border-radius: 6px; padding: 0 8px; color: var(--color-text); background: var(--color-bg); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ron-modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }

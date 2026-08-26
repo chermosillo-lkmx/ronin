@@ -10,6 +10,7 @@ import { adoptSession, attachWorker, commitHotApply, focusPane, launchAction, la
 import { AdoptCommitError, AdoptValidationError, type AdoptErrorCode } from "./adopt.js";
 import {
   capturePaneAnsi,
+  focusSessionPane,
   hasSession,
   killSession,
   listSessionPaneIds,
@@ -834,6 +835,23 @@ app.post("/api/sessions/:name/panes/:paneId/keys", async (req, res) => {
   const submit = req.body?.submit === true;
   if (Buffer.byteLength(text, "utf8") > PANE_KEYS_PASTE_THRESHOLD) await pastePrompt(paneId, text, submit);
   else await sendText(paneId, text, submit);
+  res.json({ ok: true });
+});
+
+// Foco de pane: el clic en la lista mueve la ventana/pane activos para que ttyd (tmux attach)
+// enseñe ese pane. Mismo contrato de validación que /keys; en sesiones ajenas no se toca nada.
+app.post("/api/sessions/:name/panes/:paneId/focus", async (req, res) => {
+  const { name, paneId } = req.params;
+  if (!isSafeSessionName(name)) return res.status(400).json({ error: "nombre de sesión inválido", code: "INVALID_SESSION" });
+  if (!isPaneIdParam(paneId)) return res.status(400).json({ error: "pane inválido", code: "INVALID_PANE" });
+  const kind = await sessionKind(name);
+  if (kind === null) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
+  if (kind === "foreign") return res.status(403).json({ error: "sesión ajena: adóptala para cambiar de pane", code: "SESSION_READ_ONLY" });
+  const membership = await paneMembership(name, paneId);
+  if (membership === "session-not-found") return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
+  if (membership === "elsewhere") return res.status(400).json({ error: "el pane pertenece a otra sesión", code: "PANE_NOT_IN_SESSION" });
+  if (membership === "gone") return res.status(409).json({ error: "el pane ya no existe", code: "PANE_GONE" });
+  await focusSessionPane(paneId);
   res.json({ ok: true });
 });
 

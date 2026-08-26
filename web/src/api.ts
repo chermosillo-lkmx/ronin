@@ -576,6 +576,16 @@ export interface ApiErrorBody {
   code: string;
 }
 
+/** Activa ventana+pane en tmux para que la terminal ttyd los muestre. Devuelve el error tipado o null. */
+export async function focusSessionPane(session: string, paneId: string): Promise<ApiErrorBody | null> {
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(paneId)}/focus`, { method: "POST" });
+    return r.ok ? null : ((await r.json().catch(() => null)) as ApiErrorBody | null) ?? { error: "fallo desconocido", code: "UNKNOWN" };
+  } catch {
+    return { error: "sin conexión con el backend", code: "NETWORK" };
+  }
+}
+
 export async function sendPaneKeys(session: string, paneId: string, text: string, submit = false): Promise<ApiErrorBody | null> {
   try {
     const r = await fetch(`/api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(paneId)}/keys`, {
