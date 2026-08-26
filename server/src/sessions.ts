@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { isSafeSessionName } from "./session-name.js";
 import { cycleDirForSession } from "./stages.js";
 import {
@@ -140,6 +141,22 @@ export function buildInventory(
   }));
 }
 
+/** Añade metadata de lanzamiento sin dar acceso a `launch.json` a sesiones ajenas. */
+export function withLaunchRequests(sessions: TmuxSessionInfo[], readRequest: (name: string) => string | undefined): TmuxSessionInfo[] {
+  return sessions.map((session) => session.kind === "managed"
+    ? { ...session, request: readRequest(session.name) }
+    : session);
+}
+
+function requestFromLaunch(name: string): string | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(join(cycleDirForSession(name), "launch.json"), "utf8"));
+    return typeof raw?.request === "string" && raw.request.trim() ? raw.request : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Result returned by the tmux inventory endpoint.
  *
  * An empty `sessions` array with a null diagnostic is the one and only representation of a
@@ -185,5 +202,6 @@ export async function listAllSessions(): Promise<TmuxSessionInfo[]> {
 /** Read the live inventory without erasing a tmux access failure. */
 export async function readTmuxInventory(): Promise<TmuxInventoryResult> {
   const [sessionsResult, panesResult] = await Promise.all([listSessionsRawResult(), listPanesRawResult()]);
-  return inventoryFromRaw(sessionsResult, panesResult, (name) => existsSync(cycleDirForSession(name)));
+  const inventory = inventoryFromRaw(sessionsResult, panesResult, (name) => existsSync(cycleDirForSession(name)));
+  return { ...inventory, sessions: withLaunchRequests(inventory.sessions, requestFromLaunch) };
 }

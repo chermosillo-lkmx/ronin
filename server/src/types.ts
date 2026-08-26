@@ -172,6 +172,8 @@ export interface TmuxSessionInfo {
   attached: boolean;
   adopted: boolean;       // derivado de @cowork-adopted en el inventario (T3)
   presentation?: SessionPresentation;
+  /** Petición inicial persistida para una sesión workflow; ausente en terminales y sesiones ajenas. */
+  request?: string;
 }
 
 // ---- Preflight (F1). Espejo manual en web/src/types.ts ----

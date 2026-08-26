@@ -43,6 +43,65 @@ export function assembleSteps(
     .join("\n");
 }
 
+export interface WorkflowPromptValuesInput {
+  workflow: { stages: WfStage[]; verifyAfter: string | null };
+  cycle: string;
+  repo: string;
+  kind: string;
+  reqline: string;
+  title: string;
+  key: string;
+  ref?: string;
+  desc?: string;
+  body?: string;
+  url?: string;
+  vars?: Record<string, string>;
+}
+
+/** Valores puros compartidos por tareas del tablero y sesiones iniciadas con una petición. */
+export function buildWorkflowPromptValues(input: WorkflowPromptValuesInput): Record<string, string> {
+  const ev = `${input.cycle}/evidence`;
+  const fill = makeFill(input.cycle, input.repo, input.vars ?? {});
+  return {
+    kind: input.kind,
+    reqline: input.reqline,
+    title: input.title ? `\n${input.title}` : "",
+    ref: input.ref ?? "",
+    desc: input.desc ?? "",
+    steps: assembleSteps(input.workflow, input.cycle, fill),
+    verifier: input.workflow.verifyAfter
+      ? `\nAl terminar la etapa "${input.workflow.verifyAfter}", un VERIFICADOR independiente (otro pane) revisará tus resultados contra el objetivo.`
+      : "",
+    cycle: input.cycle,
+    ev,
+    repo: input.repo,
+    key: input.key,
+    body: input.body ?? "",
+    url: input.url ?? "",
+  };
+}
+
+/** Renderiza el workflow congelado para una petición creada desde Nueva sesión. */
+export function buildWorkflowRequestPrompt(input: {
+  workflow: { stages: WfStage[]; verifyAfter: string | null };
+  cycle: string;
+  repo: string;
+  request: string;
+  title: string;
+  key: string;
+}): string {
+  return renderPrompt(getPromptTemplate("workflow"), buildWorkflowPromptValues({
+    workflow: input.workflow,
+    cycle: input.cycle,
+    repo: input.repo,
+    kind: "petición",
+    reqline: input.request,
+    title: input.title,
+    key: input.key,
+    body: input.request,
+  }));
+}
+
 /**
  * The conversation template seeded into the worker's claude pane.
  *
@@ -125,38 +184,27 @@ export function buildWorkerPrompt(
 ): string {
   if (task.source === "pr") return buildPrReviewPrompt(task, cycleDir);
   if (task.source === "adhoc") return task.complex ? buildComplexPrompt(task, cycleDir) : buildAdhocPrompt(task, cycleDir);
-  const ev = `${cycleDir}/evidence`;
-  const fill = makeFill(cycleDir, task.repo, vars);
-
   // Pipeline assembled from the composable workflow (data/workflow.json), optionally
   // restricted to the per-launch enabled stages. Each stage → numbered step + sentinel.
   const resolved = flow ?? resolveFlow();
-  const { verifyAfter } = resolved;
-  const steps = assembleSteps(resolved, cycleDir, fill);
-
   const desc = (task.body ?? "").trim();
   const isCustom = task.source === "custom";
-  return renderPrompt(getPromptTemplate("workflow"), {
+  return renderPrompt(getPromptTemplate("workflow"), buildWorkflowPromptValues({
+    workflow: resolved,
+    cycle: cycleDir,
+    repo: task.repo,
     kind: isCustom ? "petición" : "tarea",
     reqline: isCustom
       ? `Requerimiento — petición personal (servicio probable: ${task.repo}):`
       : `Requerimiento — ticket ${task.key} (servicio probable: ${task.repo}):`,
-    // Folded into a leading-"\n" block: today `task.title` is a bare filtered line,
-    // so an empty title drops entirely (no stray blank). Matches {ref}/{desc}.
-    title: task.title ? `\n${task.title}` : "",
+    title: task.title,
     ref: task.url ? `\nRef: ${task.url}` : "",
     desc: desc ? `\nDescripción del ticket:\n${desc}` : "",
-    steps,
-    verifier: verifyAfter
-      ? `\nAl terminar la etapa "${verifyAfter}", un VERIFICADOR independiente (otro pane) revisará tus resultados contra el objetivo.`
-      : "",
-    cycle: cycleDir,
-    ev,
-    repo: task.repo,
     key: task.key,
     body: desc,
     url: task.url ?? "",
-  });
+    vars,
+  }));
 }
 
 /**

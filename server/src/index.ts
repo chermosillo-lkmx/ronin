@@ -113,6 +113,9 @@ export interface CreateAppOptions {
     startTtyd?: typeof startTtyd;
     openTerminal?: typeof openTerminal;
   };
+  /** Seams del lanzamiento gestionado y el inventario para pruebas HTTP sin tmux. */
+  launchManagedSession?: typeof launchManagedSession;
+  readTmuxInventory?: typeof readTmuxInventory;
 }
 
 export function createApp(options: CreateAppOptions = {}): express.Express {
@@ -134,6 +137,8 @@ const terminal = {
   startTtyd: options.terminal?.startTtyd ?? startTtyd,
   openTerminal: options.terminal?.openTerminal ?? openTerminal,
 };
+const performLaunchManagedSession = options.launchManagedSession ?? launchManagedSession;
+const readInventory = options.readTmuxInventory ?? readTmuxInventory;
 const trustedRootsApi = options.trustedRoots ?? {
   read: () => ({ roots: trustedRoots(), source: process.env.COWORK_ALLOWED_ROOTS !== undefined ? "env" as const : "settings" as const }),
   save: (input: unknown) => {
@@ -666,7 +671,7 @@ app.get("/api/workers/:id/panes", async (req, res) => {
 // recalcularlo que arriesgarse a mostrarlo rancio (mismo criterio que los badges de salud
 // del driver, que también se derivan en cada poll).
 app.get("/api/sessions", async (_req, res) => {
-  const inventory = await readTmuxInventory();
+  const inventory = await readInventory();
   const presentations = sessionPresentations.list(inventory.sessions.map((session) => session.name));
   res.json({
     ...inventory,
@@ -680,14 +685,20 @@ app.get("/api/sessions", async (_req, res) => {
 // server owns cwd, shell command, workflow branch/worktree, and the allowed normal CLI agents.
 app.post("/api/sessions", async (req, res) => {
   try {
-    const launched = await launchManagedSession({
+    const rawRequest = req.body?.request;
+    const request = typeof rawRequest === "string" ? rawRequest.replace(/\0/g, "").trim() : undefined;
+    if (request && Buffer.byteLength(request, "utf8") > 8 * 1024) {
+      return res.status(400).json({ error: "la petición no puede superar 8 KB", code: "REQUEST_TOO_LONG" });
+    }
+    const launched = await performLaunchManagedSession({
       repo: String(req.body?.repo ?? ""),
       workflowId: String(req.body?.workflowId ?? ""),
       name: String(req.body?.name ?? ""),
       mode: req.body?.mode,
       agent: req.body?.agent,
+      request,
     });
-    const inventory = await readTmuxInventory();
+    const inventory = await readInventory();
     const session = inventory.sessions.find((item) => item.name === launched.name) ?? null;
     res.status(201).json({ ...launched, session, diagnostic: inventory.diagnostic });
   } catch (e) {

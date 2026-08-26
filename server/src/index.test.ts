@@ -636,6 +636,34 @@ test("DELETE /api/sessions/:name exige confirmación y mata sólo la sesión tmu
   });
 });
 
+test("POST /api/sessions rechaza una petición de más de 8 KiB antes de lanzar", async () => {
+  const token = ensureCapabilityToken();
+  const app = createApp();
+  const response = await invokeRequest(app, "POST", "/api/sessions", {
+    headers: { "x-ronin-capability": token },
+    body: { repo: "monorepo", workflowId: "wf-test", name: "cowork-demasiado-larga", request: "x".repeat(8 * 1024 + 1) },
+  });
+  assert.deepEqual(response, { status: 400, body: { error: "la petición no puede superar 8 KB", code: "REQUEST_TOO_LONG" } });
+});
+
+test("POST /api/sessions limpia NUL y espacios antes de medir y lanzar una petición", async () => {
+  const token = ensureCapabilityToken();
+  const received: unknown[] = [];
+  const app = createApp({
+    launchManagedSession: async (input) => {
+      received.push(input);
+      return { name: "cowork-peticion", repo: "monorepo", mode: "workflow", workflowId: "wf-test", cwd: "/repo" };
+    },
+    readTmuxInventory: async () => ({ sessions: [], diagnostic: null }),
+  });
+  const response = await invokeRequest(app, "POST", "/api/sessions", {
+    headers: { "x-ronin-capability": token },
+    body: { repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", request: `\0`.repeat(8 * 1024 + 1) + "  arregla CU-86e2\0  " },
+  });
+  assert.equal(response.status, 201);
+  assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", mode: undefined, agent: undefined, request: "arregla CU-86e2" }]);
+});
+
 test("POST /api/sessions/:name/{term,attach} valida la sesión y delega terminales sin procesos reales", async () => {
   const token = ensureCapabilityToken();
   const calls: string[] = [];

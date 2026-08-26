@@ -259,6 +259,7 @@ export interface TmuxSessionInfo {
   attached: boolean;
   adopted: boolean; // derivado de @cowork-adopted en el inventario (T3)
   presentation?: SessionPresentation;
+  request?: string;
 }
 
 export type CheckLevel = "ok" | "warn" | "fail";

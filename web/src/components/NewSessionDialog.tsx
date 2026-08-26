@@ -5,6 +5,13 @@ import type { WorkflowCatalogItem } from "../types";
 type LaunchMode = "workflow" | "terminal";
 type TerminalAgent = "claude" | "codex";
 
+export function defaultSessionName(request: string): string {
+  const ticket = request.match(/\b(?:CU-\w+|PW-\d+|[A-Z]+-\d+)\b/i)?.[0];
+  const source = ticket ?? request.trim().split(/\s+/).slice(0, 4).join(" ");
+  const slug = source.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+  return slug ? `cowork-${slug}` : "cowork-";
+}
+
 export function NewSessionDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (name: string) => void }) {
   const [repos, setRepos] = useState<string[]>(["monorepo"]);
   const [workflows, setWorkflows] = useState<WorkflowCatalogItem[]>([]);
@@ -12,6 +19,7 @@ export function NewSessionDialog({ onClose, onCreated }: { onClose: () => void; 
   const [workflowId, setWorkflowId] = useState("");
   const [mode, setMode] = useState<LaunchMode>("workflow");
   const [agent, setAgent] = useState<TerminalAgent>("claude");
+  const [request, setRequest] = useState("");
   const [name, setName] = useState("cowork-");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +44,7 @@ export function NewSessionDialog({ onClose, onCreated }: { onClose: () => void; 
     setBusy(true);
     try {
       const result = await launchManagedTmuxSession(mode === "workflow"
-        ? { repo, workflowId, name, mode }
+        ? { repo, workflowId, name, mode, request: request.trim() || undefined }
         : { repo, name, mode, agent });
       onCreated(result.name);
       onClose();
@@ -52,8 +60,9 @@ export function NewSessionDialog({ onClose, onCreated }: { onClose: () => void; 
         <div className="ronin-launch-mode"><span>Modo</span><div className="ronin-segment" role="group" aria-label="Modo de sesión"><button type="button" className={mode === "workflow" ? "active" : ""} data-testid="session-mode-workflow" aria-pressed={mode === "workflow"} onClick={() => setMode("workflow")}>Workflow</button><button type="button" className={mode === "terminal" ? "active" : ""} data-testid="session-mode-terminal" aria-pressed={mode === "terminal"} onClick={() => setMode("terminal")}>Terminal normal</button></div></div>
         {mode === "workflow" ? <label>Workflow<select data-testid="session-workflow" value={workflowId} onChange={(event) => setWorkflowId(event.target.value)}><option value="">Seleccionar workflow…</option>{workflows.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name}</option>)}</select></label> : <label>Agente<select data-testid="session-agent" value={agent} onChange={(event) => setAgent(event.target.value as TerminalAgent)}><option value="claude">Claude</option><option value="codex">Codex</option></select></label>}
         <label>Repositorio<select value={repo} onChange={(event) => setRepo(event.target.value)}>{repos.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+        {mode === "workflow" && <label>Petición<textarea value={request} onChange={(event) => { const next = event.target.value; setRequest(next); if (name === "cowork-") setName(defaultSessionName(next)); }} placeholder="necesito que trabajes este ticket CU-86e2… — o pega aquí la descripción" rows={4} /></label>}
         <label>Nombre de sesión<input value={name} autoFocus spellCheck={false} onChange={(event) => setName(event.target.value)} placeholder="cowork-api-gateway" /></label>
-        <p className="ronin-form-note">{mode === "workflow" ? <>Se crea una rama <code>ronin/&lt;sesión&gt;</code> desde <code>main</code> y se congela el workflow elegido.</> : <>Se abre <code>{agent}</code> en la raíz del repositorio, sin crear rama, worktree ni workflow.</>}</p>
+        <p className="ronin-form-note">{mode === "workflow" ? <>{request.trim() ? "Claude recibirá el workflow y esta petición al arrancar." : "Sin petición: tendrás que instruir al worker en la terminal."} Se crea una rama <code>ronin/&lt;sesión&gt;</code> desde <code>main</code> y se congela el workflow elegido.</> : <>Se abre <code>{agent}</code> en la raíz del repositorio, sin crear rama, worktree ni workflow.</>}</p>
         {error && <p className="ronin-form-error">{error}</p>}
         <footer><button type="button" className="n-btn n-btn-secondary" onClick={onClose}>Cancelar</button><button className="n-btn n-btn-primary" disabled={busy || (mode === "workflow" && !workflowId)}>{busy ? "Creando…" : "Crear sesión"}</button></footer>
       </form>

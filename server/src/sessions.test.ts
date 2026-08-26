@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList } from "./sessions.js";
+import { buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
 
 // Salidas de `tmux list-sessions -F` y `tmux list-panes -a -F` con los formatos de sessions.ts.
 const SESSIONS = [
@@ -255,4 +255,11 @@ test("inventoryFromRaw: un fallo de panes preserva las sesiones que sí se pudie
   assert.equal(result.sessions.length, 3);
   assert.deepEqual(result.diagnostic, diagnostic);
   assert.deepEqual(result.sessions[0].panes, []);
+});
+
+test("withLaunchRequests expone sólo la petición persistida de sesiones gestionadas", () => {
+  const sessions = buildInventory(SESSIONS, PANES, (name) => name === "cowork-CU-42-driver");
+  const enriched = withLaunchRequests(sessions, (name) => name === "cowork-CU-42-driver" ? "arregla CU-42" : "no debe leerse");
+  assert.equal(enriched.find((session) => session.name === "cowork-CU-42-driver")!.request, "arregla CU-42");
+  assert.equal(enriched.find((session) => session.name === "dev-scratch")!.request, undefined);
 });

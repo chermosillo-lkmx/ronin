@@ -308,7 +308,7 @@ const READY = /for shortcuts|esc to interrupt|bypass permissions on|auto mode on
  * Send the prompt once claude is actually ready to receive it: poll the pane,
  * dismiss boot dialogs (trust / bypass warning), then type + submit.
  */
-async function sendWhenReady(session: string, prompt: string): Promise<void> {
+export async function sendWhenReady(session: string, prompt: string): Promise<void> {
   // TODO prompt inicial (driver Y scripted) se entrega por bracketed paste + pausa antes del
   // Enter. Con send-keys -l + Enter inmediato, el Enter llega mientras la caja de input sigue
   // componiendo los trozos pegados y se lo TRAGA: el prompt queda escrito pero sin enviar,

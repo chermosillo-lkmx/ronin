@@ -543,6 +543,7 @@ export interface ManagedSessionLaunch {
   name: string;
   mode: "workflow" | "terminal";
   agent?: "claude" | "codex";
+  request?: string;
 }
 export async function launchManagedTmuxSession(input: ManagedSessionLaunch): Promise<{ name: string; mode: "workflow" | "terminal"; workflowId?: string; agent?: "claude" | "codex"; session: TmuxSessionInfo | null }> {
   const r = await fetch("/api/sessions", {

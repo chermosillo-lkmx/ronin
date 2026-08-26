@@ -1,8 +1,10 @@
 import { writeJsonAtomic } from "./atomic.js";
 import { CLAUDE_TERMINAL_CMD, CODEX_CMD } from "./config.js";
+import { sendWhenReady } from "./engine.js";
 import { listRepos, resolveCwd } from "./repos.js";
 import { isSafeSessionName } from "./session-name.js";
 import { cycleDirForSession, ensureCycleDir, removeCycleDir, writeFlow } from "./stages.js";
+import { buildWorkflowRequestPrompt } from "./templates.js";
 import { createSession, hasSession, killSession } from "./tmux.js";
 import { findWorkflowCatalogItem, type WorkflowCatalogItem } from "./workflow-catalog.js";
 import { addWorktree, removeWorktree, worktreePathForSession } from "./worktree.js";
@@ -30,6 +32,7 @@ export interface ManagedSessionLaunchInput {
   // The request boundary is untrusted; validation below narrows these to the public unions.
   mode?: string;
   agent?: string;
+  request?: string;
 }
 
 export type SessionLaunchMode = "workflow" | "terminal";
@@ -54,8 +57,36 @@ export interface ManagedSessionLaunchResult {
   branch?: string;
 }
 
-export function validateManagedSessionLaunch(input: ManagedSessionLaunchInput): void {
-  if (!listRepos().includes(input.repo)) {
+export interface ManagedSessionLaunchDeps {
+  listRepos: typeof listRepos;
+  resolveCwd: typeof resolveCwd;
+  hasSession: typeof hasSession;
+  findWorkflowCatalogItem: typeof findWorkflowCatalogItem;
+  worktreePathForSession: typeof worktreePathForSession;
+  addWorktree: typeof addWorktree;
+  removeWorktree: typeof removeWorktree;
+  createSession: typeof createSession;
+  killSession: typeof killSession;
+  cycleDirForSession: typeof cycleDirForSession;
+  ensureCycleDir: typeof ensureCycleDir;
+  removeCycleDir: typeof removeCycleDir;
+  writeFlow: typeof writeFlow;
+  writeJsonAtomic: typeof writeJsonAtomic;
+  deliverPrompt?: (session: string, prompt: string) => Promise<void>;
+  logError?: (error: unknown) => void;
+  /** Sólo para inspeccionar la escritura desde pruebas unitarias. */
+  readWrite?: (file: string) => unknown;
+}
+
+const launchDeps: ManagedSessionLaunchDeps = {
+  listRepos, resolveCwd, hasSession, findWorkflowCatalogItem, worktreePathForSession,
+  addWorktree, removeWorktree, createSession, killSession, cycleDirForSession,
+  ensureCycleDir, removeCycleDir, writeFlow, writeJsonAtomic, deliverPrompt: sendWhenReady,
+  logError: (error) => console.error("[claude-cowork] no se pudo entregar la petición inicial", error),
+};
+
+export function validateManagedSessionLaunch(input: ManagedSessionLaunchInput, deps: Pick<ManagedSessionLaunchDeps, "listRepos"> = launchDeps): void {
+  if (!deps.listRepos().includes(input.repo)) {
     throw new SessionLaunchError("REPO_UNKNOWN", "el repositorio seleccionado no está configurado");
   }
   if (!isSafeSessionName(input.name)) {
@@ -92,38 +123,45 @@ function terminalLaunchRecord(input: ManagedSessionLaunchInput, cwd: string, age
  * The renderer never supplies arbitrary cwd/commands: repository resolution and the base branch
  * remain a server-side authority. Every created resource is rolled back on a later failure.
  */
-export async function launchManagedSession(input: ManagedSessionLaunchInput): Promise<ManagedSessionLaunchResult> {
-  validateManagedSessionLaunch(input);
-  const resolved = resolveCwd(input.repo);
+export async function launchManagedSession(input: ManagedSessionLaunchInput, injected: Partial<ManagedSessionLaunchDeps> = {}): Promise<ManagedSessionLaunchResult> {
+  const deps = { ...launchDeps, ...injected };
+  validateManagedSessionLaunch(input, deps);
+  const resolved = deps.resolveCwd(input.repo);
   if (!resolved.real) throw new SessionLaunchError("REPO_UNAVAILABLE", "el repositorio configurado no existe en disco");
-  if (await hasSession(input.name)) throw new SessionLaunchError("SESSION_ALREADY_EXISTS", "ya existe una sesión tmux con ese nombre");
+  if (await deps.hasSession(input.name)) throw new SessionLaunchError("SESSION_ALREADY_EXISTS", "ya existe una sesión tmux con ese nombre");
 
   const mode = input.mode ?? "workflow";
-  if (mode === "terminal") return launchNormalTerminalSession(input, resolved.cwd, input.agent as TerminalAgent);
+  if (mode === "terminal") return launchNormalTerminalSession(input, resolved.cwd, input.agent as TerminalAgent, deps);
 
-  const workflow = findWorkflowCatalogItem(input.workflowId!);
+  const workflow = deps.findWorkflowCatalogItem(input.workflowId!);
   if (!workflow) throw new SessionLaunchError("WORKFLOW_NOT_FOUND", "el workflow seleccionado ya no existe");
 
   const branch = `ronin/${input.name}`;
-  const worktree = worktreePathForSession(resolved.cwd, input.name);
-  const cycle = cycleDirForSession(input.name);
+  const worktree = deps.worktreePathForSession(resolved.cwd, input.name);
+  const cycle = deps.cycleDirForSession(input.name);
   let worktreeCreated = false;
   let tmuxCreated = false;
   let cycleCreated = false;
   try {
-    await addWorktree(resolved.cwd, worktree, branch, "main");
+    await deps.addWorktree(resolved.cwd, worktree, branch, "main");
     worktreeCreated = true;
-    await createSession(input.name, worktree);
+    await deps.createSession(input.name, worktree);
     tmuxCreated = true;
-    ensureCycleDir(cycle);
+    deps.ensureCycleDir(cycle);
     cycleCreated = true;
-    writeFlow(cycle, workflow.config);
-    writeJsonAtomic(`${cycle}/launch.json`, launchRecord(input, workflow, resolved.cwd, worktree, branch));
+    deps.writeFlow(cycle, workflow.config);
+    deps.writeJsonAtomic(`${cycle}/launch.json`, launchRecord(input, workflow, resolved.cwd, worktree, branch));
+    const request = input.request?.trim();
+    if (request && deps.deliverPrompt) {
+      const title = request.split(/\r?\n/, 1)[0].slice(0, 70);
+      void deps.deliverPrompt(input.name, buildWorkflowRequestPrompt({ workflow: workflow.config, cycle, repo: input.repo, request, title, key: input.name }))
+        .catch((error) => deps.logError?.(error));
+    }
     return { name: input.name, repo: input.repo, mode: "workflow", workflowId: workflow.id, cwd: resolved.cwd, worktree, branch };
   } catch (error) {
-    if (tmuxCreated) await killSession(input.name);
-    if (cycleCreated) removeCycleDir(cycle);
-    if (worktreeCreated) await removeWorktree(resolved.cwd, worktree, branch);
+    if (tmuxCreated) await deps.killSession(input.name);
+    if (cycleCreated) deps.removeCycleDir(cycle);
+    if (worktreeCreated) await deps.removeWorktree(resolved.cwd, worktree, branch);
     throw error;
   }
 }
@@ -133,21 +171,22 @@ async function launchNormalTerminalSession(
   input: ManagedSessionLaunchInput,
   cwd: string,
   agent: TerminalAgent,
+  deps: ManagedSessionLaunchDeps,
 ): Promise<ManagedSessionLaunchResult> {
-  const cycle = cycleDirForSession(input.name);
+  const cycle = deps.cycleDirForSession(input.name);
   let tmuxCreated = false;
   let cycleCreated = false;
   try {
-    await createSession(input.name, cwd, normalTerminalCommand(agent));
+    await deps.createSession(input.name, cwd, normalTerminalCommand(agent));
     tmuxCreated = true;
     // The cycle dir marks the terminal as managed, enabling the same Attach/pane controls.
-    ensureCycleDir(cycle);
+    deps.ensureCycleDir(cycle);
     cycleCreated = true;
-    writeJsonAtomic(`${cycle}/launch.json`, terminalLaunchRecord(input, cwd, agent));
+    deps.writeJsonAtomic(`${cycle}/launch.json`, terminalLaunchRecord(input, cwd, agent));
     return { name: input.name, repo: input.repo, mode: "terminal", agent, cwd };
   } catch (error) {
-    if (tmuxCreated) await killSession(input.name);
-    if (cycleCreated) removeCycleDir(cycle);
+    if (tmuxCreated) await deps.killSession(input.name);
+    if (cycleCreated) deps.removeCycleDir(cycle);
     throw error;
   }
 }
