@@ -1,10 +1,8 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { LIEBRE_ROOT } from "./config.js";
+import { dataPath } from "./data-dir.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const MAP_FILE = join(here, "..", "data", "repos.json");
+const MAP_FILE = dataPath("repos.json");
 
 /**
  * Folder where a worker starts, per inferred repo. Configurable via

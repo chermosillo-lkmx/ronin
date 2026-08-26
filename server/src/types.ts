@@ -1,4 +1,4 @@
-import type { WfStage } from "./workflow.js"; // type-only (workflow.ts sólo importa tipos de aquí → ciclo inofensivo)
+import type { WfStage, WorkflowConfig } from "./workflow.js"; // type-only (workflow.ts sólo importa tipos de aquí → ciclo inofensivo)
 import type { PaneRole, PaneStatus } from "./tmux.js"; // type-only (tmux.ts no importa este archivo)
 
 export type Source = "clickup" | "jira" | "gitlab" | "adhoc" | "pr" | "custom";
@@ -29,7 +29,9 @@ export interface Task {
 export interface Worker {
   id: string;
   label: string;          // "worker #1"
-  kind?: "task" | "research" | "action"; // default (undefined) = task; "research"/"action" = desacoplados del tablero
+  kind?: "task" | "research" | "action" | "adopted"; // default (undefined) = task; "research"/"action"/"adopted" = desacoplados del tablero
+  origin?: "ronin" | "adopted"; // ausente = "ronin" (mismo patrón opcional que mode/kind). F2: guarda stopLive/pollLive de matar una sesión ajena.
+  adoptedPane?: string;   // %N registrado en la adopción (F2)
   actionKey?: string;     // set cuando kind === "action" (qué CustomAction lo lanzó)
   repo: string;
   taskId: string;
@@ -54,6 +56,23 @@ export interface Worker {
   driverDown?: boolean;           // el claude del pane driver murió; los hermanos pueden seguir corriendo
   parked?: { resetAt?: string };  // el worker se auto-parqueó por límite de uso (===WORKER-PARKED-LIMIT===)
   stalled?: { minutes: number };  // idle sin sentinel nuevo desde hace N minutos (señal blanda)
+}
+
+/**
+ * Metadato persistido de una adopción (F2/T2), en `<cycle>/adopted.json`. La AUTORIDAD real
+ * vive en tmux (`@cowork-adopted` en la propia sesión, T2); este archivo es el detalle
+ * (cycle dir, workflow congelado) — mismo patrón que `stages.ts:118-123` documenta para los
+ * artefactos de auditoría.
+ */
+export interface AdoptionRecord {
+  version: 1;
+  session: string;
+  repo: string;             // clave de repos.json, NUNCA una ruta libre
+  cwd: string;               // realpath resuelto y contenido en una raíz permitida
+  paneId: string;            // %N
+  sessionCreatedAt: number;  // ms epoch — invalida un adopted.json rancio
+  adoptedAt: number;
+  workflow: WorkflowConfig;  // flow congelado; verifyAfter forzado a null
 }
 
 /** Ids de pane tmux (%N) de la ventana driver, por rol. Estables mientras viva el pane. */
@@ -138,6 +157,12 @@ export interface TmuxPaneInfo {
   active: boolean;
 }
 
+/** Etiqueta local para operar una sesión sin alterar su identificador real en tmux. */
+export interface SessionPresentation {
+  title: string;
+  repo: string | null;
+}
+
 export interface TmuxSessionInfo {
   name: string;
   kind: "managed" | "foreign";
@@ -145,6 +170,8 @@ export interface TmuxSessionInfo {
   panes: TmuxPaneInfo[];
   createdAt: number;     // epoch ms (tmux da segundos; se multiplica al parsear)
   attached: boolean;
+  adopted: boolean;       // derivado de @cowork-adopted en el inventario (T3)
+  presentation?: SessionPresentation;
 }
 
 // ---- Preflight (F1). Espejo manual en web/src/types.ts ----

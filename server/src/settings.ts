@@ -1,14 +1,12 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dataPath } from "./data-dir.js";
 import {
   CLICKUP_LIST_IDS, CLICKUP_TEAM_ID, CLICKUP_TOKEN,
   JIRA_BASE_URL, JIRA_EMAIL, JIRA_JQL, JIRA_TOKEN,
   GITLAB_BASE_URL, GITLAB_PROJECT, GITLAB_TOKEN,
 } from "./config.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const SETTINGS_FILE = join(here, "..", "data", "settings.json");
+const SETTINGS_FILE = dataPath("settings.json");
 const COMMENT =
   "Credenciales de conectores (ClickUp/Jira/GitLab). Gitignored. Editable desde ⚙ Configuración → Conectores o a mano. Token vacío = conservar el existente.";
 

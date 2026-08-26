@@ -1,9 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dataPath } from "./data-dir.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const FILE = join(here, "..", "data", "order.json");
+const FILE = dataPath("order.json");
 
 /** User's manual ordering of tasks (a sequence of task ids). Persisted. */
 let order: string[] = load();

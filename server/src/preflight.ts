@@ -8,8 +8,7 @@ const pexec = promisify(execFile);
 
 /**
  * Comprobaciones de entorno. Cada check es una entrada del registro (`BINS`), no una rama de un
- * `if` gigante: F6 (Electron) añade `node-pty` y `firma/notarizado` sin tocar la pantalla ni
- * `runPreflight`.
+ * `if` gigante: el check de `node-pty` se suma al mismo contrato que la pantalla ya pinta.
  *
  * La clasificación va aparte de la ejecución para poder probarla sin depender de qué tenga
  * instalado la máquina que corre los tests — el mismo reparto que `parsePaneRoles` en tmux.ts.
@@ -48,6 +47,25 @@ export function pathCheck(entries: string[]): PreflightCheck {
     };
   }
   return { key: "path", label: "PATH heredado", level: "ok", detail: `${entries.length} entradas` };
+}
+
+export async function nodePtyCheck(
+  load: () => Promise<unknown> = () => import("node-pty"),
+): Promise<PreflightCheck> {
+  try {
+    const module = await load() as { spawn?: unknown };
+    if (typeof module.spawn !== "function") throw new Error("spawn no está disponible");
+    return { key: "node-pty", label: "node-pty", level: "ok", detail: "node-pty cargado" };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "error desconocido";
+    return {
+      key: "node-pty",
+      label: "node-pty",
+      level: "fail",
+      detail: `no se pudo cargar · ${detail}`,
+      note: "Reconstruir node-pty para la versión y arquitectura de Electron.",
+    };
+  }
 }
 
 /**
@@ -132,5 +150,5 @@ export async function runPreflight(
       return binCheck(b.key, b.label, path, await resolve.versionOf(path, b.flag), b.note);
     })
   );
-  return [...bins, pathCheck((process.env.PATH ?? "").split(":").filter(Boolean))];
+  return [...bins, await nodePtyCheck(), pathCheck((process.env.PATH ?? "").split(":").filter(Boolean))];
 }

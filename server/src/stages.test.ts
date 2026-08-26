@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  cycleDirForSession,
   ensureCycleDir,
   lastSentinelAt,
+  readFlow,
+  writeFlow,
   markModelSwitched,
   markModelSwitchFailed,
   markVerifierSpawned,
@@ -27,6 +30,30 @@ import {
 function freshCycle(): string {
   return mkdtempSync(join(tmpdir(), "cowork-cycle-test-"));
 }
+
+test("cycleDirForSession: lanza sobre traversal o nombres inseguros (cierra P5)", () => {
+  assert.throws(() => cycleDirForSession("../../tmp/victim"));
+  assert.throws(() => cycleDirForSession("a/b"));
+  assert.throws(() => cycleDirForSession("a".repeat(200)));
+});
+
+test("cycleDirForSession: un nombre seguro produce la ruta de siempre", () => {
+  assert.equal(cycleDirForSession("cowork-x"), "/tmp/cowork-cycle-cowork-x");
+});
+
+test("writeFlow/readFlow: round-trip del flow congelado (T2/T4/T13)", () => {
+  const cycle = freshCycle();
+  const flow = { stages: [{ key: "a", label: "A", icon: "x" }], verifyAfter: null };
+  writeFlow(cycle, flow);
+  assert.deepEqual(readFlow(cycle), flow);
+});
+
+test("readFlow: null si el archivo no existe o está corrupto — nunca lanza (tolerante, T13)", () => {
+  const cycle = freshCycle();
+  assert.equal(readFlow(cycle), null);
+  writeFileSync(join(cycle, "flow.json"), "{esto no es json");
+  assert.equal(readFlow(cycle), null);
+});
 
 test("writeModelsInfo/readModelsInfo: round-trips worker + switchEnabled", () => {
   const cycle = freshCycle();

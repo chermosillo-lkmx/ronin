@@ -1,6 +1,12 @@
 import { existsSync } from "node:fs";
+import { isSafeSessionName } from "./session-name.js";
 import { cycleDirForSession } from "./stages.js";
-import { listPanesRaw, listSessionsRaw } from "./tmux.js";
+import {
+  listPanesRawResult,
+  listSessionsRawResult,
+  type TmuxDiagnostic,
+  type TmuxRawResult,
+} from "./tmux.js";
 import type { TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
 
 /**
@@ -30,7 +36,7 @@ export function parseSessionList(stdout: string): Omit<TmuxSessionInfo, "kind" |
   const out: Omit<TmuxSessionInfo, "kind" | "panes">[] = [];
   for (const line of (stdout ?? "").split("\n")) {
     if (!line.trim()) continue;
-    const [name, windows, created, attached] = line.split("\t");
+    const [name, windows, created, attached, adopted] = splitInventoryFields(line);
     // `name` puede ser "0": tmux nombra así las sesiones sin nombre y en esta máquina hay 12
     // con nombre entero. `name` es siempre un string, así que `if (!name)` sería equivalente
     // aquí — la comparación explícita es para que una simplificación futura a `!Number(name)` o
@@ -41,6 +47,10 @@ export function parseSessionList(stdout: string): Omit<TmuxSessionInfo, "kind" |
       windows: Number(windows) || 0,
       createdAt: (Number(created) || 0) * 1000, // tmux da segundos
       attached: attached === "1",
+      // 5º campo (T3): #{@cowork-adopted}. Ausente (línea vieja, sin la columna) o vacío
+      // (opción no seteada) son el mismo "no adoptada" — viaja GRATIS en el list-sessions
+      // que ya se ejecuta (coste tmux cero).
+      adopted: Boolean(adopted),
     });
   }
   return out;
@@ -51,7 +61,11 @@ export function parsePaneList(stdout: string): Map<string, TmuxPaneInfo[]> {
   const m = new Map<string, TmuxPaneInfo[]>();
   for (const line of (stdout ?? "").split("\n")) {
     if (!line.trim()) continue;
-    const [session, win, id, command, title, role, active] = line.split("\t");
+    const fields = splitInventoryFields(line);
+    const colonFormat = !line.includes("\t") && !line.includes("\\t") && line.includes(":");
+    const [session, win, id, command, title, role, active] = colonFormat
+      ? [fields[0], fields[1], fields[2], fields[5], fields.slice(6).join(":"), fields[4], fields[3]]
+      : fields;
     // Se exige que el id empiece por `%`: es la identidad estable del pane. Si la línea no la
     // trae, algo se desalineó, y materializarla daría un target inválido que alguien acabaría
     // usando como `-t`.
@@ -72,32 +86,36 @@ export function parsePaneList(stdout: string): Map<string, TmuxPaneInfo[]> {
 }
 
 /**
- * Un nombre de sesión sólo se convierte en ruta si es inofensivo. `cycleDirForSession`
- * (stages.ts:15) es concatenación cruda y lo comparten `ensureCycleDir` y `removeCycleDir`
- * (que hace `rmSync -rf`). tmux hoy no deja meter `.` ni `:` en un nombre, así que esto es
- * defensa en profundidad — pero F1 es la primera vez que un nombre AJENO llega a ese helper, y
- * F2 (adopción) lo va a llevar a un camino de escritura. Un nombre raro se trata como ajeno,
- * que es el resultado seguro.
+ * New inventory commands use `:`. Existing captured fixtures and older servers may still have
+ * a real tab or printable `\\t`, so both remain readable during the transition.
  */
-export function isSafeSessionName(name: string): boolean {
-  return /^[A-Za-z0-9._@-]+$/.test(name) && !name.includes("..");
+function splitInventoryFields(line: string): string[] {
+  if (line.includes("\t")) return line.split("\t");
+  if (line.includes("\\t")) return line.split("\\t");
+  return line.split(":");
 }
 
+// Movido a session-name.ts (T0.3, cierra P5): sin dependencias, para que stages.ts pueda
+// importarlo sin crear un ciclo con sessions.ts (que ya importa cycleDirForSession de stages.ts).
+// Se re-exporta para no romper a quien lo importaba de aquí.
+export { isSafeSessionName };
+
 /**
- * Gestionada = prefijo `cowork-` **y** cycle dir existente. Las dos condiciones, porque el
- * prefijo es sólo una convención de nombre que el operador puede reproducir a mano: sin
- * sentinels no hay etapas que mostrar.
+ * Gestionada = (prefijo `cowork-` **o** marca de adopción `@cowork-adopted`) **y** cycle dir
+ * existente. Las dos condiciones de nombre son alternativas (T3: una sesión adoptada nunca
+ * tuvo el prefijo), pero el cycle dir sigue siendo OBLIGATORIO en los dos casos: una adopción
+ * sin cycle dir es media adopción y debe leerse como ajena, que es el resultado seguro — igual
+ * que una sesión `cowork-*` sin sentinels no puede anunciarse como gestionada.
  *
- * DIVERGENCIA CONSCIENTE con el engine: `engine.ts:1553` y `:1667` adoptan como worker CUALQUIER
- * sesión `cowork-*`, sin mirar el cycle dir. Hoy, en esta máquina, eso son 4 sesiones
- * (`cowork-adhoc-mrp6oimn`, `cowork-adhoc-mrpcc2xq`, `cowork-custom-mrjzj2dw`,
- * `cowork-pr-mrp7qrws`) que el tablero muestra como workers y esta pantalla lista como ajenas.
- * Se elige el criterio estricto porque aquí "gestionada" es lo que habilitará acciones de
- * escritura en F2, y un cycle dir ausente significa que no hay nada que dirigir. Unificar los
- * dos criterios es trabajo de F2, no de F1.
+ * DIVERGENCIA CONSCIENTE con el engine, que se CIERRA sin unificar los criterios (T3):
+ * `engine.ts:1557` (`cowork-*` suelto) responde "¿es de Ronin para re-adjuntarla?" — endurecerlo
+ * dejaría huérfanos workers vivos, y `reconcileLeakedWorktrees` (`engine.ts:1671`) usa el MISMO
+ * filtro para decidir qué worktrees están muertos, así que estrecharlo borraría worktrees de
+ * workers vivos. `classifySession` (aquí) responde "¿puede la UI escribir aquí?" — el criterio
+ * del KB (`nocturne:100-101`). Son preguntas distintas; no hace falta que compartan regla.
  */
-export function classifySession(name: string, hasCycleDir: boolean): "managed" | "foreign" {
-  return name.startsWith("cowork-") && hasCycleDir ? "managed" : "foreign";
+export function classifySession(name: string, hasCycleDir: boolean, isAdopted: boolean): "managed" | "foreign" {
+  return (name.startsWith("cowork-") || isAdopted) && hasCycleDir ? "managed" : "foreign";
 }
 
 /**
@@ -117,9 +135,34 @@ export function buildInventory(
     ...s,
     // Un nombre inseguro ni siquiera se convierte en ruta: se clasifica como ajena, que es el
     // resultado seguro. Ver isSafeSessionName.
-    kind: classifySession(s.name, isSafeSessionName(s.name) && hasCycleDir(s.name)),
+    kind: classifySession(s.name, isSafeSessionName(s.name) && hasCycleDir(s.name), s.adopted),
     panes: panes.get(s.name) ?? [],
   }));
+}
+
+/** Result returned by the tmux inventory endpoint.
+ *
+ * An empty `sessions` array with a null diagnostic is the one and only representation of a
+ * healthy tmux server with no sessions.  Keeping the diagnostic alongside the useful partial
+ * inventory prevents the desktop from quietly turning a socket/PATH failure into that state.
+ */
+export interface TmuxInventoryResult {
+  sessions: TmuxSessionInfo[];
+  diagnostic: TmuxDiagnostic | null;
+}
+
+/** Pure boundary between the tmux commands and the API contract; convenient for fixtures. */
+export function inventoryFromRaw(
+  sessionsResult: TmuxRawResult,
+  panesResult: TmuxRawResult,
+  hasCycleDir: (name: string) => boolean,
+): TmuxInventoryResult {
+  if (sessionsResult.diagnostic) return { sessions: [], diagnostic: sessionsResult.diagnostic };
+  if (!sessionsResult.output.trim()) return { sessions: [], diagnostic: panesResult.diagnostic };
+  return {
+    sessions: buildInventory(sessionsResult.output, panesResult.output, hasCycleDir),
+    diagnostic: panesResult.diagnostic,
+  };
 }
 
 /**
@@ -136,7 +179,11 @@ export function buildInventory(
  * improbable; no se limpia aquí porque borrar dirs de otro es exactamente lo que no toca hacer.
  */
 export async function listAllSessions(): Promise<TmuxSessionInfo[]> {
-  const [sessionsOut, panesOut] = await Promise.all([listSessionsRaw(), listPanesRaw()]);
-  if (!sessionsOut.trim()) return [];
-  return buildInventory(sessionsOut, panesOut, (name) => existsSync(cycleDirForSession(name)));
+  return (await readTmuxInventory()).sessions;
+}
+
+/** Read the live inventory without erasing a tmux access failure. */
+export async function readTmuxInventory(): Promise<TmuxInventoryResult> {
+  const [sessionsResult, panesResult] = await Promise.all([listSessionsRawResult(), listPanesRawResult()]);
+  return inventoryFromRaw(sessionsResult, panesResult, (name) => existsSync(cycleDirForSession(name)));
 }

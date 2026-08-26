@@ -4,13 +4,24 @@ import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { binCheck, pathCheck, runPreflight, which } from "./preflight.js";
+import { binCheck, nodePtyCheck, pathCheck, runPreflight, which } from "./preflight.js";
 
 test("binCheck: binario con versión → ok, y el detalle lleva ruta y versión", () => {
   const c = binCheck("tmux", "tmux", "/opt/homebrew/bin/tmux", "3.6", "brew install tmux");
   assert.equal(c.level, "ok");
   assert.equal(c.detail, "/opt/homebrew/bin/tmux · 3.6");
   assert.equal(c.note, undefined); // en ok no se le dan instrucciones al operador
+});
+
+test("nodePtyCheck: registra una carga válida y bloquea si el módulo no puede cargarse", async () => {
+  const ok = await nodePtyCheck(async () => ({ spawn: () => {} }));
+  assert.equal(ok.level, "ok");
+  assert.match(ok.detail, /cargado/);
+
+  const fail = await nodePtyCheck(async () => { throw new Error("ABI mismatch"); });
+  assert.equal(fail.level, "fail");
+  assert.match(fail.detail, /ABI mismatch/);
+  assert.match(fail.note ?? "", /reconstruir/i);
 });
 
 test("binCheck: binario ausente → fail con la instrucción de instalación", () => {

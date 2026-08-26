@@ -5,11 +5,64 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { CLAUDE_CMD } from "./config.js";
 
-const pexec = promisify(execFile);
+const exec = promisify(execFile);
+
+function pexec(command: string, args: string[]) {
+  return exec(command === "tmux" ? tmuxCommand() : command, args);
+}
+
+export type TmuxDiagnosticCode = "TMUX_NOT_FOUND" | "TMUX_SERVER_UNREACHABLE" | "TMUX_INVENTORY_FAILED";
+
+export interface TmuxDiagnostic {
+  code: TmuxDiagnosticCode;
+  detail: string;
+}
+
+export interface TmuxRawResult {
+  output: string;
+  diagnostic: TmuxDiagnostic | null;
+}
+
+/** The desktop main process resolves Homebrew tmux before launching this backend. */
+export function tmuxCommand(): string {
+  return process.env.COWORK_TMUX_BIN?.trim() || "tmux";
+}
+
+/**
+ * `tmux list-sessions` with no server is the normal empty-inventory case. Everything else is
+ * kept typed so an Electron app never renders an inaccessible tmux socket as "0 sesiones".
+ */
+export function classifyTmuxInventoryError(error: unknown): TmuxDiagnostic | null {
+  const candidate = error as { code?: unknown; stderr?: unknown; message?: unknown } | undefined;
+  const code = typeof candidate?.code === "string" ? candidate.code : "";
+  const stderr = typeof candidate?.stderr === "string" ? candidate.stderr : "";
+  const message = typeof candidate?.message === "string" ? candidate.message : "";
+  const detail = (stderr || message || "tmux no respondió").trim();
+  if (/no server running/i.test(detail)) return null;
+  if (code === "ENOENT") return { code: "TMUX_NOT_FOUND", detail };
+  if (code === "EACCES" || code === "EPERM" || /error connecting/i.test(detail)) {
+    return { code: "TMUX_SERVER_UNREACHABLE", detail };
+  }
+  return { code: "TMUX_INVENTORY_FAILED", detail };
+}
+
+/**
+ * P15 (verificado): las 20+ llamadas de este archivo van a `pexec("tmux", …)` sin `-L`, así
+ * que todas caen en el socket POR DEFECTO — el mismo que usa el operador. Un E2E "en socket
+ * propio" sería invisible para el servidor salvo por este override, y con él "los tests no
+ * tocan el tmux del operador" deja de ser una convención que alguien puede olvidar y pasa a
+ * ser estructural: TODA llamada de este módulo pasa por aquí.
+ */
+export function tmuxArgs(...args: string[]): string[] {
+  const socket = process.env.COWORK_TMUX_SOCKET;
+  // `-L` names a socket below tmux's temp directory. An absolute path must instead use `-S`:
+  // Finder's `open` does not reliably inherit TMUX_TMPDIR, while an explicit path is portable.
+  return socket ? [socket.startsWith("/") ? "-S" : "-L", socket, ...args] : args;
+}
 
 export async function tmuxAvailable(): Promise<boolean> {
   try {
-    await pexec("tmux", ["-V"]);
+    await pexec("tmux", tmuxArgs("-V"));
     return true;
   } catch {
     return false;
@@ -19,7 +72,7 @@ export async function tmuxAvailable(): Promise<boolean> {
 /** List existing tmux session names (empty if no server / none). */
 export async function listSessions(): Promise<string[]> {
   try {
-    const { stdout } = await pexec("tmux", ["list-sessions", "-F", "#{session_name}"]);
+    const { stdout } = await pexec("tmux", tmuxArgs("list-sessions", "-F", "#{session_name}"));
     return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
   } catch {
     return [];
@@ -27,13 +80,18 @@ export async function listSessions(): Promise<string[]> {
 }
 
 /**
- * Formatos del inventario completo (F1). Se parsean en sessions.ts; aquí sólo se ejecutan,
- * porque este módulo es el dueño de `tmux` en el repo.
+ * Formatos del inventario completo (F1, T3). Se parsean en sessions.ts; aquí sólo se ejecutan,
+ * porque este módulo es el dueño de `tmux` en el repo. `#{@cowork-adopted}` viaja GRATIS en el
+ * `list-sessions` que ya se ejecuta (coste tmux cero) — así el server sabe qué sesiones tienen
+ * la marca de adopción (F2) sin una llamada aparte por sesión.
  */
+// tmux 3.6 sanitizes literal control tabs in format output to `_`, so a tab delimiter makes
+// every complete row look like one session name. `:` is a printable delimiter that tmux itself
+// disallows in session names. Pane title is deliberately last: it may itself contain colons.
 const INVENTORY_SESSION_FMT =
-  "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}";
+  "#{session_name}:#{session_windows}:#{session_created}:#{session_attached}:#{@cowork-adopted}";
 const INVENTORY_PANE_FMT =
-  "#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_title}\t#{@cowork-role}\t#{pane_active}";
+  "#{session_name}:#{window_index}:#{pane_id}:#{pane_active}:#{@cowork-role}:#{pane_current_command}:#{pane_title}";
 
 /**
  * stdout crudo de `list-sessions` con los 4 campos del inventario. "" si no hay servidor tmux:
@@ -41,25 +99,33 @@ const INVENTORY_PANE_FMT =
  * SÓLO LECTURA — `list-sessions` contra un servidor muerto sale con código 1 sin arrancar uno.
  */
 export async function listSessionsRaw(): Promise<string> {
-  try {
-    return (await pexec("tmux", ["list-sessions", "-F", INVENTORY_SESSION_FMT])).stdout;
-  } catch {
-    return "";
-  }
+  return (await listSessionsRawResult()).output;
 }
 
 /** stdout crudo de `list-panes -a` con los 7 campos del inventario. "" si falla. SÓLO LECTURA. */
 export async function listPanesRaw(): Promise<string> {
+  return (await listPanesRawResult()).output;
+}
+
+export async function listSessionsRawResult(): Promise<TmuxRawResult> {
   try {
-    return (await pexec("tmux", ["list-panes", "-a", "-F", INVENTORY_PANE_FMT])).stdout;
-  } catch {
-    return "";
+    return { output: (await pexec("tmux", tmuxArgs("list-sessions", "-F", INVENTORY_SESSION_FMT))).stdout, diagnostic: null };
+  } catch (error) {
+    return { output: "", diagnostic: classifyTmuxInventoryError(error) };
+  }
+}
+
+export async function listPanesRawResult(): Promise<TmuxRawResult> {
+  try {
+    return { output: (await pexec("tmux", tmuxArgs("list-panes", "-a", "-F", INVENTORY_PANE_FMT))).stdout, diagnostic: null };
+  } catch (error) {
+    return { output: "", diagnostic: classifyTmuxInventoryError(error) };
   }
 }
 
 export async function hasSession(name: string): Promise<boolean> {
   try {
-    await pexec("tmux", ["has-session", "-t", name]);
+    await pexec("tmux", tmuxArgs("has-session", "-t", name));
     return true;
   } catch {
     return false;
@@ -72,13 +138,13 @@ export async function hasSession(name: string): Promise<boolean> {
  */
 export async function createSession(name: string, cwd: string, startCmd: string = CLAUDE_CMD): Promise<void> {
   const command = `${startCmd}; exec $SHELL -l`;
-  await pexec("tmux", ["new-session", "-d", "-s", name, "-c", cwd, command]);
+  await pexec("tmux", tmuxArgs("new-session", "-d", "-s", name, "-c", cwd, command));
 }
 
 /** Type literal text into the pane; optionally submit with Enter. */
 export async function sendText(name: string, text: string, submit: boolean): Promise<void> {
-  await pexec("tmux", ["send-keys", "-t", name, "-l", text]);
-  if (submit) await pexec("tmux", ["send-keys", "-t", name, "Enter"]);
+  await pexec("tmux", tmuxArgs("send-keys", "-t", name, "-l", text));
+  if (submit) await pexec("tmux", tmuxArgs("send-keys", "-t", name, "Enter"));
 }
 
 // Un prompt largo entra a la caja de input de Claude Code en varios trozos ("[Pasted text #1]…").
@@ -97,12 +163,12 @@ export async function pastePrompt(target: string, text: string, submit: boolean)
   try {
     writeFileSync(file, text);
     // Por archivo y no por argv: el prompt puede pasar de los límites de tamaño de argumentos.
-    await pexec("tmux", ["load-buffer", "-b", PASTE_BUFFER, file]);
+    await pexec("tmux", tmuxArgs("load-buffer", "-b", PASTE_BUFFER, file));
     // -p = bracketed paste (preserva el multilínea); -d = borra el buffer tras pegar.
-    await pexec("tmux", ["paste-buffer", "-b", PASTE_BUFFER, "-p", "-d", "-t", target]);
+    await pexec("tmux", tmuxArgs("paste-buffer", "-b", PASTE_BUFFER, "-p", "-d", "-t", target));
     if (submit) {
       await new Promise((r) => setTimeout(r, PASTE_SETTLE_MS));
-      await pexec("tmux", ["send-keys", "-t", target, "Enter"]);
+      await pexec("tmux", tmuxArgs("send-keys", "-t", target, "Enter"));
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -130,11 +196,11 @@ export function promptPending(pane: string): boolean {
 
 /** Send named keys (interpreted by tmux, e.g. "Escape", "Down", "Enter") — not literal text. */
 export async function sendKeys(name: string, ...keys: string[]): Promise<void> {
-  await pexec("tmux", ["send-keys", "-t", name, ...keys]);
+  await pexec("tmux", tmuxArgs("send-keys", "-t", name, ...keys));
 }
 
 export async function capturePane(name: string): Promise<string> {
-  const { stdout } = await pexec("tmux", ["capture-pane", "-t", name, "-p"]);
+  const { stdout } = await pexec("tmux", tmuxArgs("capture-pane", "-t", name, "-p"));
   return stdout;
 }
 
@@ -152,9 +218,84 @@ export async function capturePaneSafe(target: string): Promise<string | null> {
   }
 }
 
+/**
+ * T5: captura CON SGR (colores/estilo) para el visor por pane — `capture-pane -p` a secas
+ * pierde el color. `target` puede ser un `%N` global (tmux lo resuelve sin importar la
+ * sesión), lo que es justo lo que necesita `paneMembership` (index.ts) para distinguir "vive
+ * en otra sesión" de "ya no existe en ningún lado". Tolerante: null si el pane no existe.
+ */
+export async function capturePaneAnsi(target: string): Promise<string | null> {
+  try {
+    const { stdout } = await pexec("tmux", tmuxArgs("capture-pane", "-p", "-e", "-t", target));
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+export interface PaneGeometry {
+  cursor: { x: number; y: number };
+  size: { cols: number; rows: number };
+  dead: boolean;
+}
+
+/**
+ * T5: cursor + geometría + vivo/muerto en UNA llamada — para posicionar el cursor de verdad
+ * en el visor por pane y hacer letterbox en vez de deformar. null si el target no existe.
+ */
+export async function readPaneGeometry(target: string): Promise<PaneGeometry | null> {
+  try {
+    const { stdout } = await pexec(
+      "tmux",
+      tmuxArgs("display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{pane_dead}")
+    );
+    const m = stdout.trim().match(/^(\d+) (\d+) (\d+) (\d+) ([01])$/);
+    if (!m) return null;
+    return {
+      cursor: { x: Number(m[1]), y: Number(m[2]) },
+      size: { cols: Number(m[3]), rows: Number(m[4]) },
+      dead: m[5] === "1",
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * T5: los `%N` ACTUALES de una sesión (no `-a`, sólo esa sesión) — la autoridad para decidir
+ * pertenencia "en el momento del uso" y no contra un inventario cacheado. null si la sesión en
+ * sí no existe (distinto de "sesión viva, sin panes", que tmux no permite de todos modos).
+ */
+export async function listSessionPaneIds(session: string): Promise<string[] | null> {
+  try {
+    const { stdout } = await pexec("tmux", tmuxArgs("list-panes", "-t", session, "-F", "#{pane_id}"));
+    return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+export type PaneMembership = "in-session" | "elsewhere" | "session-not-found" | "gone";
+
+/**
+ * T5/D2: ¿el `%N` pedido pertenece HOY a `session`? Un `%N` se resuelve globalmente en tmux
+ * (`capturePaneAnsi` arriba lo explica) — `join-pane`/`move-pane` puede reasignar un pane
+ * adoptado a OTRA sesión sin que deje de existir, así que "existe" no basta para decidir si
+ * es seguro leer/escribir: hace falta distinguir "sigue en la sesión esperada" de "vive en OTRA"
+ * (nunca tocar) de "ya no existe en ningún lado". Compartida por las rutas HTTP de pane
+ * (index.ts) y por la I/O de workers adoptados/driver (engine.ts) — una sola implementación.
+ */
+export async function paneMembership(session: string, paneId: string): Promise<PaneMembership> {
+  const paneIds = await listSessionPaneIds(session);
+  if (paneIds === null) return "session-not-found";
+  if (paneIds.includes(paneId)) return "in-session";
+  const stillExists = (await capturePaneAnsi(paneId)) !== null;
+  return stillExists ? "elsewhere" : "gone";
+}
+
 export async function killSession(name: string): Promise<void> {
   try {
-    await pexec("tmux", ["kill-session", "-t", name]);
+    await pexec("tmux", tmuxArgs("kill-session", "-t", name));
   } catch {
     /* already gone */
   }
@@ -171,7 +312,7 @@ const DRIVER_ROWS = "55";
 /** Opciones cosméticas/UX: nunca deben tumbar un lanzamiento en un tmux viejo. */
 async function tmuxOptional(args: string[]): Promise<void> {
   try {
-    await pexec("tmux", args);
+    await pexec("tmux", tmuxArgs(...args));
   } catch {
     /* opcional */
   }
@@ -196,21 +337,21 @@ export async function createDriverWindow(
   startCmd: string = CLAUDE_CMD
 ): Promise<Record<PaneRole, string>> {
   const command = `${startCmd}; exec $SHELL -l`;
-  await pexec("tmux", [
+  await pexec("tmux", tmuxArgs(
     "new-session", "-d", "-s", session, "-n", "driver",
     "-c", cwd, "-x", DRIVER_COLS, "-y", DRIVER_ROWS, command,
-  ]);
+  ));
 
   // El pane inicial de una sesión recién creada es determinístico; se lee su %N para no
   // depender nunca de índices (que tmux renumera al morir un pane).
-  const { stdout: first } = await pexec("tmux", ["list-panes", "-t", session, "-F", "#{pane_id}"]);
+  const { stdout: first } = await pexec("tmux", tmuxArgs("list-panes", "-t", session, "-F", "#{pane_id}"));
   const driver = parsePaneId(first.split("\n")[0] ?? "");
   if (!driver) throw new Error("no se pudo resolver el pane driver");
 
   const split = async (target: string, dir: "-h" | "-v"): Promise<string> => {
-    const { stdout } = await pexec("tmux", [
+    const { stdout } = await pexec("tmux", tmuxArgs(
       "split-window", dir, "-t", target, "-c", cwd, "-P", "-F", "#{pane_id}",
-    ]);
+    ));
     const id = parsePaneId(stdout);
     if (!id) throw new Error(`split-window no devolvió un pane_id (${stdout.trim()})`);
     return id;
@@ -239,7 +380,7 @@ export async function createDriverWindow(
   // <session>` — incluido el fallback de sendWhenReady — escribiría en el pane equivocado.
   await tmuxOptional(["select-pane", "-t", driver]);
 
-  const { stdout: all } = await pexec("tmux", ["list-panes", "-t", session, "-F", "#{pane_id}"]);
+  const { stdout: all } = await pexec("tmux", tmuxArgs("list-panes", "-t", session, "-F", "#{pane_id}"));
   const count = all.split("\n").filter((l) => l.trim()).length;
   if (count !== PANE_ROLES.length) throw new Error(`la ventana driver quedó con ${count} pane(s), no 4`);
 
@@ -249,13 +390,41 @@ export async function createDriverWindow(
 /** Re-consulta a tmux los panes por rol (rediscovery). null si el layout ya no tiene los 4. */
 export async function readPaneRoles(session: string): Promise<Record<PaneRole, string> | null> {
   try {
-    const { stdout } = await pexec("tmux", [
+    const { stdout } = await pexec("tmux", tmuxArgs(
       "list-panes", "-t", session, "-F", "#{pane_id} #{@cowork-role}",
-    ]);
+    ));
     return parsePaneRoles(stdout);
   } catch {
     return null;
   }
+}
+
+/**
+ * Marca de adopción (F2/T2/T4): AUTORIDAD de qué sesión está adoptada, persistida EN tmux (no
+ * en un archivo bajo `data/`) — muere con la sesión, así que un registro rancio es
+ * estructuralmente imposible (mismo patrón que `@cowork-role`, arriba). A diferencia de
+ * `setSessionReviewTool` (cosmético, `tmuxOptional`), `setAdoptedMark` LANZA: el commit de la
+ * adopción (adopt.ts) necesita saber si falló para decidir el rollback.
+ */
+export async function setAdoptedMark(session: string, payload: string): Promise<void> {
+  await pexec("tmux", tmuxArgs("set-option", "-t", session, "@cowork-adopted", payload));
+}
+
+/** Relee la marca tal cual tmux la guardó (verbatim, sin validar). null = sin marca / ilegible. */
+export async function readAdoptedMark(session: string): Promise<string | null> {
+  try {
+    const { stdout } = await pexec("tmux", tmuxArgs("display-message", "-p", "-t", session, "#{@cowork-adopted}"));
+    const value = stdout.trim();
+    return value ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `-u` desasigna la opción (vs. dejarla en ""). Idempotente: repetirla sobre una sesión ya
+ * sin marca no es un error — el rollback de adopt.ts la llama sin comprobar el estado previo. */
+export async function clearAdoptedMark(session: string): Promise<void> {
+  await tmuxOptional(["set-option", "-u", "-t", session, "@cowork-adopted"]);
 }
 
 /** Guarda la herramienta de review en la sesión (fuente de verdad viva para rediscovery). */
@@ -271,9 +440,9 @@ export async function setSessionReviewTool(session: string, tool: string): Promi
  */
 export async function readSessionReviewTool(session: string): Promise<string> {
   try {
-    const { stdout } = await pexec("tmux", [
+    const { stdout } = await pexec("tmux", tmuxArgs(
       "display-message", "-p", "-t", session, "#{@cowork-review-tool}",
-    ]);
+    ));
     return stdout.trim();
   } catch {
     return "";
@@ -335,8 +504,13 @@ export function parsePaneRoles(stdout: string): Record<PaneRole, string> | null 
  * presente-pero-inválido (400). Colapsarlos hacía que `?role=Worker` con typo se tragara en
  * silencio y devolviera el pane driver, mientras el mismo input por POST daba error.
  *
- * Vive aquí y no en index.ts porque index.ts hace `app.listen` al importarse: ahí no se podría
- * testear sin arrancar el servidor.
+ * Nota histórica: esta función vivía en `tmux.ts` y no en `index.ts` porque, en ese entonces,
+ * `index.ts` hacía `app.listen` al importarse — importarlo en un test arrancaba un servidor real.
+ * ESO YA NO ES CIERTO: `index.ts` exporta `createApp()`/`startServer()` como funciones separadas
+ * y no escucha nada por el sólo hecho de importarse (`server-entry.ts` es quien llama a
+ * `startServer()` explícitamente). La función se queda en `tmux.ts` de todos modos porque valida
+ * un concepto de tmux (`PANE_ROLES`) que `index.ts` ya importa de aquí para sus rutas — no por la
+ * razón original.
  */
 export type RoleParam = { ok: true; role: PaneRole | null } | { ok: false };
 
@@ -446,9 +620,9 @@ export function serializePerSession<T>(session: string, fn: () => Promise<T>): P
 /** Lee el estado de zoom de la ventana. null si no se pudo (sesión/pane muerto). */
 export async function readZoomState(target: string): Promise<ZoomState | null> {
   try {
-    const { stdout } = await pexec("tmux", [
+    const { stdout } = await pexec("tmux", tmuxArgs(
       "display-message", "-p", "-t", target, "#{window_zoomed_flag} #{pane_id}",
-    ]);
+    ));
     return parseZoomState(stdout);
   } catch {
     return null;
@@ -473,7 +647,7 @@ export async function applyZoom(
     const plan = zoomPlan(before, target, driverPane);
     if (plan.length === 0) return "noop";
     try {
-      for (const args of plan) await pexec("tmux", args);
+      for (const args of plan) await pexec("tmux", tmuxArgs(...args));
     } catch (e) {
       console.warn(`[claude-cowork] zoom falló (${session}): ${(e as Error).message}`);
       return "failed";

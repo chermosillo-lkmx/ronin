@@ -164,6 +164,9 @@
 .n-btn-secondary { border-color: var(--color-divider); }
 .n-btn-secondary:hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
 .n-btn-secondary:active { background: color-mix(in srgb, var(--color-text) 14%, transparent); }
+.n-btn-danger { color: var(--status-fail); border-color: color-mix(in srgb, var(--status-fail) 58%, var(--color-divider)); }
+.n-btn-danger:hover { background: color-mix(in srgb, var(--status-fail) 12%, transparent); }
+.n-btn-danger:active { background: color-mix(in srgb, var(--status-fail) 20%, transparent); }
 .n-btn-ghost { color: var(--color-accent); padding-inline: var(--space-1); }
 .n-btn-ghost:hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
 .n-btn-ghost:active { background: color-mix(in srgb, var(--color-accent) 18%, transparent); }
@@ -321,4 +324,3 @@ textarea.input { min-height: 90px; resize: vertical; }
 
 @keyframes pulseDot { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
 @keyframes caret { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
-

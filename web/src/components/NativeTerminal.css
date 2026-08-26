@@ -1,0 +1,21 @@
+.native-terminal {
+  min-height: 300px;
+  height: 100%;
+  overflow: hidden;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0d1117;
+}
+
+.native-terminal .xterm {
+  height: 100%;
+}
+
+/* PaneViewer: el tamaño de la terminal lo dicta el PANE real (T8/§6.1), no el contenedor —
+   así que a diferencia de NativeTerminal (que sí se ajusta con FitAddon), aquí se permite
+   overflow real en vez de recortar contenido que no cupo. */
+.native-terminal-natural {
+  overflow: auto;
+}
+

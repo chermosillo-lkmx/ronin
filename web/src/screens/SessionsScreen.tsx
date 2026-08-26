@@ -1,18 +1,24 @@
 import { useEffect, useRef, useState } from "react";
-import { getSessions } from "../api";
+import { getTmuxInventory, releaseAdoptionRequest } from "../api";
+import { AdoptDialog } from "../components/AdoptDialog";
+import { NativeTerminal } from "../components/NativeTerminal";
+import { PaneViewer } from "../components/PaneViewer";
 import { SessionSidebar } from "../components/SessionSidebar";
-import type { TmuxSessionInfo } from "../types";
+import type { TmuxDiagnostic, TmuxSessionInfo } from "../types";
 
 /**
- * Superficie 1 del mockup. En F1 muestra el inventario y el detalle de panes en SÓLO LECTURA;
- * el stepper, la terminal y la adopción llegan en F2/F3. Ninguna acción de esta pantalla escribe
- * en tmux.
+ * Superficie 1. Muestra el inventario tmux completo (gestionadas + ajenas). El render por pane
+ * (PaneViewer) es de sólo lectura por diseño y puede montarse solo (P4: capture-pane no muta).
+ * La adopción (F2) exige un gesto explícito con confirmación (AdoptDialog); la ventana completa
+ * (NativeTerminal, PTY crudo) TAMBIÉN exige gesto explícito — nunca se monta sola, porque sus
+ * teclas van al pane ACTIVO de la ventana, no a uno concreto.
  */
 export function SessionsScreen() {
   const [sessions, setSessions] = useState<TmuxSessionInfo[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [down, setDown] = useState(false);
+  const [diagnostic, setDiagnostic] = useState<TmuxDiagnostic | null>(null);
   const timer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -21,16 +27,18 @@ export function SessionsScreen() {
     // (engine.ts:1794-1801), y por la misma razón — un poll que tarde más que el intervalo
     // nunca se solapa con el siguiente tick. 6 s: esta pantalla es un inventario, no un monitor.
     const tick = async () => {
-      const s = await getSessions();
+      const inventory = await getTmuxInventory();
       if (!alive) return;
-      if (s === null) {
+      if (inventory === null) {
         setDown(true);
+        setDiagnostic(null);
       } else {
-        setDown(false);
-        setSessions(s);
+        setDown(Boolean(inventory.diagnostic));
+        setDiagnostic(inventory.diagnostic);
+        setSessions(inventory.sessions);
         // Selección inicial: la primera gestionada, o la primera que haya. Se hace dentro del
         // updater para no depender de `selected` y re-suscribir el efecto en cada tick.
-        setSelected((cur) => cur ?? s.find((x) => x.kind === "managed")?.name ?? s[0]?.name ?? null);
+        setSelected((cur) => cur ?? inventory.sessions.find((x) => x.kind === "managed")?.name ?? inventory.sessions[0]?.name ?? null);
       }
       timer.current = window.setTimeout(tick, 6000);
     };
@@ -54,16 +62,37 @@ export function SessionsScreen() {
       />
       <main className="ron-main">
         {down && (
-          <p className="ron-msg err">No se pudo leer el inventario de tmux. ¿Está el server arriba?</p>
+          <p className="ron-msg err">
+            {diagnostic
+              ? `No se pudo leer tmux (${diagnostic.code}): ${diagnostic.detail}`
+              : "No se pudo leer el inventario de tmux. ¿Está el server arriba?"}
+          </p>
         )}
         {!current && !down && <p className="ron-msg">Ninguna sesión seleccionada.</p>}
-        {current && <SessionDetail s={current} />}
+        {current && <SessionDetail s={current} onChanged={() => { void getTmuxInventory().then((r) => r && setSessions(r.sessions)); }} />}
       </main>
     </div>
   );
 }
 
-function SessionDetail({ s }: { s: TmuxSessionInfo }) {
+function SessionDetail({ s, onChanged }: { s: TmuxSessionInfo; onChanged: () => void }) {
+  const [paneId, setPaneId] = useState<string | undefined>(s.panes[0]?.id);
+  const [showAdopt, setShowAdopt] = useState(false);
+  const [showRawWindow, setShowRawWindow] = useState(false);
+  const [releasing, setReleasing] = useState(false);
+
+  useEffect(() => {
+    setPaneId((current) => current && s.panes.some((pane) => pane.id === current) ? current : s.panes[0]?.id);
+    setShowRawWindow(false);
+  }, [s.name, s.panes]);
+
+  async function release() {
+    setReleasing(true);
+    await releaseAdoptionRequest(s.name);
+    setReleasing(false);
+    onChanged();
+  }
+
   return (
     <>
       <header className="ron-detail-head">
@@ -78,8 +107,29 @@ function SessionDetail({ s }: { s: TmuxSessionInfo }) {
 
       {s.kind === "foreign" && (
         <p className="ron-note">
-          Ronin no escribe en una sesión ajena. Adoptarla (F2) crea su cycle dir y le da stepper.
+          Ronin no escribe en una sesión ajena.{" "}
+          <button type="button" className="ron-link-button" onClick={() => setShowAdopt(true)}>
+            Adoptarla
+          </button>{" "}
+          crea su cycle dir y habilita el terminal gestionado.
         </p>
+      )}
+      {s.kind === "managed" && s.adopted && (
+        <p className="ron-note">
+          Sesión adoptada.{" "}
+          <button type="button" className="ron-link-button" onClick={() => void release()} disabled={releasing}>
+            {releasing ? "Soltando…" : "Soltar adopción"}
+          </button>{" "}
+          (no mata la sesión ni borra su cycle dir).
+        </p>
+      )}
+
+      {showAdopt && (
+        <AdoptDialog
+          session={s}
+          onCancel={() => setShowAdopt(false)}
+          onAdopted={() => { setShowAdopt(false); onChanged(); }}
+        />
       )}
 
       <table className="table">
@@ -93,8 +143,10 @@ function SessionDetail({ s }: { s: TmuxSessionInfo }) {
         </thead>
         <tbody>
           {s.panes.map((p) => (
-            <tr key={p.id}>
-              <td className="ron-mono">{p.id}</td>
+            <tr key={p.id} className={paneId === p.id ? "ron-pane-selected" : undefined}>
+              <td className="ron-mono">
+                <button className="ron-pane-button" type="button" onClick={() => setPaneId(p.id)}>{p.id}</button>
+              </td>
               <td>{p.windowIndex}</td>
               <td>{p.command || "—"}</td>
               <td>{p.role ?? "—"}</td>
@@ -107,6 +159,40 @@ function SessionDetail({ s }: { s: TmuxSessionInfo }) {
           )}
         </tbody>
       </table>
+
+      <section className="ron-terminal-section">
+        <header className="ron-detail-head ron-terminal-head">
+          <div>
+            <h3>Pane {paneId ?? ""}</h3>
+            <div className="ron-detail-meta">
+              render por pane · destino tmux estable por %N ·{" "}
+              {s.kind === "managed" ? "escritura habilitada" : "sólo lectura (sesión ajena)"}
+            </div>
+          </div>
+          <span className="tag tag-neutral">{s.kind === "foreign" ? "sesión ajena" : "escritura dirigida"}</span>
+        </header>
+        {paneId ? (
+          <PaneViewer session={s.name} paneId={paneId} kind={s.kind} />
+        ) : (
+          <p className="ron-msg">No hay un pane disponible para abrir.</p>
+        )}
+
+        <div className="ron-raw-window">
+          {!showRawWindow ? (
+            <button type="button" onClick={() => setShowRawWindow(true)}>
+              Abrir ventana completa (PTY crudo)
+            </button>
+          ) : (
+            <>
+              <p className="ron-note ron-warn">
+                Ventana completa: las teclas van al pane ACTIVO de la ventana tmux, no a {paneId}.
+                Úsala solo si sabes lo que estás mirando.
+              </p>
+              <NativeTerminal session={s.name} paneId={paneId} />
+            </>
+          )}
+        </div>
+      </section>
     </>
   );
 }

@@ -79,19 +79,25 @@ async function pollOnce(): Promise<void> {
 }
 
 /** Start polling ClickUp DMs; classify new messages and launch detected tasks. */
-export async function startDmPoller(intervalMs: number): Promise<void> {
+export async function startDmPoller(intervalMs: number): Promise<() => void> {
   if (!clickupToken()) {
     console.warn("[claude-cowork] DM poller: sin token de ClickUp, omitido");
-    return;
+    return () => {};
   }
   try {
     await initChat();
   } catch (e) {
     console.warn(`[claude-cowork] DM poller init falló: ${(e as Error).message}`);
-    return;
+    return () => {};
   }
   console.log(`[claude-cowork] DM poller activo (cada ${Math.round(intervalMs / 1000)}s, user ${myId})`);
-  setInterval(() => {
+  const timer = setInterval(() => {
     pollOnce().catch((e) => console.warn(`[claude-cowork] DM poll: ${e.message}`));
   }, intervalMs);
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+  };
 }

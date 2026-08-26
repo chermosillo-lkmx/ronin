@@ -1,9 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dataPath } from "./data-dir.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const FILE = join(here, "..", "data", "today.json");
+const FILE = dataPath("today.json");
 
 interface TodayFile {
   date: string; // YYYY-MM-DD

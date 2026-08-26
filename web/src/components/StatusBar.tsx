@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getSessions } from "../api";
+import { getTmuxInventory } from "../api";
 
 /**
  * Superficie 8. En F1 informa de lo único que se puede medir sin inventar nada: si el backend
@@ -7,7 +7,7 @@ import { getSessions } from "../api";
  * editor de workflows los produce.
  */
 export function StatusBar() {
-  const [stat, setStat] = useState<{ sessions: number; panes: number } | null>(null);
+  const [stat, setStat] = useState<{ sessions: number; panes: number; error?: string } | null>(null);
   const timer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -17,9 +17,13 @@ export function StatusBar() {
     // monitor, y golpea el mismo endpoint que la pantalla de Sesiones — a 5 s se duplicaba el
     // gasto de tmux por cada pestaña abierta.
     const tick = async () => {
-      const s = await getSessions();
+      const inventory = await getTmuxInventory();
       if (!alive) return;
-      setStat(s === null ? null : { sessions: s.length, panes: s.reduce((n, x) => n + x.panes.length, 0) });
+      setStat(inventory === null ? null : {
+        sessions: inventory.sessions.length,
+        panes: inventory.sessions.reduce((n, x) => n + x.panes.length, 0),
+        error: inventory.diagnostic?.code,
+      });
       timer.current = window.setTimeout(tick, 15000);
     };
     tick();
@@ -33,7 +37,7 @@ export function StatusBar() {
     <footer className="ron-status">
       <span className="ron-status-item">
         <span className={`ron-status-dot ${stat ? "on" : "off"}`} />
-        {stat ? "server ok" : "server sin respuesta"}
+        {stat ? (stat.error ? `tmux: ${stat.error}` : "server ok") : "server sin respuesta"}
       </span>
       {stat && (
         <span>

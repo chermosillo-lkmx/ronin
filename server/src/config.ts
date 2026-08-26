@@ -1,5 +1,6 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePort } from "./port.js";
 
 // Load server/.env (gitignored) before reading any config. Safe no-op if absent.
 try {
@@ -28,6 +29,12 @@ export const USE_WORKER_LOOP = process.env.COWORK_USE_WORKER_LOOP !== "0";
  */
 export const CLAUDE_CMD = process.env.COWORK_CLAUDE_CMD ?? "claude --permission-mode bypassPermissions";
 
+/** Interactive command used by a normal Claude terminal session (not the worker auto-mode). */
+export const CLAUDE_TERMINAL_CMD = process.env.COWORK_CLAUDE_TERMINAL_CMD ?? "claude";
+
+/** Interactive command used by a normal Codex terminal session. Kept server-owned. */
+export const CODEX_CMD = process.env.COWORK_CODEX_CMD ?? "codex";
+
 // ---- Modelos por rol (F0) ----
 /**
  * Modelo del Planner (advisor): arranca el pane y escribe el plan / investiga / analiza PRs.
@@ -46,7 +53,7 @@ export const WORKER_MODEL = process.env.COWORK_WORKER_MODEL ?? "sonnet";
 export const LIEBRE_ROOT =
   process.env.COWORK_LIEBRE_ROOT ?? "/Users/cesarhermosillo/code/lkmx/liebre";
 
-export const PORT = Number(process.env.PORT ?? 8787);
+export const PORT = resolvePort(process.env.PORT);
 
 // ---- ClickUp (Fase 2) ----
 /** Personal API token (pk_...). When present, tasks sync live from ClickUp. */

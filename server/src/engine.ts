@@ -1,8 +1,12 @@
+import { realpathSync } from "node:fs";
 import { basename } from "node:path";
+import { commitAdopt, type AdoptInput, type AdoptResult, type CommitAdoptDeps, type CommitAdoptOutcome } from "./adopt.js";
 import { AUTOSUBMIT, MODE } from "./config.js";
 import { fetchClickUpDescription } from "./clickup.js";
 import { recordEvent, truncate } from "./history.js";
 import { listRepos, resolveCwd } from "./repos.js";
+import { TRUSTED_ROOTS } from "./repo-roots.js";
+import { listAllSessions } from "./sessions.js";
 import {
   cycleDirForSession,
   detectStage,
@@ -14,6 +18,7 @@ import {
   modelSwitched,
   modelSwitchFailed,
   readEvidence,
+  readFlow,
   parseParkedLimit,
   readDriverInfo,
   readModelsInfo,
@@ -23,12 +28,13 @@ import {
   verifierSpawned,
   verifyPassed,
   writeDriverInfo,
+  writeFlow,
   writeModelsInfo,
   writeVerifyState,
 } from "./stages.js";
 import { runVerify, verifyOutcome, verifyRunDecision } from "./verify.js";
 import { writeCurlEnv } from "./curl-config.js";
-import { getRepoPlannerModel, getRepoStartCommand, getRepoVars, getRepoWorkerModel } from "./repo-config.js";
+import { getRepoPlannerModel, getRepoStartCommand, getRepoVars, getRepoWorkerModel, getRepoWorkflow } from "./repo-config.js";
 import {
   currentModelFromPane,
   isModelPickerOpen,
@@ -56,12 +62,15 @@ import {
   gateHoldsDone,
   liveMapFor,
   resolveFlow,
+  spliceFlow,
+  validateStages,
   DRIVER_FLOW,
   DRIVER_STAGES,
   shouldSwitchModel,
   stepperFor,
   verifyGateCap,
   type WfStage,
+  type WorkflowConfig,
 } from "./workflow.js";
 import { stopTtyd } from "./ttyd.js";
 import { addTask, emit, findTask, findWorker, nextWorkerLabel, removeWorker, setMode, tasks, workers } from "./state.js";
@@ -70,6 +79,7 @@ import {
   capturePane,
   capturePaneSafe,
   claudeAlive,
+  clearAdoptedMark,
   createDriverWindow,
   createSession,
   hasSession,
@@ -78,16 +88,20 @@ import {
   lastMeaningfulLine,
   listSessions,
   openTerminal,
+  paneMembership,
   paneStatus,
   parseContextPressure,
   parsePaneId,
   pastePrompt,
   promptPending,
+  readAdoptedMark,
   readPaneRoles,
   readSessionReviewTool,
   readZoomState,
   sendKeys,
   sendText,
+  serializePerSession,
+  setAdoptedMark,
   setSessionReviewTool,
   tmuxAvailable,
   PANE_ROLES,
@@ -163,7 +177,10 @@ const stepSteps = (f: { stages: WfStage[]; verifyAfter: string | null }) =>
 // Un worker "posee" el tablero (muta task.workerId + task.status) sólo si es un worker de tarea
 // normal. research Y action están DESACOPLADOS: nunca tocan el estado del tablero (Lanzar sigue
 // disponible, los estados nunca se corrompen). El verificador hereda el kind de su padre (spawnVerifier).
-const ownsBoard = (w: Worker): boolean => w.kind !== "research" && w.kind !== "action";
+// F2: kind:"adopted" se desacopla del tablero igual que research/action — un adoptado no
+// tiene Task propia (taskId = nombre de sesión), así que tocar tareas/historial sería escribir
+// sobre datos que no le pertenecen.
+export const ownsBoard = (w: Worker): boolean => w.kind !== "research" && w.kind !== "action" && w.kind !== "adopted";
 // Auto-seed + recycle the board only with mock data. With real tasks we still
 // advance any worker the user launches, but we never churn their real statuses.
 let autoChurn = false;
@@ -263,13 +280,17 @@ function seedInitialWorkers(): void {
   });
 }
 
+let simTickTimer: NodeJS.Timeout | undefined;
+let livePollTimer: NodeJS.Timeout | undefined;
+let engineStopped = false;
+
 function startSimTick(): void {
   let seed = 1337;
   const rng = () => {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
     return seed / 0x7fffffff;
   };
-  setInterval(() => simTick(rng), 2500);
+  simTickTimer = setInterval(() => simTick(rng), 2500);
 }
 
 // ============================================================
@@ -460,6 +481,9 @@ async function launchLive(taskId: string, stageKeys?: string[], opts: LaunchOpts
   registerTaskWorker(task, worker);
 
   freshCycleDir(worker);
+  // T13: freeze this launch's resolved flow to disk — rediscoverSessions/applyHot read it
+  // back instead of re-resolving against the (possibly since-edited) global/repo workflow.
+  writeFlow(worker.cycle!, flow);
   // F0: Planner model injected as --model over the repo's start command (existing --model wins).
   const plannerModel = sanitizeModel(opts.plannerModel || getRepoPlannerModel(task.repo));
   // Switch to the Worker model at plan→impl only for real implementer launches (never PR).
@@ -762,6 +786,37 @@ export async function launchAction(taskId: string, actionKey: string): Promise<W
   return activeMode === "live" ? launchActionLive(taskId, actionKey) : launchActionSimulated(taskId, actionKey);
 }
 
+/** D2 (review 3): el MOTIVO por el que un target no es usable — nunca se colapsa a un `null`
+ *  genérico, para que workerPane/workerInput puedan reportar `gone`/`exit` (REQUIREMENT.md:171)
+ *  distinto de "se movió a otra sesión" en vez de la misma degradación indistinguible. */
+export type VerifiedPaneTarget =
+  | { status: "ok"; target: string }
+  | { status: "gone" }        // el %N (o toda su sesión) ya no existe en ningún lado
+  | { status: "elsewhere" }   // el %N sigue vivo, pero ya no pertenece a worker.session
+  | { status: "unresolved" }; // sin target que verificar (rol de driver sin match, adoptedPane ausente)
+
+/**
+ * D2 (bug real, hallado en review): `paneTargetFor`/`resolvePaneTarget` sólo dicen QUÉ %N usar
+ * — nunca si ese %N sigue perteneciendo a `worker.session` HOY. tmux resuelve cualquier `%N`
+ * globalmente (comentario de `capturePaneAnsi` en tmux.ts), así que `join-pane`/`move-pane`
+ * puede reasignar un pane adoptado (o, en teoría, uno de driver) a OTRA sesión sin que deje de
+ * existir — capturar/escribir sin verificar pertenencia filtraría I/O a esa sesión ajena en
+ * silencio. Un target que no es un `%N` (el camino scripted, sin driver ni adopción, donde
+ * `paneTargetFor` devuelve el nombre de sesión pelado) no tiene "pertenencia" que comprobar:
+ * tmux ya lo resuelve a SU PROPIO pane activo, que es el comportamiento scripted de siempre.
+ */
+async function verifiedPaneTarget(worker: { session?: string }, target: string | null | undefined): Promise<VerifiedPaneTarget> {
+  if (!target) return { status: "unresolved" };
+  if (!target.startsWith("%")) return { status: "ok", target };
+  if (!worker.session) return { status: "unresolved" };
+  const membership = await paneMembership(worker.session, target);
+  if (membership === "in-session") return { status: "ok", target };
+  if (membership === "elsewhere") return { status: "elsewhere" };
+  // "gone" o "session-not-found" (la sesión ENTERA del worker ya no existe) — para el reporte,
+  // ambos son lo mismo: no hay nada ahí que leer/escribir, y no es "se movió", es "desapareció".
+  return { status: "gone" };
+}
+
 /**
  * Current pane content of a worker's terminal (live mode). `role` (sólo modo driver) elige QUÉ
  * pane; sin él se lee el pane del driver.
@@ -785,10 +840,18 @@ export async function workerPane(
         `Para una terminal real (claude en el repo + evidencia), reinicia con:\n  npm run dev:live`,
     };
   }
-  const target = role ? resolvePaneTarget(worker, role) : (paneTargetFor(worker) ?? worker.session);
-  if (!target) return { hasSession: true, pane: "(no se pudo resolver ese pane: layout degradado)" };
+  // D2: SIN fallback a worker.session — un adoptado sin adoptedPane resuelto, o un %N que ya
+  // no pertenece a esta sesión, debe degradar visible (la rama de abajo), nunca leer lo que sea
+  // que esté activo/vivo en OTRA sesión.
+  const resolved = await verifiedPaneTarget(worker, role ? resolvePaneTarget(worker, role) : paneTargetFor(worker));
+  // D2 (review 3): "gone" (el pane murió) se reporta hasSession:false — igual que "sesión no
+  // disponible" más abajo, porque para este pane concreto no hay nada que leer — y así queda
+  // DISTINGUIBLE de "elsewhere"/"unresolved" (hasSession:true, layout degradado), que sí siguen
+  // teniendo una sesión viva y usable, sólo que ese pane no es el que corresponde mostrar aquí.
+  if (resolved.status === "gone") return { hasSession: false, pane: "(pane cerrado: gone/exit)" };
+  if (resolved.status !== "ok") return { hasSession: true, pane: "(no se pudo resolver ese pane: layout degradado)" };
   try {
-    return { hasSession: true, pane: await capturePane(target) };
+    return { hasSession: true, pane: await capturePane(resolved.target) };
   } catch {
     return { hasSession: false, pane: "(sesión no disponible)" };
   }
@@ -910,6 +973,13 @@ async function cleanupWorktree(worker: Worker): Promise<void> {
 async function stopLive(workerId: string): Promise<boolean> {
   const worker = findWorker(workerId);
   if (!worker) return false;
+  // F2: "stop" sobre un adoptado SUELTA, nunca mata la sesión ajena ni borra su cycle dir —
+  // es la razón de ser de origin:"adopted" (§8 del plan: engine.ts, guard de stopLive).
+  if (worker.origin === "adopted") {
+    if (worker.session) await releaseAdoption(worker.session);
+    else removeWorker(workerId);
+    return true;
+  }
   if (worker.session) {
     stopTtyd(worker.session);
     await killSession(worker.session); // kill the pane BEFORE removing the worktree (P1-10)
@@ -1019,12 +1089,15 @@ async function runVerifyStage(worker: Worker, gate: { key: string; verifyCmd: st
     const res = await runVerify(gate.verifyCmd, cwd);
     const outcome = verifyOutcome(res.ok, prevAttempts, gate.maxRetries);
     writeVerifyState(worker.cycle, gate.key, outcome);
-    if (outcome.status === "pending" && worker.session) {
+    // D2: verifyCmd gates son de workers de tarea con workflow (nunca origin:"adopted" en la
+    // práctica), pero el mismo target resuelto sin fallback a session se aplica por consistencia.
+    const verifyTarget = outcome.status === "pending" && worker.session ? paneTargetFor(worker) : undefined;
+    if (verifyTarget) {
       // D1: re-prompt to fix, only when idle (never write into a busy pane). No sentinel deletion.
-      const pane = await capturePane(paneTargetFor(worker) ?? worker.session).catch(() => "");
+      const pane = await capturePane(verifyTarget).catch(() => "");
       if (!isBusy(pane)) {
         await sendText(
-          paneTargetFor(worker) ?? worker.session,
+          verifyTarget,
           `⚠️ verifyCmd de la etapa "${gate.key}" falló (intento ${outcome.attempts}/${gate.maxRetries}). ` +
             `Corrige y vuelve a tocar el sentinel ${gate.key}. Salida:\n${truncate(res.output)}`,
           true
@@ -1167,12 +1240,24 @@ async function maybeSwitchModel(
  * Target de pane para TODA la I/O del servidor. En modo driver es el pane DRIVER: un `-t
  * <session>` pelado resuelve al pane ACTIVO, y con `mouse on` cada click del operador dentro
  * del iframe lo cambia — leyendo/escribiendo el pane equivocado. Scripted no cambia.
+ *
+ * D2 (bug real, hallado en review): un worker adoptado (`origin:"adopted"`) apunta SIEMPRE a su
+ * `adoptedPane` congelado — NUNCA cae a `w.session`. Un `-t <session>` pelado en una sesión
+ * AJENA resuelve al pane que el operador tenga activo en ESE MOMENTO (que su mouse cambia en
+ * cualquier momento); caer ahí filtraría la I/O de Ronin al pane equivocado sin avisar, en vez
+ * de fallar visible. Si `adoptedPane` no está (no debería pasar, pero degradar visible >
+ * asumir), el resultado es `undefined` — cada llamador debe tratarlo como "no se puede
+ * resolver", igual que ya hace `resolvePaneTarget` para los roles del modo driver, nunca
+ * reintentar contra `w.session`.
  */
 export function paneTargetFor(w: {
   mode?: "scripted" | "driver";
   panes?: DriverPanes;
   session?: string;
+  origin?: "ronin" | "adopted";
+  adoptedPane?: string;
 }): string | undefined {
+  if (w.origin === "adopted") return w.adoptedPane;
   return (w.mode === "driver" ? w.panes?.driver : undefined) ?? w.session;
 }
 
@@ -1379,7 +1464,9 @@ function parkedFromPane(pane: string | null): { resetAt?: string } | null {
   return at ? { resetAt: at } : {};
 }
 
-async function pollLive(): Promise<void> {
+// Exportada para test (54c): pollLive es privada por diseño, pero su rama de muerte sobre un
+// worker origin:"adopted" necesita verificación directa contra tmux real.
+export async function pollLive(): Promise<void> {
   let changed = false;
   for (const worker of [...workers]) {
     if (!worker.session) continue;
@@ -1391,8 +1478,12 @@ async function pollLive(): Promise<void> {
         task.workerId = undefined;
       }
       stopTtyd(worker.session); // sin esto, cada sesión que muere sola filtra un ttyd + su puerto
-      await cleanupWorktree(worker); // P1: remove the worktree (dirty-guarded, refcounted)
-      if (worker.cycle) removeCycleDir(worker.cycle);
+      // F2: la sesión ajena murió por su propia cuenta (no la matamos nosotros) — se quita el
+      // worker del tablero, pero el cycle dir NO se borra (§8 del plan, engine.ts:1399).
+      if (worker.origin !== "adopted") {
+        await cleanupWorktree(worker); // P1: remove the worktree (dirty-guarded, refcounted)
+        if (worker.cycle) removeCycleDir(worker.cycle);
+      }
       workerFlow.delete(worker.id);
       modelSwitchAttempts.delete(worker.id);
       clearWorkerVerify(worker.id);
@@ -1409,12 +1500,18 @@ async function pollLive(): Promise<void> {
       // P4: capture the pane once per poll and detect context pressure (change-gated, no log spam).
       // Reused by the busy/idle fallback below so we don't double-capture.
       let paneSnapshot: string | null = null;
-      try {
-        // En modo driver se lee el pane DRIVER: `-t <session>` resuelve al pane ACTIVO y con
-        // `mouse on` cada click del operador dentro del iframe lo cambiaría.
-        paneSnapshot = await capturePane(paneTargetFor(worker) ?? worker.session);
-      } catch {
-        /* transient */
+      // D2: sin fallback a worker.session — un adoptado sin adoptedPane resuelto se queda sin
+      // snapshot esta vuelta (tolerado: el resto del loop ya trata paneSnapshot===null como "sin
+      // señal"), nunca lee el pane que sea que esté activo en la sesión ajena.
+      const pollTarget = paneTargetFor(worker);
+      if (pollTarget) {
+        try {
+          // En modo driver se lee el pane DRIVER: `-t <session>` resuelve al pane ACTIVO y con
+          // `mouse on` cada click del operador dentro del iframe lo cambiaría.
+          paneSnapshot = await capturePane(pollTarget);
+        } catch {
+          /* transient */
+        }
       }
       if (paneSnapshot !== null && applyContextPressure(worker, paneSnapshot)) changed = true;
       let stageKey = worker.cycle ? detectStage(worker.cycle, stepKeys(flow)) : null;
@@ -1516,7 +1613,9 @@ async function pollLive(): Promise<void> {
       }
 
       // No sentinel yet → fall back to the busy/idle pane heuristic (reuse the P4 snapshot).
-      const pane = paneSnapshot ?? (await capturePane(paneTargetFor(worker) ?? worker.session));
+      // D2: sin pollTarget (adoptado sin adoptedPane resuelto) no hay heurística posible — pane
+      // vacío es "idle/sin señal", nunca el pane que sea que esté activo en la sesión ajena.
+      const pane = paneSnapshot ?? (pollTarget ? await capturePane(pollTarget) : "");
       const busy = isBusy(pane);
       const hint = lastMeaningfulLine(pane);
       const newState: WorkerState = busy ? "busy" : "idle";
@@ -1542,6 +1641,90 @@ async function pollLive(): Promise<void> {
     }
   }
   if (changed) emit();
+}
+
+/**
+ * T13: a task worker's frozen flow.json (written once at launch), re-validated tolerantly
+ * (never throws — a hand-edited/corrupt flow.json must not crash rediscovery) and only
+ * trusted if ≥1 stage survives; falls back to resolveFlow otherwise (pre-T13 workers, or a
+ * missing/corrupt flow.json).
+ */
+function flowFromDiskOrResolve(cycle: string, repo: string | undefined): WorkflowConfig {
+  const stored = readFlow(cycle);
+  if (stored) {
+    // allowVerifyCmd:true — flow.json lives under /tmp, never git-tracked, so the RCE concern
+    // that gates allowVerifyCmd doesn't apply here; whatever verifyCmd is in it (or isn't) was
+    // already decided correctly at write time (resolveFlow → getStages()/getRepoWorkflow(),
+    // each already validated with the right allowVerifyCmd for its own source). Re-stripping it
+    // on every rediscovery would silently disable a repo override's P2 gate after a restart.
+    const validated = validateStages(stored, { allowVerifyCmd: true, strict: false });
+    if (validated.stages.length) return validated;
+  }
+  return resolveFlow(undefined, repo);
+}
+
+/** T13: thrown by planHotApply when an edit would orphan a sentinel a live worker already wrote. */
+export class StageInFlightError extends Error {
+  readonly code = "STAGE_IN_FLIGHT" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "StageInFlightError";
+  }
+}
+
+export interface HotApplyOp {
+  workerId: string;
+  cycle: string;
+  flow: WorkflowConfig;
+}
+
+/**
+ * T13: plain task workers (kind undefined — research/driver/action/adopted each have their
+ * own dedicated flow, untouched by data/workflow.json or repo-config.json) whose flow comes
+ * from the source being edited: `repo===undefined` → the global default → every live task
+ * worker WITHOUT its own repo override; `repo==="some-repo"` → only that repo's live workers.
+ */
+function affectedWorkers(repo: string | undefined): Worker[] {
+  return workers.filter((w) => {
+    if (w.kind !== undefined || w.state === "done" || !w.session || !w.cycle) return false;
+    return repo === undefined ? getRepoWorkflow(w.repo) === null : w.repo === repo;
+  });
+}
+
+/**
+ * T13: validate a hot-apply against every affected LIVE worker before anything is persisted.
+ * Throws StageInFlightError (→ 409, the caller must abort the save entirely) the moment any
+ * one of them would have a sentinel orphaned; returns the writes to commit otherwise. Kept
+ * split from commitHotApply so index.ts can plan (and reject) BEFORE saveWorkflow/
+ * saveRepoOverrides ever touches disk (T13 test 104 — the save itself must not go through).
+ */
+export function planHotApply(next: WorkflowConfig, repo?: string): HotApplyOp[] {
+  const ops: HotApplyOp[] = [];
+  for (const w of affectedWorkers(repo)) {
+    // flow.json (not the in-memory workerFlow map) is the durable per-worker source of truth
+    // (T13) — reading it back here means a worker's ALREADY-frozen flow is what gets spliced
+    // against, regardless of whether this process ever populated workerFlow for it.
+    const old = flowFromDiskOrResolve(w.cycle!, w.repo);
+    const spliced = spliceFlow(old, next, w.stageKey ?? null);
+    if (!spliced.ok) throw new StageInFlightError(`worker "${w.label}" (${w.repo}): ${spliced.message}`);
+    ops.push({ workerId: w.id, cycle: w.cycle!, flow: { stages: spliced.stages, verifyAfter: spliced.verifyAfter } });
+  }
+  return ops;
+}
+
+/**
+ * T13: commit a plan from planHotApply — writes each affected worker's flow.json and updates
+ * its in-memory workerFlow + stepper (`worker.stages`), touching NOTHING under its cycle dir
+ * besides flow.json (no evidence/sentinel writes or deletes — T13 test 106).
+ */
+export function commitHotApply(ops: HotApplyOp[]): void {
+  for (const op of ops) {
+    writeFlow(op.cycle, op.flow);
+    workerFlow.set(op.workerId, op.flow);
+    const worker = findWorker(op.workerId);
+    if (worker) worker.stages = stepSteps(op.flow);
+  }
+  if (ops.length) emit();
 }
 
 /**
@@ -1583,7 +1766,13 @@ async function rediscoverSessions(): Promise<void> {
       ? DRIVER_FLOW // CRÍTICO: sin esto detectStage buscaría las keys del workflow global
       : action && !action.inheritWorkflow
       ? { stages: action.stages, verifyAfter: action.verifyAfter }
-      : resolveFlow(undefined, task?.repo);
+      : // T13 (el daño real que esto arregla): usar SIEMPRE resolveFlow() aquí re-derivaba el flow
+        // contra el workflow global/por-repo YA EDITADO — si una etapa con sentinel pasaba a ser
+        // la última tras un reordenamiento, liveMapFor la mapeaba a `done` y disparaba complete
+        // sobre un worker a medias. flow.json (escrito una sola vez al lanzar) es la fuente de
+        // verdad para un worker redescubierto; resolveFlow queda sólo de fallback (workers
+        // lanzados antes de T13, o un flow.json ausente/corrupto).
+        flowFromDiskOrResolve(cycleDirForSession(session), task?.repo);
     // Modo driver: los panes se re-consultan a tmux (fuente de verdad); reviewTool sale de la
     // opción de sesión, con driver.json de respaldo. tmux guarda el valor VERBATIM sin validar,
     // así que se re-sanitiza siempre.
@@ -1678,6 +1867,132 @@ async function reconcileLeakedWorktrees(): Promise<void> {
 }
 
 // ============================================================
+//  F2/T4 — adopción segura de sesiones ajenas
+// ============================================================
+
+function registerAdoptedWorker(result: AdoptResult): void {
+  const worker: Worker = {
+    id: `w${Date.now().toString(36)}${workers.length}`,
+    label: nextWorkerLabel(),
+    kind: "adopted",
+    origin: "adopted",
+    adoptedPane: result.paneId,
+    repo: result.repo,
+    taskId: result.session,
+    state: "idle",
+    stage: "↻ adoptada",
+    startedAt: Date.now(),
+    session: result.session,
+    cwd: result.cwd,
+    cycle: cycleDirForSession(result.session),
+    stages: stepSteps(result.workflow),
+  };
+  workerFlow.set(worker.id, result.workflow);
+  workers.push(worker);
+  emit();
+}
+
+/**
+ * Adopta una sesión ajena (F2). NO ejecuta tmux directamente aquí — delega en `adopt.ts`
+ * (dominio puro + commit/rollback) inyectando las dependencias reales: inventario RECIÉN
+ * LEÍDO (test 33 del plan, "sobre un inventario recién leído"), raíces de confianza
+ * independientes (M1, `repo-roots.ts`), y el registro del worker como el paso 6 (nunca
+ * revierte la adopción si falla, sólo el registro — T2).
+ */
+export async function adoptSession(input: AdoptInput): Promise<CommitAdoptOutcome> {
+  const liveSessions = await listAllSessions();
+  const deps: CommitAdoptDeps = {
+    inventory: () =>
+      liveSessions.map((s) => ({
+        name: s.name,
+        kind: s.kind,
+        createdAt: s.createdAt,
+        panes: s.panes.map((p) => ({ id: p.id })),
+      })),
+    listRepos,
+    resolveCwd,
+    allowedRoots: TRUSTED_ROOTS,
+    realpath: realpathSync,
+    resolveFlow: (repo) => resolveFlow(undefined, repo),
+    cycleDirForSession,
+    // D1: LIVE, no el `liveSessions` congelado de arriba — se re-consulta tmux de verdad
+    // DENTRO de la sección crítica de commitAdopt, cerrando la carrera matar+recrear.
+    liveSessionSnapshot: async (session) => {
+      const fresh = await listAllSessions();
+      const entry = fresh.find((s) => s.name === session);
+      return entry ? { createdAt: entry.createdAt, panes: entry.panes.map((p) => ({ id: p.id })) } : null;
+    },
+    setAdoptedMark,
+    readAdoptedMark,
+    clearAdoptedMark,
+    registerWorker: registerAdoptedWorker,
+    serialize: serializePerSession,
+  };
+  return commitAdopt(input, deps);
+}
+
+/**
+ * Suelta una adopción (F2): quita la marca en tmux y el worker del tablero. NO mata la
+ * sesión, NO borra el cycle dir — es exactamente lo opuesto de `stopLive` sobre un worker
+ * normal, y es lo que tanto `DELETE /api/sessions/:name/adopt` como un `stop` sobre un worker
+ * `origin:"adopted"` deben hacer (§8 del plan).
+ */
+export async function releaseAdoption(session: string): Promise<void> {
+  await clearAdoptedMark(session);
+  const worker = workers.find((w) => w.session === session && w.origin === "adopted");
+  if (worker) {
+    workerFlow.delete(worker.id);
+    removeWorker(worker.id);
+    emit();
+  }
+}
+
+/**
+ * Segundo pase de redescubrimiento (T4, 54a): sesiones con `@cowork-adopted` vivo y sin
+ * worker ya registrado. Distinto pase, distinta gramática que `rediscoverSessions` (que sigue
+ * mirando sólo el prefijo `cowork-*`) — T3 cierra la divergencia SIN unificarlos, porque
+ * responden preguntas distintas.
+ */
+// Exportada para test (54a): verifica la reconstrucción directamente, sin depender de MODE
+// (fijado al importar el módulo) para poder tomar la rama live de start().
+export async function rediscoverAdopted(): Promise<void> {
+  const sessions = await listAllSessions();
+  let changed = false;
+  for (const s of sessions) {
+    if (!s.adopted) continue;
+    if (workers.some((w) => w.session === s.name)) continue;
+    const mark = await readAdoptedMark(s.name);
+    if (!mark) continue;
+    const [, repo, paneId, createdAtSecRaw] = mark.split("|");
+    if (!repo || !paneId) continue;
+    const cycle = cycleDirForSession(s.name);
+    const flow = readFlow(cycle);
+    if (!flow) continue; // sin flow.json no hay nada fiable que reconstruir; se ignora (rancio)
+    const worker: Worker = {
+      id: `w${Date.now().toString(36)}${workers.length}`,
+      label: nextWorkerLabel(),
+      kind: "adopted",
+      origin: "adopted",
+      adoptedPane: paneId,
+      repo,
+      taskId: s.name,
+      state: "idle",
+      stage: "↻ adoptada (redescubierta)",
+      startedAt: Date.now(),
+      session: s.name,
+      cwd: resolveCwd(repo).cwd,
+      cycle,
+      stages: stepSteps(flow),
+    };
+    workerFlow.set(worker.id, flow);
+    workers.push(worker);
+    changed = true;
+    void createdAtSecRaw; // informativo; la vigencia real la valida adoptSession en el próximo /adopt
+  }
+  if (changed) emit();
+}
+
+// ============================================================
 //  PUBLIC API  (mode-dispatched)
 // ============================================================
 
@@ -1769,16 +2084,28 @@ export async function launchPrReview(
 }
 
 /** Type a response into the worker's pane (answer its question). */
-export async function workerInput(workerId: string, text: string): Promise<boolean> {
+/** D2 (review 3): mismo motivo que VerifiedPaneTarget — "no-session" es el único caso que no
+ *  viene de verifiedPaneTarget (el worker ni siquiera tiene sesión tmux, modo simulado). */
+export type WorkerInputResult = "ok" | "no-session" | "gone" | "elsewhere" | "unresolved";
+
+export async function workerInput(workerId: string, text: string): Promise<WorkerInputResult> {
   const worker = findWorker(workerId);
-  if (!worker?.session) return false;
+  if (!worker?.session) return "no-session";
   // Modo driver: responder desde la UI debe llegar al pane del DRIVER, no al que el mouse
   // haya dejado activo (que puede ser el de codex, o un shell donde el texto se ejecutaría).
-  await sendText(paneTargetFor(worker) ?? worker.session, text, true);
-  return true;
+  // D2: SIN fallback a worker.session — un adoptado sin adoptedPane resuelto, o un %N que ya
+  // no pertenece a esta sesión (movido con join-pane/move-pane), falla visible, nunca escribe en
+  // lo que sea que esté activo/vivo en OTRA sesión. El MOTIVO (gone/elsewhere/unresolved) viaja
+  // hasta el caller — antes se colapsaba a un `false` parejo (D2, review 3).
+  const resolved = await verifiedPaneTarget(worker, paneTargetFor(worker));
+  if (resolved.status !== "ok") return resolved.status;
+  await sendText(resolved.target, text, true);
+  return "ok";
 }
 
 export async function start(taskSource: string): Promise<"simulated" | "live"> {
+  stopEngine();
+  engineStopped = false;
   if (MODE === "live") {
     if (!(await tmuxAvailable())) {
       console.warn("[claude-cowork] tmux no disponible → cayendo a modo simulado");
@@ -1790,21 +2117,34 @@ export async function start(taskSource: string): Promise<"simulated" | "live"> {
     activeMode = "live";
     setMode(activeMode);
     await rediscoverSessions(); // re-attach to tmux sessions still running after a restart
+    await rediscoverAdopted(); // F2: segundo pase, independiente — sesiones adoptadas vivas (T4/54a)
     await reconcileLeakedWorktrees(); // P1-5: prune worktrees whose session died in a crash
     // G1: recursive setTimeout (not setInterval) so a poll that runs past 2s — capturePane,
     // hasSession, verifyCmd are all awaited — never overlaps the next tick over the same workers[].
     const loop = () => {
+      if (engineStopped) return;
       pollLive()
         .catch(() => {})
-        .finally(() => setTimeout(loop, 2000));
+        .finally(() => {
+          if (!engineStopped) livePollTimer = setTimeout(loop, 2000);
+        });
     };
-    setTimeout(loop, 2000);
+    livePollTimer = setTimeout(loop, 2000);
     return activeMode;
   }
   activeMode = "simulated";
   setMode(activeMode);
   maybeSimulate(taskSource);
   return activeMode;
+}
+
+/** Stops the simulator or live recursive poller before either can schedule more work. */
+export function stopEngine(): void {
+  engineStopped = true;
+  if (simTickTimer) clearInterval(simTickTimer);
+  if (livePollTimer) clearTimeout(livePollTimer);
+  simTickTimer = undefined;
+  livePollTimer = undefined;
 }
 
 /**

@@ -1,7 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { validateStages, type WfStage, type WorkflowConfig } from "./workflow.js";
+import { dataPath } from "./data-dir.js";
 import type { CustomAction } from "./types.js";
 
 /**
@@ -11,8 +10,7 @@ import type { CustomAction } from "./types.js";
  * son plantillas). Las etapas propias se validan con validateStages (reglas RESERVED_KEYS /
  * dedup / ≥1 etapa / verifyAfter viven en un solo sitio). NO importa engine.ts (store puro).
  */
-const here = dirname(fileURLToPath(import.meta.url));
-const FILE = join(here, "..", "data", "actions.json");
+const FILE = dataPath("actions.json");
 const COMMENT =
   "Acciones/flujos definidos por el usuario. Cada acción = un botón en las tareas con su prompt, " +
   "etapas propias (o inheritWorkflow → workflow global/por-repo) y flags. Editable desde ⚡ Configuración → Acciones o a mano.";
@@ -49,11 +47,16 @@ function build(raw: any, strict: boolean): CustomAction | null {
   let verifyAfter: string | null = null;
   if (!inheritWorkflow) {
     try {
-      ({ stages, verifyAfter } = validateStages(raw as Partial<WorkflowConfig>)); // throw → 400 (strict) / drop (load)
+      ({ stages, verifyAfter } = validateStages(raw as Partial<WorkflowConfig>, { strict })); // throw → 400 (strict) / never throws (load)
     } catch (e) {
       if (strict) throw e;
       return null;
     }
+    // Tolerant mode never throws on an all-invalid own-workflow (T11) — it returns zero
+    // stages instead (strict already threw above and never reaches here with none). An
+    // action with !inheritWorkflow and no surviving stage is exactly as broken as the old
+    // "validateStages threw" case was, so drop it the same way.
+    if (!stages.length) return null;
   }
   return {
     key,

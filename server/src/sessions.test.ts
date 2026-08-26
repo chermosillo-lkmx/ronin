@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { buildInventory, classifySession, isSafeSessionName, parsePaneList, parseSessionList } from "./sessions.js";
+import { buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList } from "./sessions.js";
 
 // Salidas de `tmux list-sessions -F` y `tmux list-panes -a -F` con los formatos de sessions.ts.
 const SESSIONS = [
@@ -17,6 +17,7 @@ test("parseSessionList: nombre, ventanas, creación en ms y attached", () => {
     windows: 1,
     createdAt: 1753747200_000, // tmux da SEGUNDOS; el resto del repo trabaja en ms
     attached: true,
+    adopted: false,
   });
   assert.equal(out[1].attached, false);
 });
@@ -30,13 +31,46 @@ test("parseSessionList: una sesión llamada '0' no se pierde", () => {
   assert.ok(out.some((s) => s.name === "0"));
 });
 
+test("parseSessionList: decodifica tabuladores literales escapados por tmux", () => {
+  const [session] = parseSessionList("10\\t1\\t1783747458\\t0\\t");
+  assert.deepEqual(session, {
+    name: "10",
+    windows: 1,
+    createdAt: 1783747458_000,
+    attached: false,
+    adopted: false,
+  });
+});
+
+test("parseSessionList: separa el formato con dos puntos imprimibles", () => {
+  const [session] = parseSessionList("10:1:1783747458:0:");
+  assert.deepEqual(session, {
+    name: "10",
+    windows: 1,
+    createdAt: 1783747458_000,
+    attached: false,
+    adopted: false,
+  });
+});
+
 test("parseSessionList: ignora líneas vacías y basura sin reventar", () => {
   // El fixture lleva basura DE VERDAD, no sólo líneas vacías: una línea sin TABs. Sin ella el
   // test seguiría verde aunque alguien rompiera el manejo de una línea con menos de 4 campos.
   const out = parseSessionList("\n\ncowork-x\t1\t1753747200\t0\nbasura-sin-tabs\n\n");
   assert.equal(out.length, 2); // la basura produce una entrada degradada, no una excepción
   assert.equal(out[0].name, "cowork-x");
-  assert.deepEqual(out[1], { name: "basura-sin-tabs", windows: 0, createdAt: 0, attached: false });
+  assert.deepEqual(out[1], { name: "basura-sin-tabs", windows: 0, createdAt: 0, attached: false, adopted: false });
+});
+
+test("parseSessionList: el 5º campo (@cowork-adopted) presente / ausente / vacío (T3)", () => {
+  const out = parseSessionList([
+    "with-mark\t1\t1753747200\t0\tv1|monorepo|%1|1753747200",
+    "no-column-at-all\t1\t1753747200\t0",
+    "empty-mark\t1\t1753747200\t0\t",
+  ].join("\n"));
+  assert.equal(out.find((s) => s.name === "with-mark")!.adopted, true);
+  assert.equal(out.find((s) => s.name === "no-column-at-all")!.adopted, false);
+  assert.equal(out.find((s) => s.name === "empty-mark")!.adopted, false);
 });
 
 const PANES = [
@@ -61,6 +95,30 @@ test("parsePaneList: un @cowork-role ausente es null, no cadena vacía", () => {
   assert.equal(m.get("dev-scratch")![0].role, null);
 });
 
+test("parsePaneList: decodifica tabuladores literales escapados por tmux", () => {
+  const panes = parsePaneList("10\\t0\\t%4\\tzsh\\tterminal\\t\\t1");
+  assert.deepEqual(panes.get("10"), [{
+    id: "%4",
+    windowIndex: 0,
+    command: "zsh",
+    title: "terminal",
+    role: null,
+    active: true,
+  }]);
+});
+
+test("parsePaneList: el formato con dos puntos conserva el título al final", () => {
+  const panes = parsePaneList("10:0:%4:1::zsh:api:watcher");
+  assert.deepEqual(panes.get("10"), [{
+    id: "%4",
+    windowIndex: 0,
+    command: "zsh",
+    title: "api:watcher",
+    role: null,
+    active: true,
+  }]);
+});
+
 test("parsePaneList: windowIndex y active se tipan, no se dejan como string", () => {
   const m = parsePaneList(PANES);
   const p = m.get("dev-scratch")![1];
@@ -82,14 +140,30 @@ test("parsePaneList: descarta una línea sin %N en vez de inventar un target", (
   assert.equal(m.size, 0);
 });
 
-test("classifySession: gestionada exige prefijo cowork- Y cycle dir", () => {
+test("classifySession: gestionada exige (prefijo cowork- O marca de adopción) Y cycle dir", () => {
   // El prefijo solo no basta: una sesión que el operador llamó `cowork-pruebas` a mano no tiene
   // sentinels, y anunciarla como gestionada congelaría su stepper para siempre. En esta máquina
   // hay 4 sesiones `cowork-*` sin cycle dir.
-  assert.equal(classifySession("cowork-CU-42-driver", true), "managed");
-  assert.equal(classifySession("cowork-CU-42-driver", false), "foreign");
-  assert.equal(classifySession("dev-scratch", true), "foreign");
-  assert.equal(classifySession("dev-scratch", false), "foreign");
+  assert.equal(classifySession("cowork-CU-42-driver", true, false), "managed");
+  assert.equal(classifySession("cowork-CU-42-driver", false, false), "foreign");
+  assert.equal(classifySession("dev-scratch", true, false), "foreign");
+  assert.equal(classifySession("dev-scratch", false, false), "foreign");
+});
+
+test("classifySession (T3): una sesión ADOPTADA sin prefijo cowork- es managed SI tiene cycle dir", () => {
+  assert.equal(classifySession("mi-trabajo", true, true), "managed");
+});
+
+test("classifySession (T3): adoptada pero SIN cycle dir sigue siendo foreign (media adopción es ajena, resultado seguro)", () => {
+  assert.equal(classifySession("mi-trabajo", false, true), "foreign");
+});
+
+test("classifySession (T3): sin marca y sin prefijo, foreign de siempre", () => {
+  assert.equal(classifySession("mi-trabajo", true, false), "foreign");
+});
+
+test("classifySession (T3): prefijo cowork- sin cycle dir sigue siendo foreign, sin cambios (no regresión)", () => {
+  assert.equal(classifySession("cowork-x", false, false), "foreign");
 });
 
 test("isSafeSessionName: rechaza lo que no puede ir en una ruta", () => {
@@ -136,6 +210,19 @@ test("buildInventory: no inventa sesiones a partir de panes huérfanos", () => {
   assert.equal(inv[0].name, "solo-esta");
 });
 
+test("buildInventory (T3): marca adopted:true SÓLO donde hay marca, y una sesión adoptada sin prefijo cowork- se clasifica managed si tiene cycle dir", () => {
+  const sessions = [
+    "mi-trabajo\t1\t1753747200\t0\tv1|monorepo|%1|1753747200",
+    "otra-sin-marca\t1\t1753747200\t0",
+  ].join("\n");
+  const inv = buildInventory(sessions, "", () => true);
+  const adopted = inv.find((s) => s.name === "mi-trabajo")!;
+  assert.equal(adopted.adopted, true);
+  assert.equal(adopted.kind, "managed");
+  const notAdopted = inv.find((s) => s.name === "otra-sin-marca")!;
+  assert.equal(notAdopted.adopted, false);
+});
+
 test("buildInventory: un nombre inseguro nunca llega al probe de cycle dir", () => {
   // El resultado seguro para un nombre raro es "ajena": ni se construye la ruta.
   let probed: string[] = [];
@@ -145,4 +232,27 @@ test("buildInventory: un nombre inseguro nunca llega al probe de cycle dir", () 
   });
   assert.equal(inv[0].kind, "foreign");
   assert.deepEqual(probed, []);
+});
+
+test("inventoryFromRaw: servidor tmux sano sin sesiones se distingue de un fallo", () => {
+  assert.deepEqual(
+    inventoryFromRaw({ output: "", diagnostic: null }, { output: "", diagnostic: null }, () => false),
+    { sessions: [], diagnostic: null },
+  );
+});
+
+test("inventoryFromRaw: conserva diagnóstico de list-sessions sin inventar cero sesiones", () => {
+  const diagnostic = { code: "TMUX_SERVER_UNREACHABLE" as const, detail: "error connecting to socket" };
+  assert.deepEqual(
+    inventoryFromRaw({ output: "", diagnostic }, { output: "", diagnostic: null }, () => false),
+    { sessions: [], diagnostic },
+  );
+});
+
+test("inventoryFromRaw: un fallo de panes preserva las sesiones que sí se pudieron listar", () => {
+  const diagnostic = { code: "TMUX_INVENTORY_FAILED" as const, detail: "list-panes falló" };
+  const result = inventoryFromRaw({ output: SESSIONS, diagnostic: null }, { output: "", diagnostic }, () => false);
+  assert.equal(result.sessions.length, 3);
+  assert.deepEqual(result.diagnostic, diagnostic);
+  assert.deepEqual(result.sessions[0].panes, []);
 });

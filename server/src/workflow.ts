@@ -1,6 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dataPath } from "./data-dir.js";
 import { getRepoWorkflow } from "./repo-config.js";
 import type { TaskStatus, WorkerState } from "./types.js";
 
@@ -9,6 +8,21 @@ import type { TaskStatus, WorkerState } from "./types.js";
  * components (comment code, security review, …) can be added/removed/reordered
  * without touching code. Each stage becomes a numbered step in the worker prompt
  * AND a step in the visual stepper. Edit the JSON and restart the server.
+ *
+ * T11: `validateStages` (below) speaks TWO deliberately separate contracts, chosen by
+ * `options.strict`:
+ *   - strict (editing/saving — saveWorkflow, repo-config.ts's saveRepoOverrides, the
+ *     /validate routes): throws `WorkflowValidationError {path, code, message}` on the
+ *     first invalid field — a save should tell the editor exactly what's wrong, not
+ *     silently coerce it into something valid.
+ *   - tolerant (loading from disk — `load()`/`normalizeLoadedWorkflow`, repo-config.ts's
+ *     sanitizeEntry): never throws (bar the pre-existing RESERVED_KEYS guard, which every
+ *     disk-loading caller already defends against with its own try/catch); malformed
+ *     fields are dropped or defaulted instead.
+ * These are NOT the same rule at two strictness levels — a `load()` that throws has no
+ * one to hand a 400 to, and would stop the app from starting on an existing workflow.json
+ * or repo-config.json. Tolerance on load is a resilience decision ("distrust disk");
+ * strictness on save is a UX decision. Do not merge them back into one behavior.
  */
 export interface WfStage {
   key: string;          // sentinel the worker touches + stepper id
@@ -26,8 +40,23 @@ export interface WorkflowConfig {
   verifyAfter: string | null; // spawn the independent verifier after this stage (null = none)
 }
 
-const here = dirname(fileURLToPath(import.meta.url));
-const WORKFLOW_PATH = join(here, "..", "data", "workflow.json");
+const WORKFLOW_PATH = dataPath("workflow.json");
+
+/**
+ * T11: thrown ONLY by validateStages' strict contract (editing/saving) — never by the
+ * tolerant one (loading). Carries `path`/`code` so callers can turn it into an actionable
+ * 400 ({error, path, code}) instead of a bare message.
+ */
+export class WorkflowValidationError extends Error {
+  readonly path: string;
+  readonly code: string;
+  constructor(path: string, code: string, message: string) {
+    super(message);
+    this.name = "WorkflowValidationError";
+    this.path = path;
+    this.code = code;
+  }
+}
 
 /**
  * Drop the executable verifyCmd/maxRetries from a stage — single source for the "git-tracked path
@@ -54,21 +83,31 @@ const VERIFY_STAGE: WfStage = { key: "verify", label: "Verify", icon: "🔎" };
 
 let cache: WorkflowConfig | null = null;
 
+/**
+ * T11: tolerant normalization of a parsed (possibly malformed) workflow.json — never throws.
+ * Pulled out of load() so the "distrust disk" rules go through validateStages' tolerant
+ * contract (the same single source of truth the strict/editor contract uses) instead of a
+ * separate ad hoc pass, while staying disk/cache-free and directly unit-testable.
+ */
+export function normalizeLoadedWorkflow(raw: any): WorkflowConfig {
+  // "_"-prefixed keys (e.g. a stray _comment-shaped object hand-added inside stages[]) are
+  // dropped BEFORE validation, not slugged into a real stage — same guard load() always had.
+  const rawStages = Array.isArray(raw?.stages) ? raw.stages.filter((s: any) => s && typeof s.key === "string" && s.key[0] !== "_") : [];
+  // Strip verifyCmd/maxRetries: the global workflow.json is git-tracked, so a committed
+  // verifyCmd must NOT execute (B3). allowVerifyCmd defaults false, so validateStages already
+  // strips it — no separate stripVerifyFields pass needed here.
+  const validated = validateStages({ stages: rawStages, verifyAfter: raw?.verifyAfter }, { strict: false });
+  // Coordinated fallback: if nothing survived, use DEFAULT wholesale (stages AND verifyAfter
+  // together) rather than DEFAULT.stages paired with a verifyAfter re-validated against an
+  // empty stage list (which would always come back null).
+  return validated.stages.length ? validated : DEFAULT;
+}
+
 function load(): WorkflowConfig {
   if (cache) return cache;
   try {
     const raw = JSON.parse(readFileSync(WORKFLOW_PATH, "utf8"));
-    const stages: WfStage[] = Array.isArray(raw.stages)
-      ? raw.stages
-          .filter((s: any) => s && typeof s.key === "string" && s.key[0] !== "_")
-          // Strip verifyCmd/maxRetries: the global workflow.json is git-tracked, so a committed
-          // verifyCmd must NOT execute (B3). Only the gitignored per-repo override honors it.
-          .map((s: any) => stripVerifyFields(s))
-      : [];
-    cache = {
-      stages: stages.length ? stages : DEFAULT.stages,
-      verifyAfter: raw.verifyAfter === null ? null : typeof raw.verifyAfter === "string" ? raw.verifyAfter : DEFAULT.verifyAfter,
-    };
+    cache = normalizeLoadedWorkflow(raw);
   } catch {
     cache = DEFAULT;
   }
@@ -126,15 +165,81 @@ export const DRIVER_FLOW: { stages: WfStage[]; verifyAfter: string | null } = {
   verifyAfter: null,
 };
 
+export interface ValidateStagesOptions {
+  allowVerifyCmd?: boolean; // P2/B3: verifyCmd only honored from the gitignored per-repo override.
+  strict?: boolean;         // T11: strict=editing (throws WorkflowValidationError); tolerant=loading (never throws).
+}
+
 /**
- * Validate + normalize a workflow config (slug keys, dedupe, reserved-key check,
- * ≥1 stage, verifyAfter must match a stage). Throws on invalid input. Shared by
- * saveWorkflow (global) and the per-repo override store (repo-config.ts) so the
- * validation rules live in exactly one place.
+ * T11: strict-only pre-pass — runs BEFORE any normalization, so an editor save gets a
+ * specific, actionable error instead of the input being silently coerced into something
+ * valid. Tolerant (load) callers never run this; they go straight to the normalize pipeline
+ * below, which already defaults/drops/strips the same fields this rejects.
  */
-export function validateStages(input: Partial<WorkflowConfig>, allowVerifyCmd = false): WorkflowConfig {
+function assertStrict(rawStages: any[], verifyAfterRaw: unknown, allowVerifyCmd: boolean): void {
+  if (!rawStages.length) throw new WorkflowValidationError("stages", "NO_STAGES", "el workflow necesita al menos una etapa");
   const seen = new Set<string>();
-  const stages: WfStage[] = (Array.isArray(input.stages) ? input.stages : [])
+  for (let i = 0; i < rawStages.length; i++) {
+    const s: any = rawStages[i];
+    const path = `stages[${i}]`;
+    const rawKey = typeof s?.key === "string" ? s.key.trim() : "";
+    if (!rawKey) throw new WorkflowValidationError(`${path}.key`, "KEY_REQUIRED", "cada etapa necesita un key");
+    const slugged = slug(rawKey);
+    if (slugged !== rawKey) {
+      throw new WorkflowValidationError(`${path}.key`, "KEY_NOT_SLUG", `la key "${rawKey}" debe ser un slug (letras/números/guiones); usa "${slugged}"`);
+    }
+    if (seen.has(slugged)) throw new WorkflowValidationError(`${path}.key`, "DUPLICATE_KEY", `la key "${slugged}" ya está usada por otra etapa`);
+    seen.add(slugged);
+    if (RESERVED_KEYS.includes(slugged)) {
+      throw new WorkflowValidationError(`${path}.key`, "RESERVED_KEY", `la key "${slugged}" está reservada; usa otra (p. ej. "done", "summary")`);
+    }
+    if (!String(s?.label ?? "").trim()) throw new WorkflowValidationError(`${path}.label`, "LABEL_REQUIRED", "cada etapa necesita un label");
+    if (!String(s?.icon ?? "").trim()) throw new WorkflowValidationError(`${path}.icon`, "ICON_REQUIRED", "cada etapa necesita un icon");
+    if (s?.role !== undefined && s.role !== "impl") {
+      throw new WorkflowValidationError(`${path}.role`, "INVALID_ROLE", `role "${s.role}" inválido; el único valor soportado es "impl"`);
+    }
+    if (typeof s?.verifyCmd === "string" && s.verifyCmd.trim() && !allowVerifyCmd) {
+      throw new WorkflowValidationError(
+        `${path}.verifyCmd`,
+        "VERIFY_CMD_NOT_ALLOWED",
+        "verifyCmd sólo se honra en el override por-repo (gitignored); este archivo es git-tracked y un verifyCmd committeado ejecutaría shell arbitrario en el próximo git pull + lanzamiento"
+      );
+    }
+  }
+  if (typeof verifyAfterRaw === "string" && verifyAfterRaw.trim()) {
+    const va = slug(verifyAfterRaw.trim());
+    if (!seen.has(va)) {
+      throw new WorkflowValidationError(
+        "verifyAfter",
+        "VERIFY_AFTER_NOT_FOUND",
+        `verifyAfter "${verifyAfterRaw}" no coincide con ninguna etapa; keys válidas: ${Array.from(seen).join(", ")}`
+      );
+    }
+  }
+}
+
+/**
+ * Validate + normalize a workflow config (slug keys, dedupe, reserved-key check, ≥1 stage,
+ * verifyAfter must match a stage). Two DELIBERATELY separate contracts (T11):
+ *
+ * - `strict: true` (editing/saving — saveWorkflow, saveRepoOverrides, the /validate routes):
+ *   throws `WorkflowValidationError {path, code, message}` on the FIRST invalid field, so a
+ *   400 can point at exactly what's wrong instead of silently coercing it.
+ * - `strict: false` (default — loading from disk — load(), sanitizeEntry): never throws
+ *   (except the pre-existing RESERVED_KEYS guard, defended against by every disk-loading
+ *   caller's own try/catch); malformed fields are dropped/defaulted, same as before T11.
+ *
+ * A `load()` that throws has no one to hand a 400 to — an existing workflow.json or
+ * repo-config.json would stop the app from starting. The tolerance on load is a resilience
+ * decision ("distrust disk"); the strictness on save is a UX decision. Don't merge them.
+ */
+export function validateStages(input: Partial<WorkflowConfig>, options: ValidateStagesOptions = {}): WorkflowConfig {
+  const { allowVerifyCmd = false, strict = false } = options;
+  const rawStages: any[] = Array.isArray(input.stages) ? input.stages : [];
+  if (strict) assertStrict(rawStages, input.verifyAfter, allowVerifyCmd);
+
+  const seen = new Set<string>();
+  const stages: WfStage[] = rawStages
     .map((s) => {
       // P2/B3: verifyCmd executes arbitrary shell → only honored from the gitignored per-repo
       // override (allowVerifyCmd=true). Stripped everywhere git-tracked (global workflow.json,
@@ -154,9 +259,18 @@ export function validateStages(input: Partial<WorkflowConfig>, allowVerifyCmd = 
       };
     })
     .filter((s) => s.key && !seen.has(s.key) && (seen.add(s.key), true));
-  if (!stages.length) throw new Error("el workflow necesita al menos una etapa");
+  if (!stages.length) {
+    // Strict already rejected an empty/all-invalid input via assertStrict above — unreachable
+    // here in practice; kept as a defensive fallback rather than assuming assertStrict is airtight.
+    if (strict) throw new WorkflowValidationError("stages", "NO_STAGES", "el workflow necesita al menos una etapa");
+    // Tolerant: let the caller decide the fallback (load() falls back to DEFAULT wholesale).
+    return { stages: [], verifyAfter: null };
+  }
   const bad = stages.find((s) => RESERVED_KEYS.includes(s.key));
-  if (bad) throw new Error(`la key "${bad.key}" está reservada; usa otra (p. ej. "done", "summary")`);
+  if (bad) {
+    if (strict) throw new WorkflowValidationError(`stages.${bad.key}`, "RESERVED_KEY", `la key "${bad.key}" está reservada; usa otra (p. ej. "done", "summary")`);
+    throw new Error(`la key "${bad.key}" está reservada; usa otra (p. ej. "done", "summary")`);
+  }
   const va = input.verifyAfter ? slug(input.verifyAfter) : null;
   const verifyAfter = va && stages.some((s) => s.key === va) ? va : null;
   return { stages, verifyAfter };
@@ -164,7 +278,7 @@ export function validateStages(input: Partial<WorkflowConfig>, allowVerifyCmd = 
 
 /** Validate + persist the workflow to disk, invalidating the cache. */
 export function saveWorkflow(input: Partial<WorkflowConfig>): WorkflowConfig {
-  const cfg = validateStages(input);
+  const cfg = validateStages(input, { strict: true });
   writeFileSync(
     WORKFLOW_PATH,
     JSON.stringify(
@@ -280,6 +394,111 @@ export function stepperFor(stages: WfStage[], verifyAfter: string | null): WfSta
     if (s.key === verifyAfter) out.push(VERIFY_STAGE);
   }
   return out;
+}
+
+export interface SpliceFlowOk {
+  ok: true;
+  stages: WfStage[];
+  verifyAfter: string | null;
+}
+export interface SpliceFlowRejected {
+  ok: false;
+  code: "STAGE_IN_FLIGHT";
+  message: string;
+}
+export type SpliceFlowResult = SpliceFlowOk | SpliceFlowRejected;
+
+/**
+ * T13: hot-apply a workflow edit onto a LIVE worker's flow without ever orphaning a sentinel
+ * it already wrote. `currentKey` is the furthest stage the worker has REACHED (from
+ * `detectStage` against its real cycle dir) — everything at/before it is preserved VERBATIM
+ * from `oldFlow` (not merely by key: a verifyCmd added to an already-passed stage in `next`
+ * must never retroactively apply to a worker already past it, T13 test 105); everything after
+ * it comes from `next`. Rejects (STAGE_IN_FLIGHT) instead of silently orphaning a sentinel
+ * when the edit renamed, reordered, or removed anything at/before `currentKey` — the caller
+ * (engine.ts's applyHot) surfaces this as a 409 BEFORE persisting the edit at all.
+ */
+export function spliceFlow(oldFlow: WorkflowConfig, nextFlow: WorkflowConfig, currentKey: string | null): SpliceFlowResult {
+  if (!currentKey) return { ok: true, stages: nextFlow.stages, verifyAfter: nextFlow.verifyAfter };
+  // D5 (bug real, hallado en review): el "verify" sintético (stepperFor lo inserta justo tras
+  // verifyAfter) no vive en oldFlow.stages — un worker parado ahí ya alcanzó (o pasó) la etapa
+  // verifyAfter, así que el límite protegido se ancla AHÍ, nunca se trata como "nada que
+  // proteger" (eso saltaba STAGE_IN_FLIGHT justo para el caso donde el worker está más lejos).
+  const anchorKey = currentKey === "verify" ? oldFlow.verifyAfter : currentKey;
+  const idx = anchorKey ? oldFlow.stages.findIndex((s) => s.key === anchorKey) : -1;
+  if (idx < 0) {
+    // Un currentKey que no se puede ubicar de forma segura (ni una etapa real ni "verify"
+    // resoluble contra verifyAfter) se rechaza CONSERVADOR — proteger de más nunca es el bug;
+    // asumir "no hay nada que proteger" sí lo era.
+    return {
+      ok: false,
+      code: "STAGE_IN_FLIGHT",
+      message: `no se pudo ubicar de forma segura la etapa en curso ("${currentKey}") en el flow congelado; se rechaza el cambio en vez de asumir que no hay nada que proteger`,
+    };
+  }
+  const prefix = oldFlow.stages.slice(0, idx + 1);
+  for (let i = 0; i < prefix.length; i++) {
+    if (nextFlow.stages[i]?.key !== prefix[i].key) {
+      return {
+        ok: false,
+        code: "STAGE_IN_FLIGHT",
+        message: `la etapa "${prefix[i].key}" ya está en curso (sentinel escrito); no puede eliminarse, renombrarse ni reordenarse mientras un worker sigue en ella o más allá`,
+      };
+    }
+  }
+  const stages = [...prefix, ...nextFlow.stages.slice(prefix.length)];
+  const verifyAfter = nextFlow.verifyAfter && stages.some((s) => s.key === nextFlow.verifyAfter) ? nextFlow.verifyAfter : null;
+  return { ok: true, stages, verifyAfter };
+}
+
+export interface GraphNode {
+  key: string;
+  label: string;
+  icon: string;
+  role?: "impl";
+  gate?: boolean; // P2: has a verifyCmd gating advancement
+}
+export type GraphEdgeKind = "sequence" | "verify" | "retry";
+export interface GraphEdge {
+  from: string;
+  to: string;
+  kind: GraphEdgeKind;
+  maxRetries?: number; // only on kind:"retry"
+}
+export interface WorkflowGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+/**
+ * T12: pure derivation of {nodes, edges} for the graph view — draws only the THREE edge
+ * classes that already exist in the engine's semantics today (sequence; the verifier branch
+ * via stepperFor/VERIFY_STAGE; the retry self-loop via verifyGateCap/gateHoldsDone), never
+ * persisted and never a new `WfStage.next[]`. The six engine functions that walk a flow by
+ * INDEX (implStageIndex, shouldSwitchModel, verifyGateCap, eligibleVerifyStages, stepperFor,
+ * liveMapFor) and detectStage's "furthest sentinel wins" model would all need rewriting to
+ * support arbitrary branching that no workflow today expresses — this draws only what's real.
+ */
+export function toGraph(cfg: WorkflowConfig): WorkflowGraph {
+  const nodes: GraphNode[] = cfg.stages.map((s) => ({
+    key: s.key,
+    label: s.label,
+    icon: s.icon,
+    ...(s.role === "impl" ? { role: "impl" as const } : {}),
+    ...(s.verifyCmd ? { gate: true as const } : {}),
+  }));
+  const edges: GraphEdge[] = [];
+  for (let i = 0; i < cfg.stages.length - 1; i++) {
+    edges.push({ from: cfg.stages[i].key, to: cfg.stages[i + 1].key, kind: "sequence" });
+  }
+  if (cfg.verifyAfter && cfg.stages.some((s) => s.key === cfg.verifyAfter)) {
+    nodes.push({ key: VERIFY_STAGE.key, label: VERIFY_STAGE.label, icon: VERIFY_STAGE.icon });
+    edges.push({ from: cfg.verifyAfter, to: VERIFY_STAGE.key, kind: "verify" });
+  }
+  for (const s of cfg.stages) {
+    if (s.verifyCmd) edges.push({ from: s.key, to: s.key, kind: "retry", maxRetries: s.maxRetries ?? 2 });
+  }
+  return { nodes, edges };
 }
 
 /**

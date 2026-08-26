@@ -1,5 +1,20 @@
 import type { CorsOptions } from "cors";
+import { timingSafeEqual } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
+
+/**
+ * Comparación de tiempo constante para credenciales (boot token, capability, webhook secret).
+ * Un `expected` vacío significa "sin credencial configurada": rechaza sin comparar, nunca
+ * trata la ausencia como un match. Longitudes distintas se rechazan sin llegar a
+ * `timingSafeEqual` (que lanza si los buffers no son del mismo tamaño).
+ */
+export function constantTimeEqual(expected: string, presented: string): boolean {
+  if (expected.length === 0) return false;
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  const presentedBuffer = Buffer.from(presented, "utf8");
+  if (expectedBuffer.length !== presentedBuffer.length) return false;
+  return timingSafeEqual(expectedBuffer, presentedBuffer);
+}
 
 /**
  * Hostnames que cuentan como el propio equipo. Verificado: `new URL("http://[::1]:5180").hostname`
@@ -7,6 +22,7 @@ import type { NextFunction, Request, Response } from "express";
  * igualmente por si el origen llega ya normalizado o desde un cliente que no es el navegador.
  */
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const ELECTRON_ORIGIN = "app://ronin";
 
 /**
  * Rechaza un POST cross-site desde el navegador del operador. El bind a 127.0.0.1 protege de la
@@ -32,6 +48,7 @@ const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
  */
 export function isLoopbackOrigin(origin: string | undefined): boolean {
   if (!origin) return true;
+  if (origin === ELECTRON_ORIGIN) return true;
   let host: string;
   try {
     host = new URL(origin).hostname;
@@ -58,6 +75,28 @@ export const corsOptions: CorsOptions = {
 export function requireLocalOrigin(req: Request, res: Response, next: NextFunction) {
   if (!isLoopbackOrigin(req.get("origin"))) {
     return res.status(403).json({ error: "origen no permitido" });
+  }
+  next();
+}
+
+/**
+ * Credencial PROPIA de `/api/webhook/dm` (T4, B3 rev4) — no la exención que rev3 asumía
+ * erróneamente. `index.ts:38` ya cubre este endpoint con `requireLocalOrigin` sobre TODO
+ * `/api`, así que nunca fue alcanzable desde fuera; pero muta (`launchAdhoc`), así que un
+ * proceso local sin credencial podía lanzar workers sin autenticar. Se lee `process.env`
+ * directamente en cada petición (no una constante cacheada de `config.ts`) para que arrancar
+ * el server DESPUÉS de fijar la variable, o rotarla en caliente, tenga efecto inmediato.
+ */
+export function requireWebhookSecret(req: Request, res: Response, next: NextFunction) {
+  const expected = process.env.COWORK_WEBHOOK_SECRET ?? "";
+  if (!expected) {
+    return res.status(503).json({
+      error: "COWORK_WEBHOOK_SECRET no está configurada",
+      code: "WEBHOOK_SECRET_UNCONFIGURED",
+    });
+  }
+  if (!constantTimeEqual(expected, req.get("x-ronin-webhook-secret") ?? "")) {
+    return res.status(401).json({ error: "secreto de webhook incorrecto", code: "WEBHOOK_FORBIDDEN" });
   }
   next();
 }

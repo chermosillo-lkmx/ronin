@@ -50,7 +50,7 @@ async function tick(): Promise<void> {
 }
 
 /** Arranca el scheduler de reportes (gated por COWORK_REPORT_SCHEDULE). Best-effort, no rompe el server. */
-export function startReportSchedule(): void {
+export function startReportSchedule(): () => void {
   console.log(`[claude-cowork] scheduler de reportes activo (diario ~${REPORT_DAILY_AT}, semanal día ${REPORT_WEEKLY_DAY})`);
   const run = () => tick().catch((e) => console.warn(`[claude-cowork] scheduler reportes: ${e.message}`));
   // Best-effort: al boot solo genera el reporte de HOY (si ya pasó la hora). Un día en que el server
@@ -58,4 +58,10 @@ export function startReportSchedule(): void {
   run();                                             // corre una vez al boot (server arrancado tras la hora)
   const timer = setInterval(run, TICK_MS);
   timer.unref?.();                                   // no mantiene vivo el proceso
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+  };
 }

@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getStepperStages } from "./workflow.js";
+import { writeJsonAtomic } from "./atomic.js";
+import { isSafeSessionName } from "./session-name.js";
+import { getStepperStages, type WorkflowConfig } from "./workflow.js";
 
 /** Loop stages in order, derived from the composable workflow (data/workflow.json). */
 export function stageOrder(): string[] {
@@ -12,7 +14,12 @@ export function stageOrder(): string[] {
  * This way a server restart that rediscovers the session lands on the same dir,
  * preserving stage sentinels and evidence.
  */
+// P5 (verificado en vivo): Express decodifica `%2f` en `:name`, así que un `session` que
+// llega hasta aquí sin validar puede traer un traversal real (`../../tmp/victim`) hacia el
+// `rmSync -rf` de removeCycleDir. F2 (adopción) es la primera vez que un nombre AJENO llega
+// a este helper por una ruta de escritura, así que valida en vez de confiar en el llamador.
 export function cycleDirForSession(session: string): string {
+  if (!isSafeSessionName(session)) throw new Error("INVALID_SESSION");
   return `/tmp/cowork-cycle-${session}`;
 }
 
@@ -23,6 +30,30 @@ export function evidenceDir(cycle: string): string {
 export function ensureCycleDir(cycle: string): void {
   mkdirSync(cycle, { recursive: true });
   mkdirSync(evidenceDir(cycle), { recursive: true });
+}
+
+const FLOW_FILE = "flow.json";
+
+/**
+ * `flow.json` (T2/T4/T13): el `{stages, verifyAfter}` congelado al lanzar o adoptar. Escritura
+ * ATÓMICA que LANZA — no sigue el patrón best-effort de este archivo (writeDriverInfo, etc.):
+ * perderla en silencio rompería la garantía de "sin adopción parcial" (B4) y, para T13, dejaría
+ * a un worker vivo leyendo un flow que no es el que se le prometió.
+ */
+export function writeFlow(cycle: string, flow: WorkflowConfig): void {
+  writeJsonAtomic(join(cycle, FLOW_FILE), flow);
+}
+
+/**
+ * Tolerante: null si el archivo no existe o está corrupto — nunca lanza. El llamador re-valida
+ * con `validateStages` en modo NO estricto (T13); esta función sólo parsea JSON.
+ */
+export function readFlow(cycle: string): WorkflowConfig | null {
+  try {
+    return JSON.parse(readFileSync(join(cycle, FLOW_FILE), "utf8")) as WorkflowConfig;
+  } catch {
+    return null;
+  }
 }
 
 export function removeCycleDir(cycle: string): void {

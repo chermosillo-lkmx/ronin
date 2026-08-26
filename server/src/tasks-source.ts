@@ -1,19 +1,15 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 import { fetchClickUpTasks } from "./clickup.js";
 import { clickupToken } from "./settings.js";
+import { dataPath } from "./data-dir.js";
 import { fetchJiraTasks, jiraConfigured } from "./jira.js";
 import { fetchGitLabTasks, gitlabConfigured } from "./gitlab.js";
 import { MOCK_TASKS, setIntegrations, setLastSync, setTaskSource, setTasks } from "./state.js";
 import type { Task, TaskSource } from "./types.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(here, "..", "data");
-
 function loadSeed(file: string): Task[] {
   try {
-    const raw = JSON.parse(readFileSync(join(dataDir, file), "utf8"));
+    const raw = JSON.parse(readFileSync(dataPath(file), "utf8"));
     return (raw.tasks ?? []) as Task[];
   } catch {
     return [];
@@ -100,8 +96,14 @@ export async function refreshTasks(): Promise<{ source: TaskSource; ok: boolean 
   }
 }
 
-export function startAutoRefresh(intervalMs: number): void {
-  setInterval(() => {
+export function startAutoRefresh(intervalMs: number): () => void {
+  const timer = setInterval(() => {
     refreshTasks().catch(() => {});
   }, intervalMs);
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+  };
 }

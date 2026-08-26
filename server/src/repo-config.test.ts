@@ -5,16 +5,37 @@ import { test } from "node:test";
 // data/repo-config.json, using a throwaway repo key so real overrides are never touched.
 // test.after() removes the scratch key so the file is left clean.
 
-const { getRepoPlannerModel, getRepoWorkerModel, saveRepoOverrides, readRepoConfigFull } =
+const { getRepoPlannerModel, getRepoWorkerModel, saveRepoOverrides, readRepoConfigFull, sanitizeEntry } =
   await import("./repo-config.js");
 const { PLANNER_MODEL, WORKER_MODEL } = await import("./config.js");
+
+test("T11.90 sanitizeEntry: un override con workflow inválido cae al default (no lo setea) sin lanzar", () => {
+  const entry = sanitizeEntry({
+    workflow: {
+      stages: [{ key: "", label: "", icon: "" }], // sin key válida → cero etapas sobreviven
+      verifyAfter: null,
+    },
+  });
+  assert.equal(entry.workflow, undefined); // sin override → getRepoWorkflow hereda el default global
+});
+
+test("T11.90 sanitizeEntry: un workflow válido (incl. verifyCmd, gitignored) sí se conserva", () => {
+  const entry = sanitizeEntry({
+    workflow: {
+      stages: [{ key: "curl", label: "Curl", icon: "🌐", verifyCmd: "npm test" }],
+      verifyAfter: null,
+    },
+  });
+  assert.equal(entry.workflow?.stages[0].key, "curl");
+  assert.equal(entry.workflow?.stages[0].verifyCmd, "npm test"); // per-repo override honra verifyCmd
+});
 
 const KEY = "zz-test-repo-config-models";
 
 test.after(() => {
   // remove our scratch override so we leave repo-config.json clean
   try {
-    saveRepoOverrides(KEY, { inheritWorkflow: true, vars: {}, startCommand: "" });
+    saveRepoOverrides(KEY, { inheritWorkflow: true, vars: {}, startCommand: "", skills: [] });
   } catch {}
 });
 
@@ -57,4 +78,16 @@ test("readRepoConfigFull: raw empty string means inherit", () => {
   const full = readRepoConfigFull(KEY);
   assert.equal(full.plannerModel, "");
   assert.equal(full.workerModel, "");
+});
+
+test("saveRepoOverrides: persists unique qualified SkillRef values without changing the workflow", () => {
+  const full = saveRepoOverrides(KEY, {
+    inheritWorkflow: true,
+    skills: [
+      { root: "global", name: "api-review" },
+      { root: "global", name: "api-review" },
+    ],
+  });
+  assert.deepEqual(full.skills, [{ root: "global", name: "api-review" }]);
+  assert.equal(full.workflow, null);
 });

@@ -1,13 +1,12 @@
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { runClaudeP } from "./claude-p.js";
+import { dataPath } from "./data-dir.js";
 import { readHistory } from "./history.js";
 import { commitsFor, type Commit } from "./report-git.js";
 import { findCycleEvidence } from "./report-worker.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-export const REPORTS_DIR = join(here, "..", "data", "reports");
+export const REPORTS_DIR = dataPath("reports");
 
 export type ReportKind = "daily" | "weekly";
 // A-Z incluido: reportName emite `weekly-YYYY-W27` (W mayúscula). Excluye . / \ → anti path-traversal intacto.

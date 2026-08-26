@@ -3,9 +3,8 @@ import { getPreflight } from "../api";
 import type { PreflightCheck } from "../types";
 
 /**
- * Superficie 6. Los checks son datos que llegan del server, no ramas de este componente: F6
- * (Electron) añadirá `node-pty` y `firma/notarizado` al registro de preflight.ts y esta pantalla
- * los pintará sin cambiar una línea.
+ * Superficie 6. Los checks son datos que llegan del server, no ramas de este componente:
+ * `node-pty` y los binarios del entorno comparten el mismo registro y esta pantalla los pinta.
  *
  * No se pollea: cada llamada lanza 4 subprocesos. Se carga al montar y con un botón explícito.
  */

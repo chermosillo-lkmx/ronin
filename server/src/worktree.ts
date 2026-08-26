@@ -142,7 +142,7 @@ async function refExists(repoRoot: string, branch: string): Promise<boolean> {
  *
  * Serialized per common-dir. Throws on a dirty leak or a genuine add failure → caller handles.
  */
-export async function addWorktree(repoRoot: string, path: string, branch: string): Promise<void> {
+export async function addWorktree(repoRoot: string, path: string, branch: string, baseRef?: string): Promise<void> {
   await withGitLock(repoRoot, async () => {
     const pathExists = existsSync(path);
     const branchExists = await refExists(repoRoot, branch);
@@ -164,7 +164,7 @@ export async function addWorktree(repoRoot: string, path: string, branch: string
     }
     mkdirSync(dirname(path), { recursive: true });
     try {
-      await git(repoRoot, ["worktree", "add", path, "-b", branch]);
+      await git(repoRoot, ["worktree", "add", path, "-b", branch, ...(baseRef ? [baseRef] : [])]);
     } catch (e) {
       // P1 pt4: a partial add can leave a registered worktree/branch behind — clean it before rethrow.
       await git(repoRoot, ["worktree", "prune"]).catch(() => {});

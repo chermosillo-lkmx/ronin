@@ -1,9 +1,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dataPath } from "./data-dir.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const FILE = join(here, "..", "data", "history.jsonl");
+const FILE = dataPath("history.jsonl");
 
 export type EventType = "launch" | "complete" | "stop";
 

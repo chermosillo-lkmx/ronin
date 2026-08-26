@@ -1,9 +1,17 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { CLAUDE_CMD, PLANNER_MODEL, WORKER_MODEL } from "./config.js";
+import { dataPath } from "./data-dir.js";
 import { sanitizeModel } from "./models.js";
 import { validateStages, type WorkflowConfig } from "./workflow.js";
+import { listRepos } from "./repos.js";
+
+export type SkillRoot = "global" | "repo-claude" | "repo-skills";
+export interface SkillRef {
+  root: SkillRoot;
+  name: string;
+  /** Required for a repository root so two repos can legitimately expose the same name. */
+  sourceRepo?: string;
+}
 
 /**
  * Per-repo overrides of the composable workflow, keyed by repo. Each repo can
@@ -15,8 +23,7 @@ import { validateStages, type WorkflowConfig } from "./workflow.js";
  * validate-on-load, writeFileSync + reload on save. server/data/repo-config.json
  * is gitignored (vars may hold tokens); values are never logged.
  */
-const here = dirname(fileURLToPath(import.meta.url));
-const FILE = join(here, "..", "data", "repo-config.json");
+const FILE = dataPath("repo-config.json");
 const COMMENT =
   "Overrides por repo: workflow (opcional; si falta → default global), vars (URLs/tokens de prueba), " +
   "startCommand (opcional; si falta → CLAUDE_CMD) y plannerModel/workerModel (opcional; si faltan → " +
@@ -30,6 +37,7 @@ interface RepoEntry {
   startCommand?: string;
   plannerModel?: string; // sanitized model alias/id; absent → inherit PLANNER_MODEL
   workerModel?: string;  // sanitized model alias/id; absent → inherit WORKER_MODEL
+  skills?: SkillRef[];
 }
 type Store = Record<string, RepoEntry>;
 
@@ -45,11 +53,42 @@ function sanitizeVars(v: unknown): Record<string, string> {
   return out;
 }
 
-function sanitizeEntry(raw: any): RepoEntry {
+const SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+function sanitizeSkillRefs(value: unknown): SkillRef[] {
+  if (!Array.isArray(value)) return [];
+  const allowedRepos = new Set(listRepos());
+  const seen = new Set<string>();
+  const refs: SkillRef[] = [];
+  for (const raw of value) {
+    const candidate = raw as Partial<SkillRef>;
+    const root = candidate?.root;
+    const name = typeof candidate?.name === "string" ? candidate.name.trim() : "";
+    const sourceRepo = typeof candidate?.sourceRepo === "string" ? candidate.sourceRepo.trim() : "";
+    if ((root !== "global" && root !== "repo-claude" && root !== "repo-skills") || !SKILL_NAME.test(name)) continue;
+    if (root === "global") {
+      const key = `${root}:${name}`;
+      if (!seen.has(key)) { seen.add(key); refs.push({ root, name }); }
+      continue;
+    }
+    if (!sourceRepo || !allowedRepos.has(sourceRepo)) continue;
+    const key = `${root}:${sourceRepo}:${name}`;
+    if (!seen.has(key)) { seen.add(key); refs.push({ root, name, sourceRepo }); }
+  }
+  return refs;
+}
+
+/** T11: exported for direct unit testing of the tolerant (load) contract — see repo-config.test.ts. */
+export function sanitizeEntry(raw: any): RepoEntry {
   const e: RepoEntry = {};
   if (raw?.workflow) {
+    // Tolerant contract never throws for a malformed workflow (T11) — the try/catch is
+    // defense-in-depth against the one throw validateStages keeps unconditional (RESERVED_KEYS),
+    // matching this module's own invariant that load() must never throw (resolveFlow calls it
+    // on every live launch). An input with zero surviving stages falls to "no override" (inherit
+    // the default) rather than setting an empty workflow.
     try {
-      e.workflow = validateStages(raw.workflow, true); // gitignored → verifyCmd allowed (P2/B3)
+      const validated = validateStages(raw.workflow, { allowVerifyCmd: true, strict: false }); // gitignored → verifyCmd allowed (P2/B3)
+      if (validated.stages.length) e.workflow = validated;
     } catch {
       /* drop an invalid override on load — fall back to default */
     }
@@ -61,6 +100,7 @@ function sanitizeEntry(raw: any): RepoEntry {
   const wm = sanitizeModel(typeof raw?.workerModel === "string" ? raw.workerModel : "");
   if (pm) e.plannerModel = pm;
   if (wm) e.workerModel = wm;
+  e.skills = sanitizeSkillRefs(raw?.skills);
   return e;
 }
 
@@ -116,6 +156,7 @@ export interface RepoConfigFull {
   plannerModel: string;  // RAW stored value ("" = inherit PLANNER_MODEL)
   workerModel: string;   // RAW stored value ("" = inherit WORKER_MODEL)
   usesDefaultWorkflow: boolean;
+  skills: SkillRef[];
 }
 export function readRepoConfigFull(repo: string): RepoConfigFull {
   const entry = S()[slugKey(repo)];
@@ -127,6 +168,7 @@ export function readRepoConfigFull(repo: string): RepoConfigFull {
     plannerModel: entry?.plannerModel ?? "", // raw: empty means "inherit PLANNER_MODEL"
     workerModel: entry?.workerModel ?? "",   // raw: empty means "inherit WORKER_MODEL"
     usesDefaultWorkflow: !wf,
+    skills: (entry?.skills ?? []).map((ref) => ({ ...ref })),
   };
 }
 
@@ -145,13 +187,14 @@ export function saveRepoOverrides(
     plannerModel?: unknown;
     workerModel?: unknown;
     inheritWorkflow?: boolean;
+    skills?: unknown;
   }
 ): RepoConfigFull {
   const key = slugKey(repo);
   const entry: RepoEntry = {};
   if (!input.inheritWorkflow && input.workflow && Array.isArray((input.workflow as any).stages)) {
     // Per-repo override is gitignored → the ONE place a verifyCmd may live (P2/B3).
-    entry.workflow = validateStages(input.workflow as Partial<WorkflowConfig>, true); // throw → 400
+    entry.workflow = validateStages(input.workflow as Partial<WorkflowConfig>, { allowVerifyCmd: true, strict: true }); // throw → 400
   }
   entry.vars = sanitizeVars(input.vars);
   const sc = typeof input.startCommand === "string" ? input.startCommand.trim() : "";
@@ -161,6 +204,9 @@ export function saveRepoOverrides(
   const wm = sanitizeModel(typeof input.workerModel === "string" ? input.workerModel : "");
   if (pm) entry.plannerModel = pm;
   if (wm) entry.workerModel = wm;
+  // Settings/workflow saves predate skills[] and don't send it; retain an existing association
+  // in that case. An explicit [] is how the Skills UI clears it.
+  entry.skills = input.skills === undefined ? (S()[key]?.skills ?? []).map((ref) => ({ ...ref })) : sanitizeSkillRefs(input.skills);
 
   const next: Store = { ...S() };
   // Drop-empty predicate MUST include the model fields, else a repo overriding only a
@@ -171,6 +217,7 @@ export function saveRepoOverrides(
     !entry.startCommand &&
     !entry.plannerModel &&
     !entry.workerModel
+    && entry.skills.length === 0
   )
     delete next[key];
   else next[key] = entry;

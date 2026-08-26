@@ -1,6 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dataPath } from "./data-dir.js";
 
 /**
  * Store editable de las 7 plantillas de prompt de los workers. Mismo patrón que
@@ -150,8 +149,7 @@ export function renderPrompt(text: string, values: Record<string, string>): stri
   );
 }
 
-const here = dirname(fileURLToPath(import.meta.url));
-const FILE = join(here, "..", "data", "prompts.json");
+const FILE = dataPath("prompts.json");
 const COMMENT =
   "Overrides de las plantillas de prompt de los workers. Una key ausente o vacía usa el default " +
   "(el texto original de templates.ts). Editable desde ⚙ Configuración → Prompts o a mano. " +
