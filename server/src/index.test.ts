@@ -521,6 +521,46 @@ test("requireWebhookSecret: NO exige la capability de los proxies — su credenc
 
 // ---- T4: POST/DELETE /api/sessions/:name/adopt ----
 
+test("GET/PUT /api/trusted-roots devuelve, valida y respeta la política del entorno", async () => {
+  const token = ensureCapabilityToken();
+  let roots = ["/trusted"];
+  const app = createApp({ trustedRoots: {
+    read: () => ({ roots, source: "settings" as const }),
+    save: (input) => {
+      if (!Array.isArray(input) || input.some((root) => root !== "/next")) throw new Error("raíz inválida: /bad (debe existir y ser absoluta)");
+      roots = input;
+      return { roots, source: "settings" as const };
+    },
+  } });
+  assert.deepEqual(await invokeGet(app, "/api/trusted-roots"), { status: 200, body: { roots: ["/trusted"], source: "settings" } });
+  assert.deepEqual((await invokeRequest(app, "PUT", "/api/trusted-roots", { headers: { "x-ronin-capability": token }, body: { roots: ["/next"] } })).body, { roots: ["/next"], source: "settings" });
+  const invalid = await invokeRequest(app, "PUT", "/api/trusted-roots", { headers: { "x-ronin-capability": token }, body: { roots: ["/bad"] } });
+  assert.equal(invalid.status, 400);
+  assert.match((invalid.body as { error: string }).error, /raíz inválida/);
+
+  const previous = process.env.COWORK_ALLOWED_ROOTS;
+  try {
+    process.env.COWORK_ALLOWED_ROOTS = "/env";
+    const envApp = createApp();
+    const blocked = await invokeRequest(envApp, "PUT", "/api/trusted-roots", { headers: { "x-ronin-capability": token }, body: { roots: [] } });
+    assert.deepEqual(blocked, { status: 409, body: { error: "COWORK_ALLOWED_ROOTS definida: las raíces se gestionan por entorno", code: "ROOTS_FROM_ENV" } });
+  } finally {
+    if (previous === undefined) delete process.env.COWORK_ALLOWED_ROOTS;
+    else process.env.COWORK_ALLOWED_ROOTS = previous;
+  }
+});
+
+test("POST /adopt devuelve el detalle explicativo de REPO_NOT_ALLOWED", async () => {
+  const token = ensureCapabilityToken();
+  const app = createApp({ adoptSession: async () => {
+    throw new (await import("./adopt.js")).AdoptValidationError("REPO_NOT_ALLOWED", "/repo está fuera de las raíces de confianza (/root). Añádela en Configuración → Repos → Raíces de confianza.");
+  } });
+  const response = await invokeRequest(app, "POST", "/api/sessions/foreign/adopt", {
+    headers: { "x-ronin-capability": token }, body: { confirm: true, repo: "ronin", expectedSessionCreatedAt: 1 },
+  });
+  assert.deepEqual(response, { status: 400, body: { error: "/repo está fuera de las raíces de confianza (/root). Añádela en Configuración → Repos → Raíces de confianza.", code: "REPO_NOT_ALLOWED" } });
+});
+
 test("POST …/adopt: traversal en :name → 400, sin tocar el filesystem (P5, test 45)", async () => {
   const token = ensureCapabilityToken();
   const app = createApp();

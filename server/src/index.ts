@@ -41,7 +41,8 @@ import { createWorkflowCatalogItem, importWorkflowCatalogItem, loadWorkflowCatal
 import { readPromptConfig, resetPromptTemplate, savePromptTemplate } from "./prompts.js";
 import { listRepos, readRepoConfig, saveRepoConfig } from "./repos.js";
 import { readRepoConfigFull, saveRepoOverrides } from "./repo-config.js";
-import { readConnectorSettings, saveConnectorSettings } from "./settings.js";
+import { readConnectorSettings, saveAllowedRoots, saveConnectorSettings } from "./settings.js";
+import { trustedRoots } from "./repo-roots.js";
 import { fetchClickUpDescription, testClickUp } from "./clickup.js";
 import { testJira } from "./jira.js";
 import { testGitLab } from "./gitlab.js";
@@ -92,6 +93,12 @@ function isProposalStatus(value: unknown): value is ProposalStatus {
 }
 
 export interface CreateAppOptions {
+  adoptSession?: typeof adoptSession;
+  /** Seams de tests HTTP; producción usa settings.json + la política efectiva. */
+  trustedRoots?: {
+    read: () => { roots: string[]; source: "env" | "settings" };
+    save: (input: unknown) => { roots: string[]; source: "settings" };
+  };
   /** Inyección para tests: un harness con store aislado. Por defecto usa server/data. */
   harness?: TestHarnessService;
   /**
@@ -127,6 +134,14 @@ const terminal = {
   startTtyd: options.terminal?.startTtyd ?? startTtyd,
   openTerminal: options.terminal?.openTerminal ?? openTerminal,
 };
+const trustedRootsApi = options.trustedRoots ?? {
+  read: () => ({ roots: trustedRoots(), source: process.env.COWORK_ALLOWED_ROOTS !== undefined ? "env" as const : "settings" as const }),
+  save: (input: unknown) => {
+    saveAllowedRoots(input);
+    return { roots: trustedRoots(), source: "settings" as const };
+  },
+};
+const performAdoptSession = options.adoptSession ?? adoptSession;
 app.use(cors(corsOptions));
 // Los tres guards van ANTES de express.json(): no hay razón para parsear el cuerpo de una
 // petición que vamos a rechazar. Cubren TODO /api, incluidos sus OPTIONS.
@@ -228,6 +243,20 @@ app.put("/api/repos-config", (req, res) => {
     res.json(saveRepoConfig({ defaultPath: req.body?.defaultPath, repos: req.body?.repos }));
   } catch (e) {
     res.status(400).json({ error: (e as Error).message });
+  }
+});
+
+app.get("/api/trusted-roots", (_req, res) => {
+  res.json(trustedRootsApi.read());
+});
+app.put("/api/trusted-roots", (req, res) => {
+  if (process.env.COWORK_ALLOWED_ROOTS !== undefined) {
+    return res.status(409).json({ error: "COWORK_ALLOWED_ROOTS definida: las raíces se gestionan por entorno", code: "ROOTS_FROM_ENV" });
+  }
+  try {
+    res.json(trustedRootsApi.save(req.body?.roots));
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
   }
 });
 
@@ -734,7 +763,7 @@ function adoptErrorStatus(code: AdoptErrorCode): number {
 
 app.post("/api/sessions/:name/adopt", async (req, res) => {
   try {
-    const outcome = await adoptSession({
+    const outcome = await performAdoptSession({
       session: req.params.name,
       confirm: req.body?.confirm === true,
       repo: typeof req.body?.repo === "string" ? req.body.repo : undefined,
@@ -755,7 +784,7 @@ app.post("/api/sessions/:name/adopt", async (req, res) => {
     });
   } catch (error) {
     if (error instanceof AdoptValidationError) {
-      return res.status(adoptErrorStatus(error.code)).json({ error: error.code, code: error.code });
+      return res.status(adoptErrorStatus(error.code)).json({ error: error.detail ?? error.code, code: error.code });
     }
     if (error instanceof AdoptCommitError) {
       return res.status(error.code === "SESSION_GONE" ? 409 : 500).json({ error: error.code, code: error.code });

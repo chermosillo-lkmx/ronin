@@ -5,7 +5,7 @@ import { AUTOSUBMIT, MODE } from "./config.js";
 import { fetchClickUpDescription } from "./clickup.js";
 import { recordEvent, truncate } from "./history.js";
 import { listRepos, resolveCwd } from "./repos.js";
-import { TRUSTED_ROOTS } from "./repo-roots.js";
+import { trustedRoots } from "./repo-roots.js";
 import { listAllSessions } from "./sessions.js";
 import {
   cycleDirForSession,
@@ -1911,7 +1911,7 @@ export async function adoptSession(input: AdoptInput): Promise<CommitAdoptOutcom
       })),
     listRepos,
     resolveCwd,
-    allowedRoots: TRUSTED_ROOTS,
+    allowedRoots: trustedRoots(),
     realpath: realpathSync,
     resolveFlow: (repo) => resolveFlow(undefined, repo),
     cycleDirForSession,

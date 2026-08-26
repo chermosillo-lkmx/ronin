@@ -14,6 +14,7 @@ import {
   type PanesResult,
   getTaskDescription,
   getReposConfig,
+  getTrustedRoots,
   getTerminalUrl,
   getWorkflow,
   getPrompts,
@@ -36,6 +37,7 @@ import {
   saveConnectorSettings,
   saveRepoConfig2,
   saveReposConfig,
+  saveTrustedRoots,
   saveWorkflow,
   setOrder,
   stopWorker,
@@ -51,6 +53,7 @@ import { WorkflowEditorScreen } from "./screens/WorkflowEditorScreen";
 import { TestsScreen } from "./screens/TestsScreen";
 import { StatusBar } from "./components/StatusBar";
 import { EMOJI_CHOICES, StageEditor } from "./components/StageEditor";
+import { TrustedRootsEditor } from "./components/TrustedRootsEditor";
 
 const PRIO_NUM: Record<Priority, number> = { urgent: 1, high: 2, normal: 3, low: 4, none: 0 };
 
@@ -1232,9 +1235,11 @@ function ReposSection() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [trusted, setTrusted] = useState<import("./types").TrustedRoots | null>(null);
 
   useEffect(() => {
     getReposConfig().then(setCfg);
+    getTrustedRoots().then(setTrusted).catch((error) => setErr((error as Error).message));
   }, []);
 
   function patch(i: number, p: Partial<{ key: string; path: string }>) {
@@ -1288,6 +1293,7 @@ function ReposSection() {
             <span>Carpeta por defecto (<code>_default</code>):</span>
             <input className="repos-path" value={cfg.defaultPath} onChange={(e) => setCfg({ ...cfg, defaultPath: e.target.value })} />
           </div>
+          {trusted && <TrustedRootsEditor {...trusted} onSave={async (roots) => setTrusted(await saveTrustedRoots(roots))} />}
         </>
       )}
 

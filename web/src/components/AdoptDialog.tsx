@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { adoptSessionRequest, getRepos } from "../api";
-import type { TmuxSessionInfo } from "../types";
+import { adoptSessionRequest, getRepos, getReposConfig, getTrustedRoots, saveTrustedRoots } from "../api";
+import type { ReposConfig, TmuxSessionInfo } from "../types";
 
 export interface AdoptDialogProps {
   session: TmuxSessionInfo;
@@ -21,10 +21,18 @@ export function AdoptDialog({ session, onAdopted, onCancel }: AdoptDialogProps) 
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [roots, setRoots] = useState<string[]>([]);
+  const [reposConfig, setReposConfig] = useState<ReposConfig | null>(null);
 
   useEffect(() => {
     let alive = true;
-    void getRepos().then((list) => { if (alive) setRepos(list); });
+    void Promise.all([getRepos(), getTrustedRoots(), getReposConfig()]).then(([list, trusted, config]) => {
+      if (!alive) return;
+      setRepos(list);
+      setRoots(trusted.roots);
+      setReposConfig(config);
+    });
     return () => { alive = false; };
   }, []);
 
@@ -41,6 +49,7 @@ export function AdoptDialog({ session, onAdopted, onCancel }: AdoptDialogProps) 
     }
     setBusy(true);
     setError(null);
+    setErrorCode(null);
     const outcome = await adoptSessionRequest(session.name, {
       confirm: true,
       repo,
@@ -49,6 +58,7 @@ export function AdoptDialog({ session, onAdopted, onCancel }: AdoptDialogProps) 
     });
     setBusy(false);
     if (!outcome.ok) {
+      setErrorCode(outcome.error.code);
       setError(
         outcome.error.code === "STALE_VIEW"
           ? "La sesión cambió desde que se cargó esta vista. Refresca e inténtalo de nuevo."
@@ -57,6 +67,21 @@ export function AdoptDialog({ session, onAdopted, onCancel }: AdoptDialogProps) 
       return;
     }
     onAdopted();
+  }
+
+  async function addRootAndRetry() {
+    const folder = reposConfig?.repos.find((item) => item.key === repo)?.path;
+    if (!folder) return;
+    setBusy(true);
+    try {
+      const saved = await saveTrustedRoots([...roots, folder]);
+      setRoots(saved.roots);
+      await submit();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -99,6 +124,7 @@ export function AdoptDialog({ session, onAdopted, onCancel }: AdoptDialogProps) 
 
         <div className="ron-modal-actions">
           <button type="button" onClick={onCancel} disabled={busy}>Cancelar</button>
+          {errorCode === "REPO_NOT_ALLOWED" && <button type="button" onClick={() => void addRootAndRetry()} disabled={busy}>Añadir {reposConfig?.repos.find((item) => item.key === repo)?.path ?? "carpeta"} como raíz de confianza</button>}
           <button type="button" className="ron-btn-primary" onClick={() => void submit()} disabled={busy}>
             {busy ? "Adoptando…" : "Adoptar"}
           </button>

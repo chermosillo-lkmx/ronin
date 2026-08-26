@@ -186,6 +186,11 @@ export interface ReposConfig {
   repos: { key: string; path: string }[];
 }
 
+export interface TrustedRoots {
+  roots: string[];
+  source: "env" | "settings";
+}
+
 export interface RepoOverrideConfig {
   workflow: WorkflowConfig | null;   // null = hereda el default global
   vars: Record<string, string>;

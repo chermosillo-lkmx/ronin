@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { computeTrustedRoots, isWithinTrustedRoot } from "./repo-roots.js";
+import { computeTrustedRoots, isWithinTrustedRoot, trustedRoots } from "./repo-roots.js";
 
 function tempDir(): { dir: string; cleanup: () => void } {
   // realpath de entrada: en macOS $TMPDIR vive bajo un symlink (/var -> /private/var), y sin
@@ -39,6 +39,39 @@ test("computeTrustedRoots: ignora segmentos vacíos (colon doble, espacios)", ()
     assert.deepEqual(computeTrustedRoots(`  ${dir}  ::`, "/unused"), [dir]);
   } finally {
     cleanup();
+  }
+});
+
+test("trustedRoots: con COWORK_ALLOWED_ROOTS definida ignora las raíces guardadas", () => {
+  const envRoot = tempDir();
+  const settingsRoot = tempDir();
+  const previous = process.env.COWORK_ALLOWED_ROOTS;
+  try {
+    process.env.COWORK_ALLOWED_ROOTS = envRoot.dir;
+    assert.deepEqual(trustedRoots({ allowedRoots: [settingsRoot.dir], defaultRoot: "/unused" }), [envRoot.dir]);
+  } finally {
+    if (previous === undefined) delete process.env.COWORK_ALLOWED_ROOTS;
+    else process.env.COWORK_ALLOWED_ROOTS = previous;
+    envRoot.cleanup();
+    settingsRoot.cleanup();
+  }
+});
+
+test("trustedRoots: sin env une settings y la raíz por defecto, omitiendo settings inexistentes", () => {
+  const settingsRoot = tempDir();
+  const defaultRoot = tempDir();
+  const previous = process.env.COWORK_ALLOWED_ROOTS;
+  try {
+    delete process.env.COWORK_ALLOWED_ROOTS;
+    assert.deepEqual(
+      trustedRoots({ allowedRoots: [settingsRoot.dir, "/no/existe/cowork-root"], defaultRoot: defaultRoot.dir }),
+      [settingsRoot.dir, defaultRoot.dir],
+    );
+  } finally {
+    if (previous === undefined) delete process.env.COWORK_ALLOWED_ROOTS;
+    else process.env.COWORK_ALLOWED_ROOTS = previous;
+    settingsRoot.cleanup();
+    defaultRoot.cleanup();
   }
 });
 

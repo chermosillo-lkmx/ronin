@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { sep } from "node:path";
 import { LIEBRE_ROOT } from "./config.js";
+import { readAllowedRoots } from "./settings.js";
 
 /**
  * M1 (rev 3) — las raíces de confianza vienen de una POLÍTICA INDEPENDIENTE, nunca de las
@@ -31,7 +32,21 @@ export function isWithinTrustedRoot(realPath: string, roots: string[]): boolean 
   return roots.some((root) => realPath === root || realPath.startsWith(root + sep));
 }
 
-// `COWORK_ALLOWED_ROOTS`: rutas absolutas separadas por `:`. Sin ella, cae a `[LIEBRE_ROOT]`.
-// Se resuelve UNA VEZ al cargar (falla ruidoso al arrancar si una raíz no existe — mejor un
-// crash explicable que una comprobación de seguridad que no se puede confiar en que corrió).
-export const TRUSTED_ROOTS = computeTrustedRoots(process.env.COWORK_ALLOWED_ROOTS, LIEBRE_ROOT);
+export function trustedRoots(options: { allowedRoots?: string[]; defaultRoot?: string } = {}): string[] {
+  const fromEnv = process.env.COWORK_ALLOWED_ROOTS;
+  const candidates = fromEnv !== undefined
+    ? parseAllowedRoots(fromEnv)
+    : [...(options.allowedRoots ?? readAllowedRoots()), options.defaultRoot ?? LIEBRE_ROOT];
+  const roots: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      const real = realpathSync(candidate);
+      if (!roots.includes(real)) roots.push(real);
+    } catch {
+      // Una raíz guardada puede desaparecer entre ejecuciones; avisamos y arrancamos con las
+      // demás para que un settings.json viejo no convierta el arranque en un bloqueo total.
+      console.warn(`raíz de confianza omitida porque no existe: ${candidate}`);
+    }
+  }
+  return roots;
+}

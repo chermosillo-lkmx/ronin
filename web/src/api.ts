@@ -1,4 +1,4 @@
-import type { TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PaneRole, PaneView, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionPresentation, SkillDocument, SkillRef, SkillSummary, Snapshot, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
+import type { TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, ConnectorSettings, ConnectorSettingsInput, CustomAction, HistoryEvent, PaneRole, PaneView, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionPresentation, SkillDocument, SkillRef, SkillSummary, Snapshot, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
 
 /** Subscribe to live snapshots via SSE. Returns an unsubscribe fn. */
 export function subscribeStream(
@@ -395,6 +395,21 @@ export async function saveReposConfig(cfg: ReposConfig): Promise<ReposConfig> {
   if (!r.ok) {
     const e = await r.json().catch(() => ({}));
     throw new Error(e.error || "no se pudo guardar la config de repos");
+  }
+  return r.json();
+}
+
+export async function getTrustedRoots(): Promise<TrustedRoots> {
+  const r = await fetch("/api/trusted-roots");
+  if (!r.ok) throw new Error("no se pudieron leer las raíces de confianza");
+  return r.json();
+}
+
+export async function saveTrustedRoots(roots: string[]): Promise<TrustedRoots> {
+  const r = await fetch("/api/trusted-roots", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roots }) });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.error || "no se pudieron guardar las raíces de confianza");
   }
   return r.json();
 }

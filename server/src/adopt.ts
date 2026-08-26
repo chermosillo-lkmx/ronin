@@ -49,7 +49,7 @@ export type AdoptErrorCode =
   | "PANE_AMBIGUOUS";
 
 export class AdoptValidationError extends Error {
-  constructor(readonly code: AdoptErrorCode) {
+  constructor(readonly code: AdoptErrorCode, readonly detail?: string) {
     super(code);
     this.name = "AdoptValidationError";
   }
@@ -85,7 +85,12 @@ export function validateAdopt(input: AdoptInput, deps: AdoptDeps): AdoptResult {
   // derivadas de las entradas que se validan — de lo contrario el destino de un symlink
   // se convertiría en su propia raíz y esta comprobación no podría fallar nunca.
   const realCwd = deps.realpath(resolved.cwd);
-  if (!isWithinTrustedRoot(realCwd, deps.allowedRoots)) throw new AdoptValidationError("REPO_NOT_ALLOWED");
+  if (!isWithinTrustedRoot(realCwd, deps.allowedRoots)) {
+    throw new AdoptValidationError(
+      "REPO_NOT_ALLOWED",
+      `${realCwd} está fuera de las raíces de confianza (${deps.allowedRoots.join(", ")}). Añádela en Configuración → Repos → Raíces de confianza.`,
+    );
+  }
 
   // Un adoptado nunca dispara el verificador independiente ni ejecuta verifyCmd: congelado
   // aquí, sea lo que sea que el repo traiga (T4/54d/54e dependen de esto en el engine).

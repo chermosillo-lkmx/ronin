@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { dataPath } from "./data-dir.js";
 import {
   CLICKUP_LIST_IDS, CLICKUP_TEAM_ID, CLICKUP_TOKEN,
@@ -11,6 +12,7 @@ const COMMENT =
   "Credenciales de conectores (ClickUp/Jira/GitLab). Gitignored. Editable desde ⚙ Configuración → Conectores o a mano. Token vacío = conservar el existente.";
 
 interface StoredSettings {
+  allowedRoots?: string[];
   clickup?: { token?: string; teamId?: string; listIds?: string[] };
   jira?: { token?: string; baseUrl?: string; email?: string; jql?: string };
   gitlab?: { token?: string; baseUrl?: string; project?: string };
@@ -25,6 +27,7 @@ function normalizeListIds(v: unknown): string[] {
 function str(v: unknown): string | undefined { return typeof v === "string" ? v : undefined; }
 function sanitize(raw: any): StoredSettings {
   const out: StoredSettings = {};
+  if (Array.isArray(raw?.allowedRoots)) out.allowedRoots = raw.allowedRoots.filter((root: unknown): root is string => typeof root === "string");
   if (raw?.clickup && typeof raw.clickup === "object") {
     out.clickup = {};
     const token = str(raw.clickup.token); if (token !== undefined) out.clickup.token = token;
@@ -45,9 +48,14 @@ function sanitize(raw: any): StoredSettings {
   }
   return out;
 }
-function load(): StoredSettings {
-  try { return sanitize(JSON.parse(readFileSync(SETTINGS_FILE, "utf8"))); }
+function loadFrom(file: string): StoredSettings {
+  try { return sanitize(JSON.parse(readFileSync(file, "utf8"))); }
   catch { return {}; } // ausente → todo env fallback (compat)
+}
+function load(): StoredSettings { return loadFrom(SETTINGS_FILE); }
+
+function writeSettings(next: StoredSettings, file: string): void {
+  writeFileSync(file, JSON.stringify({ _comment: COMMENT, ...next }, null, 2) + "\n");
 }
 
 let store: StoredSettings = load();
@@ -64,6 +72,25 @@ export function jiraJql(): string { const j = store.jira?.jql; return j && j.tri
 export function gitlabToken(): string { const s = store.gitlab?.token; return s && s.trim() ? s : GITLAB_TOKEN; }
 export function gitlabBaseUrl(): string { const b = store.gitlab?.baseUrl; return ((b && b.trim()) ? b : GITLAB_BASE_URL).replace(/\/$/, ""); }
 export function gitlabProject(): string { return store.gitlab?.project !== undefined ? store.gitlab.project : GITLAB_PROJECT; }
+
+export function readAllowedRoots(file: string = SETTINGS_FILE): string[] {
+  return loadFrom(file).allowedRoots ?? [];
+}
+
+export function saveAllowedRoots(input: unknown, file: string = SETTINGS_FILE): string[] {
+  if (!Array.isArray(input)) throw new Error("se esperaba una lista de raíces (rutas absolutas existentes)");
+  const roots: string[] = [];
+  for (const value of input) {
+    const root = typeof value === "string" ? value.trim() : String(value);
+    if (!isAbsolute(root) || !existsSync(root)) throw new Error(`raíz inválida: ${root} (debe existir y ser absoluta)`);
+    const real = realpathSync(root);
+    if (!roots.includes(real)) roots.push(real);
+  }
+  const next = { ...loadFrom(file), allowedRoots: roots };
+  writeSettings(next, file);
+  if (file === SETTINGS_FILE) store = next;
+  return roots;
+}
 
 // ---- Read (masked) / Save ----
 export interface ConnectorSettings {
@@ -131,7 +158,7 @@ export function saveConnectorSettings(input: unknown): ConnectorSettings {
     if (typeof ig.token === "string" && ig.token.trim()) next.gitlab!.token = ig.token.trim(); // vacío = conservar
   }
 
-  writeFileSync(SETTINGS_FILE, JSON.stringify({ _comment: COMMENT, ...next }, null, 2) + "\n");
+  writeSettings(next, SETTINGS_FILE);
   store = next;
   return readConnectorSettings();
 }

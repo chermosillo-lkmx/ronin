@@ -114,7 +114,12 @@ test("M1: repo cuyo realpath escapa TODAS las raíces de confianza → REPO_NOT_
   symlinkSync(inside, linkInside);
 
   const escaping = baseDeps({ allowedRoots: [root], resolveCwd: () => ({ cwd: linkOutside, real: true }), realpath: realpathSync });
-  assert.equal(codeOf(() => validateAdopt(baseInput(), escaping)), "REPO_NOT_ALLOWED");
+  assert.throws(
+    () => validateAdopt(baseInput(), escaping),
+    (error: unknown) => error instanceof AdoptValidationError
+      && error.code === "REPO_NOT_ALLOWED"
+      && error.detail === `${outside} está fuera de las raíces de confianza (${root}). Añádela en Configuración → Repos → Raíces de confianza.`,
+  );
 
   const accepted = baseDeps({ allowedRoots: [root], resolveCwd: () => ({ cwd: linkInside, real: true }), realpath: realpathSync });
   const result = validateAdopt(baseInput(), accepted);
