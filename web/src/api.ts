@@ -315,6 +315,25 @@ export async function getTerminalUrl(id: string): Promise<string | null> {
   return r.ok ? (await r.json()).url : null;
 }
 
+export type SessionTerminalResult = { url: string; error: null } | { url: null; error: string };
+
+/** URL de ttyd de una sesión tmux, o el motivo legible para mostrar en la superficie de respaldo. */
+export async function getSessionTerminalUrl(name: string): Promise<SessionTerminalResult> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(name)}/term`, { method: "POST" });
+  if (r.ok) return { url: (await r.json()).url, error: null };
+  const e = await r.json().catch(() => ({}));
+  return { url: null, error: e.error || "no se pudo conectar la terminal" };
+}
+
+/** Abre Terminal.app adjunta a la sesión, conservando ttyd como superficie embebida principal. */
+export async function attachSessionTerminal(name: string): Promise<void> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(name)}/attach`, { method: "POST" });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.error || "no se pudo abrir la terminal");
+  }
+}
+
 export async function workerInput(id: string, text: string): Promise<void> {
   await fetch(`/api/workers/${id}/input`, {
     method: "POST",

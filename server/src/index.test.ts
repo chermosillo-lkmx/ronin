@@ -596,6 +596,44 @@ test("DELETE /api/sessions/:name exige confirmación y mata sólo la sesión tmu
   });
 });
 
+test("POST /api/sessions/:name/{term,attach} valida la sesión y delega terminales sin procesos reales", async () => {
+  const token = ensureCapabilityToken();
+  const calls: string[] = [];
+  const app = createApp({
+    terminal: {
+      hasSession: async (name: string) => name === "sesion-viva" || name === "sin-ttyd",
+      startTtyd: async (name: string) => {
+        calls.push(`ttyd:${name}`);
+        return name === "sin-ttyd" ? null : 7781;
+      },
+      openTerminal: async (name: string) => { calls.push(`attach:${name}`); },
+    },
+  });
+  const headers = { "x-ronin-capability": token };
+
+  const invalid = await invokeRequest(app, "POST", "/api/sessions/no%20segura/term", { headers });
+  assert.deepEqual(invalid, { status: 400, body: { error: "nombre de sesión inválido", code: "INVALID_SESSION" } });
+
+  const invalidAttach = await invokeRequest(app, "POST", "/api/sessions/no%20segura/attach", { headers });
+  assert.deepEqual(invalidAttach, { status: 400, body: { error: "nombre de sesión inválido", code: "INVALID_SESSION" } });
+
+  const missing = await invokeRequest(app, "POST", "/api/sessions/desconocida/attach", { headers });
+  assert.deepEqual(missing, { status: 404, body: { error: "sesión no encontrada", code: "SESSION_NOT_FOUND" } });
+
+  const missingTerm = await invokeRequest(app, "POST", "/api/sessions/desconocida/term", { headers });
+  assert.deepEqual(missingTerm, { status: 404, body: { error: "sesión no encontrada", code: "SESSION_NOT_FOUND" } });
+
+  const term = await invokeRequest(app, "POST", "/api/sessions/sesion-viva/term", { headers });
+  assert.deepEqual(term, { status: 200, body: { url: "http://127.0.0.1:7781" } });
+
+  const unavailable = await invokeRequest(app, "POST", "/api/sessions/sin-ttyd/term", { headers });
+  assert.deepEqual(unavailable, { status: 503, body: { error: "ttyd no instalado (brew install ttyd)", code: "TTYD_UNAVAILABLE" } });
+
+  const attached = await invokeRequest(app, "POST", "/api/sessions/sesion-viva/attach", { headers });
+  assert.deepEqual(attached, { status: 200, body: { ok: true } });
+  assert.deepEqual(calls, ["ttyd:sesion-viva", "ttyd:sin-ttyd", "attach:sesion-viva"]);
+});
+
 // ---- T5: render/input por pane, contra tmux REAL ----
 
 test("GET …/panes/:paneId/capture: %N de OTRA sesión → 400 PANE_NOT_IN_SESSION; %N muerto → 200 {status:'gone'}; incluye cursor/size (58/59/64)", async () => {

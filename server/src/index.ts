@@ -20,6 +20,7 @@ import {
   readPaneGeometry,
   sendText,
   serializePerSession,
+  openTerminal,
 } from "./tmux.js";
 import { classifySession } from "./sessions.js";
 import { isSafeSessionName } from "./session-name.js";
@@ -98,6 +99,12 @@ export interface CreateAppOptions {
    * test nunca toque `server/data/workflows.json`.
    */
   insights?: { store: ProposalStore; analyzer: Analyzer; catalogDirectory?: string };
+  /** Dependencias de terminal de sesión aislables: evitan arrancar ttyd/Terminal.app en tests HTTP. */
+  terminal?: {
+    hasSession?: typeof hasSession;
+    startTtyd?: typeof startTtyd;
+    openTerminal?: typeof openTerminal;
+  };
 }
 
 export function createApp(options: CreateAppOptions = {}): express.Express {
@@ -114,6 +121,11 @@ const analyzer =
     runClaude: (prompt) => runClaudeP(prompt, { timeoutMs: 300_000, maxBytes: 256 * 1024 }),
   });
 const sessionPresentations = createSessionPresentationStore(dataPath("session-presentations.json"), listRepos);
+const terminal = {
+  hasSession: options.terminal?.hasSession ?? hasSession,
+  startTtyd: options.terminal?.startTtyd ?? startTtyd,
+  openTerminal: options.terminal?.openTerminal ?? openTerminal,
+};
 app.use(cors(corsOptions));
 // Los tres guards van ANTES de express.json(): no hay razón para parsear el cuerpo de una
 // petición que vamos a rechazar. Cubren TODO /api, incluidos sus OPTIONS.
@@ -360,10 +372,11 @@ app.post("/api/pr-review", async (req, res) => {
 });
 
 // Start (or reuse) an embedded interactive terminal (ttyd) for the worker
-app.post("/api/workers/:id/term", (req, res) => {
+app.post("/api/workers/:id/term", async (req, res) => {
   const worker = findWorker(req.params.id);
   if (!worker?.session) return res.status(404).json({ error: "no session for worker" });
-  const port = startTtyd(worker.session);
+  const port = await startTtyd(worker.session);
+  if (port === null) return res.status(503).json({ error: "ttyd no instalado (brew install ttyd)", code: "TTYD_UNAVAILABLE" });
   // 127.0.0.1 (not "localhost") — ttyd binds IPv4 while the browser may resolve localhost to ::1.
   res.json({ url: `http://127.0.0.1:${port}` });
 });
@@ -666,6 +679,25 @@ app.delete("/api/sessions/:name", async (req, res) => {
   if (req.body?.confirm !== true) return res.status(400).json({ error: "confirmación requerida", code: "CONFIRMATION_REQUIRED" });
   if (!(await hasSession(name))) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
   await killSession(name);
+  res.json({ ok: true });
+});
+
+// Superficie ttyd de una sesión tmux: verificamos nombre y existencia antes de arrancar procesos.
+app.post("/api/sessions/:name/term", async (req, res) => {
+  const { name } = req.params;
+  if (!isSafeSessionName(name)) return res.status(400).json({ error: "nombre de sesión inválido", code: "INVALID_SESSION" });
+  if (!(await terminal.hasSession(name))) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
+  const port = await terminal.startTtyd(name);
+  if (port === null) return res.status(503).json({ error: "ttyd no instalado (brew install ttyd)", code: "TTYD_UNAVAILABLE" });
+  res.json({ url: `http://127.0.0.1:${port}` });
+});
+
+// Attach conserva la vía nativa para quien necesita una Terminal.app independiente.
+app.post("/api/sessions/:name/attach", async (req, res) => {
+  const { name } = req.params;
+  if (!isSafeSessionName(name)) return res.status(400).json({ error: "nombre de sesión inválido", code: "INVALID_SESSION" });
+  if (!(await terminal.hasSession(name))) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
+  await terminal.openTerminal(name);
   res.json({ ok: true });
 });
 
