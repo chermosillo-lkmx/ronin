@@ -125,12 +125,6 @@ export function DesktopApp() {
 
   return (
     <div className="ronin-desktop nocturne">
-      <header className="ronin-titlebar">
-        <div className="ronin-window-dots"><i /><i /><i /></div><span className="ronin-mark" /><strong>Ronin</strong>
-        <span className="ronin-title-context">{current?.presentation?.title || current?.name || "sin sesión"}</span><span className="ronin-title-slash">/</span><span className="ronin-title-workflow">{view === "workflows" ? "workflow.json" : "tmux"}</span>
-        <span className="ronin-title-spacer" />
-        <span className={`ronin-health ${diagnostic ? "error" : ""}`}>{diagnostic ? diagnostic.code : "tmux listo"}</span><span className="ronin-title-cost">local</span>
-      </header>
       <div className="ronin-shell-body">
         <nav className="ronin-rail" aria-label="Navegación principal">
           <RailButton active={view === "sessions"} icon="▦" label="Sesiones" onClick={() => setView("sessions")} />
@@ -159,6 +153,13 @@ export function DesktopApp() {
           {view === "tests" && <TestsInspector />}
         </aside>
       </div>
+      {/* Electron ya pone la barra de título nativa; el contexto vive en un pie de estado. */}
+      <footer className="ronin-statusbar">
+        <span className="ronin-mark" /><strong>Ronin</strong>
+        <span className="ronin-title-context">{current?.presentation?.title || current?.name || "sin sesión"}</span><span className="ronin-title-slash">/</span><span className="ronin-title-workflow">{view === "workflows" ? "workflow.json" : view === "tests" ? "pruebas" : view === "skills" ? "skills" : "tmux"}</span>
+        <span className="ronin-title-spacer" />
+        <span className={`ronin-health ${diagnostic ? "error" : ""}`}>{diagnostic ? diagnostic.code : "tmux listo"}</span><span className="ronin-title-cost">local</span>
+      </footer>
       {newSessionOpen && <NewSessionDialog onClose={() => setNewSessionOpen(false)} onCreated={(name) => { setSelectedSession(name); void refreshInventory(); }} />}
       {presentationSession && <SessionPresentationDialog session={presentationSession} onCancel={() => setPresentationSession(null)} onSaved={() => { setPresentationSession(null); void refreshInventory(); }} />}
     </div>
