@@ -24,4 +24,3 @@ server/data/test-runs.json
 server/data/test-artifacts/
 server/data/workflow-proposals.json
 .superpowers/
-server/data/workflows.json

@@ -1,30 +1,36 @@
 {
-  "_comment": "Etapas del workflow para tickets. Editable desde el dashboard (⚙ Workflow) o a mano. key=sentinel (touch), label/icon=stepper, instruction=qué pedirle (placeholders {cycle} {ev} {repo}). verifyAfter: etapa tras la cual abrir el verificador (null=ninguno).",
+  "_comment": "Etapas del workflow para tickets. Editable desde el dashboard (⚙ Workflow) o a mano. key=sentinel (touch), label/icon=stepper, instruction=qué pedirle (placeholders {cycle} {ev} {repo}). verifyAfter: etapa tras la cual abrir el verificador (null=ninguno). NOTA: verifyCmd/maxRetries (gate pass/fail por-stage) se IGNORAN aquí — este archivo es git-tracked y verifyCmd ejecuta shell; sólo el override por-repo (gitignored) los honra.",
   "stages": [
     {
       "key": "planning",
-      "label": "Plan",
+      "label": "Plan (Claude)",
       "icon": "📋",
-      "instruction": "Escribe un plan breve de la implementación y los artefactos a entregar."
+      "instruction": "Tú (Claude) escribes {cycle}/plan.md: contexto del ticket, causa raíz si es bug (cita archivo:línea), pasos concretos, archivos a tocar, tests a agregar/reparar y criterios de aceptación con el curl exacto que los probará en DEV. Si una premisa del ticket no se sostiene (logs/DB), dilo en el plan antes de tocar código. No implementes."
     },
     {
       "key": "implementing",
-      "label": "Impl",
-      "icon": "⌨️",
-      "role": "impl",
-      "instruction": "Implementa la solución utilizando /tmux-worker-loop"
+      "label": "Impl (Codex)",
+      "icon": "🤖",
+      "instruction": "Delega la implementación a Codex (codex:codex-rescue) con {cycle}/plan.md como contrato: TDD (test que falla primero, fix mínimo, refactor), commits Conventional Commits. Verifica el job de codex por su status/log — 'task started' no es resultado. Si codex está limitado, impleméntalo tú y déjalo dicho en la evidencia. Revisa el diff contra la lista de archivos prometida en el plan.",
+      "role": "impl"
+    },
+    {
+      "key": "tests",
+      "label": "Pruebas",
+      "icon": "✅",
+      "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit), o vía Ronin: npm run tests:suite -- {repo} unit --profile dev. Guarda el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
     },
     {
       "key": "curl",
-      "label": "Curl",
+      "label": "Curl DEV",
       "icon": "🌐",
-      "instruction": "Pruebas CURL contra DEV: ejecuta `source {cycle}/curl.env` (te da $DEV_URL, $TOKEN, $ACCOUNTING_FIRM; no los pidas). Corre los curl relevantes y guarda comando + request body + response body en {ev}/curl.md. Luego ingesta al backup-tester: curl -X POST $BACKUP_TESTER_URL/api/test-coverage/ingest -H \"Authorization: Bearer $BACKUP_TESTER_INGEST_TOKEN\" -F project={repo} -F suite=curl -F junit=@<tu-junit.xml>."
+      "instruction": "`source {cycle}/curl.env` ($DEV_URL, $TOKEN, $ACCOUNTING_FIRM; no los pidas). Un curl por cada criterio de aceptación del plan, sólo lectura salvo que el criterio exija escribir; guarda comando + request + response en {ev}/curl.md con veredicto por criterio. Ingesta al backup-tester: curl -X POST $BACKUP_TESTER_URL/api/test-coverage/ingest -H \"Authorization: Bearer $BACKUP_TESTER_INGEST_TOKEN\" -F project={repo} -F suite=curl -F junit=@<junit.xml>."
     },
     {
       "key": "done",
-      "label": "Evidence",
+      "label": "Evidencia",
       "icon": "✓",
-      "instruction": "Escribe {ev}/summary.md (comentario listo para el ticket)."
+      "instruction": "Genera EVIDENCIA-<ticket>-dev.md en la raíz del repo: Veredicto, Causa/Cadena (archivo:línea), Cambios (archivos, tests), Resultado de suites y cobertura, Curl en DEV por criterio (de {ev}/curl.md), Limpieza pendiente en dev, Pendientes/PRs. Deja {ev}/summary.md con el comentario listo para pegar en el ticket."
     }
   ],
   "verifyAfter": "curl"

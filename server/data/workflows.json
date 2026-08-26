@@ -1,0 +1,169 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "wf-f1320ddc53284ec4b0",
+      "name": "refactor-v3",
+      "config": {
+        "stages": [
+          {
+            "key": "planning",
+            "label": "Plan",
+            "icon": "📋",
+            "instruction": "Escribe un plan breve de la implementación y los artefactos a entregar."
+          },
+          {
+            "key": "implementing",
+            "label": "Impl",
+            "icon": "⌨️",
+            "instruction": "Implementa la solución utilizando /tmux-worker-loop",
+            "role": "impl"
+          },
+          {
+            "key": "curl",
+            "label": "Curl",
+            "icon": "🌐",
+            "instruction": "Pruebas CURL contra DEV: ejecuta `source {cycle}/curl.env` (te da $DEV_URL, $TOKEN, $ACCOUNTING_FIRM; no los pidas). Corre los curl relevantes y guarda comando + request body + response body en {ev}/curl.md. Luego ingesta al backup-tester: curl -X POST $BACKUP_TESTER_URL/api/test-coverage/ingest -H \"Authorization: Bearer $BACKUP_TESTER_INGEST_TOKEN\" -F project={repo} -F suite=curl -F junit=@<tu-junit.xml>."
+          },
+          {
+            "key": "done",
+            "label": "Evidence",
+            "icon": "✓",
+            "instruction": "Escribe {ev}/summary.md (comentario listo para el ticket)."
+          }
+        ],
+        "verifyAfter": "curl"
+      },
+      "updatedAt": 1787622876882
+    },
+    {
+      "id": "wf-9b0679a503fd44979e",
+      "name": "tmux-worker-loop",
+      "config": {
+        "stages": [
+          {
+            "key": "planning",
+            "label": "Plan (Brain)",
+            "icon": "🧠",
+            "instruction": "Arranca /tmux-worker-loop (4 panes: Main, Brain=Opus, Reviewer=Opus, Implementer=Sonnet). El Brain escribe {cycle}/plan.md a partir del ticket: pasos, archivos a tocar, tests a agregar y criterios de aceptación con los curl exactos que se correrán en DEV. Espera ===BRAIN:PLAN-READY=== y LEE el plan tú mismo."
+          },
+          {
+            "key": "plan-review",
+            "label": "Revisión plan",
+            "icon": "🔍",
+            "instruction": "Pasa el plan por el Reviewer (plan pass) y por codex:codex-rescue como segundo motor; verifica las afirmaciones que sostienen el plan leyendo el código citado. Relaya hallazgos al Brain con prefijo REVIEW: hasta ===BRAIN:PLAN-UPDATED=== limpio. Escala al usuario cualquier decisión de alcance. Envía PLAN APPROVED."
+          },
+          {
+            "key": "implementing",
+            "label": "Impl (Sonnet)",
+            "icon": "⌨️",
+            "instruction": "Manda el prompt del Implementer: implementa {cycle}/plan.md en ciclos estrictos RED→GREEN→REFACTOR registrando cada ciclo en {cycle}/rgr.log. Ante ===IMPL:QUESTION=== relaya al Brain (y anota la pregunta: es un defecto del plan). Commits en Conventional Commits. Espera ===IMPL:READY===.",
+            "role": "impl"
+          },
+          {
+            "key": "diff-review",
+            "label": "Revisión diff",
+            "icon": "🧪",
+            "instruction": "Comprueba que {cycle}/rgr.log existe y cuadra con git diff --stat. Reviewer: diff pass + auditoría RGR (cada ciclo con veredicto; REFACTOR: NONE repetido es bandera roja). codex como segundo motor, verificando el job por su log, no por 'task started'. Loop hasta limpio y IMPL APPROVED."
+          },
+          {
+            "key": "tests",
+            "label": "Tests",
+            "icon": "✅",
+            "instruction": "Corre las suites del servicio afectado tú mismo (pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml / vitest run --reporter=junit) o vía Ronin: npm run tests:suite -- {repo} unit --profile dev. Exige el resumen exacto (N passed / failed) y confirma que los KB mencionan el flujo nuevo leyéndolos."
+          },
+          {
+            "key": "curl",
+            "label": "Curl DEV",
+            "icon": "🌐",
+            "instruction": "Pruebas CURL contra DEV: `source {cycle}/curl.env` (te da $DEV_URL, $TOKEN, $ACCOUNTING_FIRM; no los pidas). Ejecuta un curl por cada criterio de aceptación del plan (preferentemente sólo lectura) y guarda comando + request + response en {ev}/curl.md. Ingesta al backup-tester: curl -X POST $BACKUP_TESTER_URL/api/test-coverage/ingest -H \"Authorization: Bearer $BACKUP_TESTER_INGEST_TOKEN\" -F project={repo} -F suite=curl -F junit=@<junit.xml>."
+          },
+          {
+            "key": "done",
+            "label": "Evidencia",
+            "icon": "✓",
+            "instruction": "Escribe EVIDENCIA-<ticket>-dev.md en la raíz del repo con: Veredicto, Cadena completa (archivo:línea), Qué se cambió (archivos + tests + ciclos RGR), Resultado de suites, Curl en DEV por criterio, Limpieza pendiente en dev, Pendientes. Deja {ev}/summary.md con el comentario listo para el ticket."
+          }
+        ],
+        "verifyAfter": "curl"
+      },
+      "updatedAt": 1787769457453
+    },
+    {
+      "id": "wf-8cf0382b46dd436798",
+      "name": "claude-plan-codex-impl",
+      "config": {
+        "stages": [
+          {
+            "key": "planning",
+            "label": "Plan (Claude)",
+            "icon": "📋",
+            "instruction": "Tú (Claude) escribes {cycle}/plan.md: contexto del ticket, causa raíz si es bug (cita archivo:línea), pasos concretos, archivos a tocar, tests a agregar/reparar y criterios de aceptación con el curl exacto que los probará en DEV. Si una premisa del ticket no se sostiene (logs/DB), dilo en el plan antes de tocar código. No implementes."
+          },
+          {
+            "key": "implementing",
+            "label": "Impl (Codex)",
+            "icon": "🤖",
+            "instruction": "Delega la implementación a Codex (codex:codex-rescue) con {cycle}/plan.md como contrato: TDD (test que falla primero, fix mínimo, refactor), commits Conventional Commits. Verifica el job de codex por su status/log — 'task started' no es resultado. Si codex está limitado, impleméntalo tú y déjalo dicho en la evidencia. Revisa el diff contra la lista de archivos prometida en el plan.",
+            "role": "impl"
+          },
+          {
+            "key": "tests",
+            "label": "Pruebas",
+            "icon": "✅",
+            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit), o vía Ronin: npm run tests:suite -- {repo} unit --profile dev. Guarda el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
+          },
+          {
+            "key": "curl",
+            "label": "Curl DEV",
+            "icon": "🌐",
+            "instruction": "`source {cycle}/curl.env` ($DEV_URL, $TOKEN, $ACCOUNTING_FIRM; no los pidas). Un curl por cada criterio de aceptación del plan, sólo lectura salvo que el criterio exija escribir; guarda comando + request + response en {ev}/curl.md con veredicto por criterio. Ingesta al backup-tester: curl -X POST $BACKUP_TESTER_URL/api/test-coverage/ingest -H \"Authorization: Bearer $BACKUP_TESTER_INGEST_TOKEN\" -F project={repo} -F suite=curl -F junit=@<junit.xml>."
+          },
+          {
+            "key": "done",
+            "label": "Evidencia",
+            "icon": "✓",
+            "instruction": "Genera EVIDENCIA-<ticket>-dev.md en la raíz del repo: Veredicto, Causa/Cadena (archivo:línea), Cambios (archivos, tests), Resultado de suites y cobertura, Curl en DEV por criterio (de {ev}/curl.md), Limpieza pendiente en dev, Pendientes/PRs. Deja {ev}/summary.md con el comentario listo para pegar en el ticket."
+          }
+        ],
+        "verifyAfter": "curl"
+      },
+      "updatedAt": 1787769457455
+    },
+    {
+      "id": "wf-b41400b6f3714d13bb",
+      "name": "hotfix-verificado",
+      "config": {
+        "stages": [
+          {
+            "key": "implementing",
+            "label": "Fix + test",
+            "icon": "🔥",
+            "instruction": "Bug acotado: escribe primero el test que pinnea el comportamiento esperado y confirma que falla; aplica el fix mínimo (cita archivo:línea de la causa); commit fix(scope): … con el ticket. Sin refactors colaterales.",
+            "role": "impl"
+          },
+          {
+            "key": "tests",
+            "label": "Pruebas",
+            "icon": "✅",
+            "instruction": "Corre la suite del servicio afectado (pytest -q --junitxml=reports/junit.xml / vitest run --reporter=junit) y guarda el resumen exacto en {ev}/tests.md."
+          },
+          {
+            "key": "curl",
+            "label": "Curl DEV",
+            "icon": "🌐",
+            "instruction": "`source {cycle}/curl.env`; reproduce el bug por curl contra DEV (antes: falla / después del deploy: pasa) y guarda comando + request + response en {ev}/curl.md."
+          },
+          {
+            "key": "done",
+            "label": "Evidencia",
+            "icon": "✓",
+            "instruction": "EVIDENCIA-<ticket>-dev.md: Veredicto, causa (archivo:línea), fix, test que lo pinnea, curl antes/después, pendientes. {ev}/summary.md listo para el ticket."
+          }
+        ],
+        "verifyAfter": "curl"
+      },
+      "updatedAt": 1787769457456
+    }
+  ]
+}
