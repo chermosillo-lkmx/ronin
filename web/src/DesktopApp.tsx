@@ -211,17 +211,20 @@ function SessionWorkspace({ session, diagnostic, terminalGrid, onRefresh, onNew 
   if (diagnostic) return <div className="ronin-empty-workspace"><span>tmux inaccesible</span><h1>{diagnostic.code}</h1><p>{diagnostic.detail}</p><button className="n-btn n-btn-secondary" onClick={() => void onRefresh()}>Reintentar</button></div>;
   if (!session) return <div className="ronin-empty-workspace"><span>tmux</span><h1>Sin sesión seleccionada</h1><p>Crea una sesión gestionada o selecciona una sesión activa de tmux.</p><button className="n-btn n-btn-primary" onClick={onNew}>Nueva sesión</button></div>;
   const selectedPane = session.panes.find((item) => item.id === pane) ?? session.panes[0] ?? null;
+  // ttyd ya pinta TODOS los panes con el layout real de tmux, así que la vista Terminales es el
+  // mismo iframe a pantalla completa; la rejilla de snapshots queda sólo como respaldo sin ttyd.
   if (terminalGrid) return <div className="ronin-terminals">
     <header className="ronin-view-header">
-      <div><h1>Terminales</h1><p>{session.name} · {session.panes.length} panes · snapshots tmux en vivo</p></div>
+      <div><h1>Terminales</h1><p>{session.name} · {session.panes.length} panes · {terminalUrl ? "tmux en vivo (ttyd)" : "snapshots tmux"}</p></div>
       <button className="n-btn n-btn-secondary" onClick={() => void onRefresh()}>Sincronizar</button>
     </header>
-    {session.panes.length ? <div className="ronin-terminal-grid" data-testid="tmux-pane-grid">
+    {terminalLoading ? <p className="ronin-terminal-note">conectando terminal…</p> : terminalUrl ? <iframe key={`grid-${session.name}`} className="ttyd ronin-session-ttyd" src={terminalUrl} title="terminales" /> : session.panes.length ? <div className="ronin-terminal-grid" data-testid="tmux-pane-grid">
       {session.panes.map((item) => <section className="ronin-terminal-cell" key={item.id}>
         <header><code>{item.id} · win {item.windowIndex}</code><span>{item.role ?? item.command ?? "shell"}</span></header>
         <PaneViewer session={session.name} paneId={item.id} kind={session.kind} className="ronin-pane-view" />
       </section>)}
     </div> : <div className="ronin-empty-workspace"><span>tmux</span><h1>Sin panes disponibles</h1><p>La sesión sigue activa, pero tmux no reporta panes para mostrar.</p></div>}
+    {!terminalLoading && !terminalUrl && terminalError && <p className="ronin-form-error ronin-terminal-note">{terminalError}</p>}
   </div>;
   const fallback = selectedPane ? <PaneViewer session={session.name} paneId={selectedPane.id} kind={session.kind} className="ronin-pane-view" /> : <p>No hay un pane para abrir.</p>;
   const terminal = terminalLoading ? <p>conectando terminal…</p> : terminalUrl ? <iframe key={session.name} className="ttyd ronin-session-ttyd" src={terminalUrl} title="terminal" /> : <>{terminalError && <p className="ronin-form-error">{terminalError === "ttyd no instalado (brew install ttyd)" ? "ttyd no instalado — brew install ttyd" : terminalError}</p>}<header><code>{selectedPane?.id} {selectedPane?.command}</code><span>respaldo de sólo lectura</span></header>{fallback}</>;
