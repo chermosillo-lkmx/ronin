@@ -61,7 +61,7 @@ test("detectDecision: conserva el diálogo al inicio de un pane alto con cola va
   });
 });
 
-test("detectDecision: no anuncia como pregunta el resto suelto de una fila envuelta", () => {
+test("detectDecision: detecta una decisión aunque una captura antigua tenga una fila envuelta", () => {
   const pane = [
     "│ Para probar el AC de `language=en` necesito encender el feature en dev sobre b",
     "u-818. ¿Cómo lo hago?",
@@ -70,9 +70,9 @@ test("detectDecision: no anuncia como pregunta el resto suelto de una fila envue
     "  2. PATCH con JWT M2M",
   ].join("\n");
 
-  // El batch pide capture-pane -J, así que jamás reensamblamos capturas viejas: ante este formato
-  // irrecuperable es más seguro no alertar que publicar su fragmento final como una pregunta real.
-  assert.equal(detectDecision(pane), null);
+  // Sin -J el texto puede salir truncado; -J en buildCaptureArgs es la mitigación real. Aun así,
+  // preferimos alertar con texto imperfecto antes que callar una sesión que está esperando input.
+  assert.notEqual(detectDecision(pane), null);
 });
 
 test("detectDecision: no trunca guiones ni barras normales dentro de una opción", () => {

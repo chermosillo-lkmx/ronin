@@ -42,14 +42,12 @@ export function detectDecision(pane: string): Decision | null {
   if (cursor < 0 && generic < 0) return null;
 
   const pivot = cursor >= 0 ? cursor : generic;
-  const questionIndex = generic >= 0
-    ? generic
-    : lines.findLastIndex((line, index) => index < pivot && /(?:\?|¿.*\?)\s*$/.test(line.trim()));
+  let questionIndex = generic >= 0 ? generic : -1;
+  for (let index = pivot - 1; questionIndex < 0 && index >= 0; index -= 1) {
+    const line = lines[index]!;
+    if (/(?:\?|¿.*\?)\s*$/.test(line.trim())) questionIndex = index;
+  }
   const questionLine = questionIndex >= 0 ? lines[questionIndex] : undefined;
-  // `capture-pane -J` une las filas que tmux envolvió. No reensamblamos capturas antiguas sin
-  // esa opción: si una continuación sigue inmediatamente a una fila de caja, anunciarla sola
-  // produciría una pregunta truncada; es preferible no anunciar decisión alguna.
-  if (questionIndex > 0 && lines[questionIndex - 1]?.includes("│") && !lines[questionIndex - 1]?.trim().endsWith("?")) return null;
   const question = questionLine && cleanDecisionText(questionLine);
   if (!question) return null;
   const options = cursor < 0 ? [] : lines.slice(cursor)
