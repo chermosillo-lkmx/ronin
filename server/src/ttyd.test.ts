@@ -4,6 +4,8 @@ import test from "node:test";
 import { tmuxArgs } from "./tmux.js";
 import { createTtydAvailability, createTtydManager, ttydCommand } from "./ttyd.js";
 
+const alwaysFree = async () => true;
+
 function spawnCapturingArgs(captured: string[][]) {
   return (_command: string, args: readonly string[]) => {
     captured.push([...args]);
@@ -35,6 +37,7 @@ test("startTtyd entrega a ttyd el binario tmux configurado", async () => {
     const manager = createTtydManager({
       hasTtyd: async () => true,
       waitReady: async () => true,
+      reservePort: alwaysFree,
       spawn: spawnCapturingArgs(spawned) as any,
     });
 
@@ -56,6 +59,7 @@ test("startTtyd entrega a ttyd los argumentos del socket tmux configurado", asyn
     const manager = createTtydManager({
       hasTtyd: async () => true,
       waitReady: async () => true,
+      reservePort: alwaysFree,
       spawn: spawnCapturingArgs(spawned) as any,
     });
 
@@ -81,6 +85,7 @@ test("startTtyd conserva el argv de desarrollo sin configuración tmux", async (
     const manager = createTtydManager({
       hasTtyd: async () => true,
       waitReady: async () => true,
+      reservePort: alwaysFree,
       spawn: spawnCapturingArgs(spawned) as any,
     });
 
@@ -103,6 +108,7 @@ test("startTtyd completa LANG y LC_ALL UTF-8 cuando faltan y fuerza tmux -u", as
     const manager = createTtydManager({
       hasTtyd: async () => true,
       waitReady: async () => true,
+      reservePort: alwaysFree,
       spawn: spawnCapturingLaunches(spawned) as any,
     });
 
@@ -127,6 +133,7 @@ test("startTtyd conserva los locales configurados por el usuario", async () => {
     const manager = createTtydManager({
       hasTtyd: async () => true,
       waitReady: async () => true,
+      reservePort: alwaysFree,
       spawn: spawnCapturingLaunches(spawned) as any,
     });
 
@@ -154,6 +161,7 @@ test("COWORK_TTYD_BIN controla tanto la comprobación como el spawn", async () =
     const manager = createTtydManager({
       hasTtyd: available,
       waitReady: async () => true,
+      reservePort: alwaysFree,
       spawn: (command) => {
         spawned.push(command);
         const proc = new EventEmitter();
@@ -174,6 +182,7 @@ test("startTtyd deduplica solicitudes simultáneas de la misma sesión", async (
   const manager = createTtydManager({
     hasTtyd: async () => true,
     waitReady: async () => true,
+    reservePort: alwaysFree,
     spawn: () => {
       spawned++;
       const proc = new EventEmitter();
@@ -187,12 +196,32 @@ test("startTtyd deduplica solicitudes simultáneas de la misma sesión", async (
   assert.equal(spawned, 1);
 });
 
+test("startTtyd reutiliza el ttyd ya vivo de la misma sesión", async () => {
+  let spawned = 0;
+  const manager = createTtydManager({
+    hasTtyd: async () => true,
+    reservePort: alwaysFree,
+    waitReady: async () => true,
+    spawn: () => {
+      spawned++;
+      const proc = new EventEmitter();
+      queueMicrotask(() => proc.emit("spawn"));
+      return proc as any;
+    },
+  });
+
+  assert.equal(await manager.start("reutilizada"), 7781);
+  assert.equal(await manager.start("reutilizada"), 7781);
+  assert.equal(spawned, 1);
+});
+
 test("startTtyd no devuelve el puerto hasta que ttyd acepta conexiones (evita el iframe en blanco)", async () => {
   let release!: (ready: boolean) => void;
   const ready = new Promise<boolean>((resolve) => { release = resolve; });
   const manager = createTtydManager({
     hasTtyd: async () => true,
     waitReady: () => ready,
+    reservePort: alwaysFree,
     spawn: () => { const proc = new EventEmitter(); queueMicrotask(() => proc.emit("spawn")); return proc as any; },
   });
   let settled = false;
@@ -208,10 +237,60 @@ test("startTtyd devuelve null y mata el proceso si el puerto nunca abre", async 
   const manager = createTtydManager({
     hasTtyd: async () => true,
     waitReady: async () => false,
+    reservePort: alwaysFree,
     spawn: () => { const proc = new EventEmitter() as any; proc.kill = () => { killed = true; }; queueMicrotask(() => proc.emit("spawn")); return proc; },
   });
   assert.equal(await manager.start("muerta"), null);
   assert.equal(killed, true);
   // y una segunda llamada vuelve a intentar (no queda un puerto muerto cacheado)
   assert.equal(await manager.start("muerta"), null);
+});
+
+test("startTtyd descarta un puerto que responde si el ttyd propio ya murió", async () => {
+  const spawned: string[][] = [];
+  const manager = createTtydManager({
+    hasTtyd: async () => true,
+    reservePort: alwaysFree,
+    waitReady: async () => true,
+    spawn: (_command, args) => {
+      spawned.push([...args]);
+      const proc = new EventEmitter() as any;
+      proc.exitCode = null;
+      queueMicrotask(() => {
+        proc.emit("spawn");
+        proc.exitCode = 1;
+        proc.emit("exit", 1);
+      });
+      return proc;
+    },
+  });
+
+  assert.equal(await manager.start("no-cruzar-sesiones"), null);
+  assert.equal(spawned.length, 10);
+});
+
+test("startTtyd salta el puerto base ocupado y lanza en el siguiente libre", async () => {
+  const spawned: string[][] = [];
+  const manager = createTtydManager({
+    hasTtyd: async () => true,
+    reservePort: async (port) => port !== 7781,
+    waitReady: async () => true,
+    spawn: spawnCapturingArgs(spawned) as any,
+  });
+
+  assert.equal(await manager.start("puerto-base-ocupado"), 7782);
+  assert.equal(spawned[0][1], "7782");
+});
+
+test("startTtyd devuelve null al agotar los puertos candidatos", async () => {
+  let spawned = 0;
+  const manager = createTtydManager({
+    hasTtyd: async () => true,
+    reservePort: async () => false,
+    waitReady: async () => true,
+    spawn: () => { spawned++; throw new Error("no debe lanzar"); },
+  });
+
+  assert.equal(await manager.start("sin-puertos"), null);
+  assert.equal(spawned, 0);
 });
