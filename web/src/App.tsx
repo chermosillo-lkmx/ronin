@@ -51,6 +51,11 @@ import { SessionsScreen } from "./screens/SessionsScreen";
 import { PreflightScreen } from "./screens/PreflightScreen";
 import { WorkflowEditorScreen } from "./screens/WorkflowEditorScreen";
 import { TestsScreen } from "./screens/TestsScreen";
+import { SkillsContext, SkillsInspector, SkillsWorkspace } from "./components/skills/SkillsWorkspace";
+import { WorkflowContext, WorkflowInspector, WorkflowWorkspace, useWorkflowInsights } from "./components/workflows/WorkflowWorkspace";
+import { NewSessionDialog } from "./components/NewSessionDialog";
+import { APP_VIEWS } from "./app-views";
+export { APP_VIEWS } from "./app-views";
 import { StatusBar } from "./components/StatusBar";
 import { EMOJI_CHOICES, StageEditor } from "./components/StageEditor";
 import { TrustedRootsEditor } from "./components/TrustedRootsEditor";
@@ -2190,7 +2195,11 @@ export function App() {
   const [adhocBusy, setAdhocBusy] = useState(false);
   const [prOpen, setPrOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
-  const [view, setView] = useState<"board" | "settings" | "reports" | "sessions" | "sesiones" | "preflight" | "workflow" | "tests">("board");
+  const [view, setView] = useState<(typeof APP_VIEWS)[number]>("board");
+  const [workflowOverrides, setWorkflowOverrides] = useState(false);
+  const [workflowLaunchOpen, setWorkflowLaunchOpen] = useState(false);
+  const [acceptedWorkflowId, setAcceptedWorkflowId] = useState<string | undefined>();
+  const workflowInsights = useWorkflowInsights();
   const [launchFor, setLaunchFor] = useState<Task | null>(null);
   const [previewTask, setPreviewTask] = useState<Task | null>(null);
   const [actions, setActions] = useState<CustomAction[]>([]);
@@ -2379,6 +2388,9 @@ export function App() {
         <button className="refresh" onClick={() => setView("workflow")} title="editor de workflow (Stepper/Grafo/JSON)">
           🧭
         </button>
+        <button className="refresh" onClick={() => setView("skills")} title="skills locales (SKILL.md)">
+          ▤
+        </button>
         <button className="refresh" onClick={() => setView("tests")} title="pruebas: unit + cobertura por repo (test harness)">
           ⚗
         </button>
@@ -2399,7 +2411,9 @@ export function App() {
       ) : view === "preflight" ? (
         <PreflightScreen />
       ) : view === "workflow" ? (
-        <WorkflowEditorScreen />
+        <div className="nocturne ron-web-shell"><div className="ronin-shell-body"><aside className="ronin-context-list"><WorkflowContext /></aside><main className="ronin-workspace"><div className="ron-web-view-toggle"><button className={!workflowOverrides ? "active" : ""} onClick={() => setWorkflowOverrides(false)}>Catálogo</button><button className={workflowOverrides ? "active" : ""} onClick={() => setWorkflowOverrides(true)}>Overrides por repo</button></div>{workflowOverrides ? <WorkflowEditorScreen /> : <WorkflowWorkspace insights={workflowInsights} selectId={acceptedWorkflowId} onLaunch={() => setWorkflowLaunchOpen(true)} />}</main><aside className="ronin-inspector"><WorkflowInspector insights={workflowInsights} onAccepted={setAcceptedWorkflowId} /></aside></div>{workflowLaunchOpen && <NewSessionDialog onClose={() => setWorkflowLaunchOpen(false)} onCreated={() => setWorkflowLaunchOpen(false)} />}</div>
+      ) : view === "skills" ? (
+        <div className="nocturne ron-web-shell"><div className="ronin-shell-body"><aside className="ronin-context-list"><SkillsContext /></aside><main className="ronin-workspace"><SkillsWorkspace /></main><aside className="ronin-inspector"><SkillsInspector /></aside></div></div>
       ) : view === "tests" ? (
         <TestsScreen />
       ) : (

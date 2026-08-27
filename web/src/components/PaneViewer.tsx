@@ -1,9 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Terminal } from "xterm";
-import "xterm/css/xterm.css";
 import { capturePane, sendPaneKeys } from "../api";
 import { createPaneTerminal } from "./pane-terminal";
-import "./NativeTerminal.css";
 
 export interface PaneViewerProps {
   session: string;

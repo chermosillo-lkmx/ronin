@@ -1,5 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import "xterm/css/xterm.css";
+import "./components/NativeTerminal.css";
 import { App } from "./App";
 import { DesktopApp } from "./DesktopApp";
 // Orden deliberado y no reordenable: tokens de Nocturne primero; styles.css después (define sus

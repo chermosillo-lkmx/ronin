@@ -52,6 +52,10 @@
 .ron-row-meta { font-size: 11px; color: var(--color-neutral-500); }
 
 .ron-main { flex: 1; min-width: 0; padding: var(--space-4); overflow: auto; }
+.ron-web-shell { height: calc(100vh - 58px); min-height: 520px; display: flex; flex-direction: column; overflow: hidden; }
+.ron-web-view-toggle { display: flex; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--color-divider); background: var(--color-surface); }
+.ron-web-view-toggle button { border: 1px solid var(--color-divider); border-radius: 4px; padding: 4px 8px; color: var(--color-neutral-400); background: transparent; cursor: pointer; font: inherit; }
+.ron-web-view-toggle button.active { color: var(--color-accent-200); background: var(--color-accent-900); border-color: var(--color-accent-600); }
 .ron-msg { color: var(--color-neutral-500); }
 .ron-msg.err { color: var(--status-fail); }
 .ron-msg.ok { color: var(--status-ok); }
