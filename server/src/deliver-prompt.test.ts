@@ -14,6 +14,7 @@ function deps(captures: Array<string | null>): PromptDeliveryDeps & { calls: str
     pastePrompt: async (_session, text) => { calls.push(`paste:${Buffer.byteLength(text)}`); },
     sendKeys: async () => { calls.push("enter"); },
     sleep: async () => { calls.push("wait"); },
+    log: (message) => { calls.push(`log:${message}`); },
   };
 }
 
@@ -33,6 +34,14 @@ test("deliverPromptWhenReady: espera una señal de TUI antes de entregar", async
   const d = deps(["", "shell$ ", "Claude Code\n❯ ", "Claude Code\n❯ "]);
   await deliverPromptWhenReady("cowork-a", "corto", d);
   assert.deepEqual(d.calls, ["wait", "wait", "text:5"]);
+});
+
+test("deliverPromptWhenReady: no entrega texto a un pane que nunca prueba tener la CLI viva", async () => {
+  const d = deps(["zsh: command not found: claude", "shell$ "]);
+  await deliverPromptWhenReady("cowork-a", "$(touch /tmp/no-debe-ejecutarse)", d);
+
+  assert.equal(d.calls.some((call) => call.startsWith("text:") || call.startsWith("paste:")), false);
+  assert.ok(d.calls.includes("log:COWORK_PROMPT_NOT_DELIVERED_NO_CLI:cowork-a"));
 });
 
 test("deliverPromptWhenReady: reintenta Enter de forma acotada mientras queda paste pendiente", async () => {

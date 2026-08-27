@@ -16,6 +16,7 @@ export interface PromptDeliveryDeps {
   pastePrompt: typeof pastePrompt;
   sendKeys: typeof sendKeys;
   sleep: (ms: number) => Promise<void>;
+  log: (message: string) => void;
 }
 
 const TUI_READY_ATTEMPTS = 10;
@@ -25,18 +26,28 @@ const PENDING_ENTER_ATTEMPTS = 2;
 const defaultPromptDeliveryDeps: PromptDeliveryDeps = {
   capturePaneSafe, claudeAlive, isBusy, promptPending, sendText, pastePrompt, sendKeys,
   sleep: async (ms) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); },
+  log: (message) => console.warn(`[claude-cowork] ${message}`),
 };
 
 /**
  * Espera la primera señal de Claude antes de escribir. El timeout es deliberado: un banner que
- * cambie no puede bloquear la creación de una sesión para siempre; tras agotarlo se entrega y la
- * ruta de paste todavía verifica el Enter compuesto de forma acotada.
+ * cambie no puede bloquear la creación de una sesión para siempre. Si no aparece una señal de
+ * CLI, se deja el motivo al operador y no se escribe: el peor caso es que el worker requiera el
+ * botón del operador; entregar a ciegas puede ejecutar texto arbitrario dentro de un shell.
  */
 export async function deliverPromptWhenReady(session: string, prompt: string, deps: PromptDeliveryDeps = defaultPromptDeliveryDeps): Promise<void> {
+  let cliReady = false;
   for (let attempt = 0; attempt < TUI_READY_ATTEMPTS; attempt++) {
     const pane = await deps.capturePaneSafe(session);
-    if (pane !== null && (deps.claudeAlive(pane) || deps.isBusy(pane))) break;
+    if (pane !== null && (deps.claudeAlive(pane) || deps.isBusy(pane))) {
+      cliReady = true;
+      break;
+    }
     await deps.sleep(TUI_READY_INTERVAL_MS);
+  }
+  if (!cliReady) {
+    deps.log(`COWORK_PROMPT_NOT_DELIVERED_NO_CLI:${session}`);
+    return;
   }
 
   if (Buffer.byteLength(prompt, "utf8") > PASTE_THRESHOLD_BYTES) await deps.pastePrompt(session, prompt, true);

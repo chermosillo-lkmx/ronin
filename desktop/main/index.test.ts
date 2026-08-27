@@ -28,6 +28,24 @@ test("propagates the resolved tmux binary to the backend environment", () => {
   });
 });
 
+test("propaga el PATH resuelto al entorno del backend", () => {
+  const env = backendEnvironment(
+    { PATH: "/usr/bin:/bin" },
+    { resolvedPath: "/Users/ronin/.local/bin:/usr/bin:/bin" },
+  );
+
+  assert.equal(env.PATH, "/Users/ronin/.local/bin:/usr/bin:/bin");
+});
+
+test("COWORK_PATH preserva exactamente la escotilla del operador", () => {
+  const env = backendEnvironment(
+    { PATH: "/usr/bin:/bin", COWORK_PATH: "/custom/only" },
+    { resolvedPath: "/Users/ronin/.local/bin:/usr/bin:/bin" },
+  );
+
+  assert.equal(env.PATH, "/custom/only");
+});
+
 test("propaga el binario ttyd resuelto al entorno del backend", () => {
   const env = backendEnvironment(
     { PATH: "/usr/bin:/bin" },
@@ -51,7 +69,7 @@ test("desktop tooling exposes the focused Electron test command", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
   assert.equal(
     packageJson.scripts?.["test:desktop"],
-    "node --import tsx --test desktop/main/backend-supervisor.test.ts desktop/main/renderer-readiness.test.ts desktop/main/window-security.test.ts desktop/main/pty.test.ts desktop/main/ipc.test.ts desktop/main/session-name.test.ts desktop/main/capability-path.test.ts desktop/main/smoke.test.ts desktop/main/bootstrap.test.ts desktop/main/app-protocol.test.ts desktop/main/tmux-path.test.ts desktop/main/ttyd-path.test.ts desktop/main/index.test.ts desktop/preload/index.test.ts desktop/test/electron-launcher.test.mjs",
+    "env -u TMUX node --import tsx --test desktop/main/backend-supervisor.test.ts desktop/main/renderer-readiness.test.ts desktop/main/window-security.test.ts desktop/main/pty.test.ts desktop/main/ipc.test.ts desktop/main/session-name.test.ts desktop/main/capability-path.test.ts desktop/main/smoke.test.ts desktop/main/bootstrap.test.ts desktop/main/app-protocol.test.ts desktop/main/tmux-path.test.ts desktop/main/ttyd-path.test.ts desktop/main/login-path.test.ts desktop/main/index.test.ts desktop/preload/index.test.ts desktop/test/electron-launcher.test.mjs",
   );
 });
 

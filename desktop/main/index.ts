@@ -5,6 +5,7 @@ import { resolveCapabilityFile } from "./capability-path.js";
 import { createBackendSupervisor } from "./backend-supervisor.js";
 import { createPtyManager } from "./pty.js";
 import { runSmoke } from "./smoke.js";
+import { resolveLoginPath } from "./login-path.js";
 import { resolveBinary, resolveTmuxBinary } from "./tmux-path.js";
 
 export interface MainApp {
@@ -33,9 +34,11 @@ export function resolveDesktopRoot(appPath: string | undefined, cwd: string): st
 
 export function backendEnvironment(
   base: NodeJS.ProcessEnv,
-  options: { tmuxBinary?: string; ttydBinary?: string; dataDir?: string; tmuxSocket?: string },
+  options: { tmuxBinary?: string; ttydBinary?: string; dataDir?: string; tmuxSocket?: string; resolvedPath?: string },
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
+  if (base.COWORK_PATH !== undefined) env.PATH = base.COWORK_PATH;
+  else if (options.resolvedPath !== undefined) env.PATH = options.resolvedPath;
   if (options.dataDir) env.COWORK_DATA_DIR = options.dataDir;
   if (options.tmuxBinary) env.COWORK_TMUX_BIN = options.tmuxBinary;
   if (options.ttydBinary) env.COWORK_TTYD_BIN = options.ttydBinary;
@@ -119,14 +122,16 @@ if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { typ
   // invocó — a diferencia de un `spawn` directo. Por eso el socket aislado del E2E viaja
   // como ARGUMENTO de CLI (mismo patrón que `--smoke-result=`), nunca como env var que
   // `run-electron-smoke.mjs` pondría en su propio `process.env` esperando que "se herede".
-  const tmuxSocketArg = process.argv.find((argument) => argument.startsWith("--tmux-socket="));
-  const tmuxSocket = tmuxSocketArg?.slice("--tmux-socket=".length);
-  const tmuxBinary = resolveTmuxBinary({ env: process.env });
-  const ttydBinary = resolveBinary({ binary: "ttyd", environmentVariable: "COWORK_TTYD_BIN", env: process.env });
-  const desktopDataDir = electron.app.isPackaged && electron.app.getPath && !process.env.COWORK_DATA_DIR
-    ? join(electron.app.getPath("userData"), "data")
-    : undefined;
-  const dependencies: MainDependencies = {
+  void (async () => {
+    const resolvedPath = await resolveLoginPath({ env: process.env });
+    const tmuxSocketArg = process.argv.find((argument) => argument.startsWith("--tmux-socket="));
+    const tmuxSocket = tmuxSocketArg?.slice("--tmux-socket=".length);
+    const tmuxBinary = resolveTmuxBinary({ env: process.env });
+    const ttydBinary = resolveBinary({ binary: "ttyd", environmentVariable: "COWORK_TTYD_BIN", env: process.env });
+    const desktopDataDir = electron.app.isPackaged && electron.app.getPath && !process.env.COWORK_DATA_DIR
+      ? join(electron.app.getPath("userData"), "data")
+      : undefined;
+    const dependencies: MainDependencies = {
     app: electron.app,
     protocol: electron.protocol,
     ipcMain: electron.ipcMain,
@@ -135,7 +140,7 @@ if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { typ
     createSupervisor: (onExit) => createBackendSupervisor({
       fork: electron.utilityProcess.fork,
       entry: join(root, "server", "dist", "server-entry.js"),
-      env: backendEnvironment(process.env, { tmuxBinary, ttydBinary, dataDir: desktopDataDir, tmuxSocket }),
+      env: backendEnvironment(process.env, { tmuxBinary, ttydBinary, dataDir: desktopDataDir, tmuxSocket, resolvedPath }),
       onExit,
     }),
     shell: electron.shell,
@@ -150,8 +155,9 @@ if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { typ
       dataDirOverride: process.env.COWORK_DATA_DIR,
     }),
     runSmoke: (desktopDeps, options) => runSmoke(desktopDeps, { exit: (code) => electron.app.exit?.(code), ...options }),
-  };
-  void startMain(dependencies).catch((error) => {
+    };
+    await startMain(dependencies);
+  })().catch((error) => {
     const resultArg = process.argv.find((argument) => argument.startsWith("--smoke-result="));
     if (resultArg) {
       try {
