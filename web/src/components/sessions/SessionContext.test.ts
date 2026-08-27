@@ -12,6 +12,9 @@ const decision: TmuxSessionInfo = {
   name: "cowork-decision", kind: "managed", windows: 1, panes: [], createdAt: 0, attached: false, adopted: false,
   attention: { level: "decision", paneId: "%2", question: "Do you want to make this edit to sessions.ts?", since: 0 },
 };
+const working: TmuxSessionInfo = {
+  ...idle, name: "cowork-working", attention: { level: "working", paneId: "%3", since: 0 },
+};
 
 test("SessionContext: pinta decisión primero, con badge, pregunta y contador", () => {
   const html = renderToString(createElement(SessionContext, {
@@ -23,4 +26,14 @@ test("SessionContext: pinta decisión primero, con badge, pregunta y contador", 
   assert.match(html, /2 sesiones · 1 esperan decisión/);
   assert.ok(html.indexOf("cowork-decision") < html.indexOf("cowork-idle"));
   assert.match(html, /attn-decision/);
+});
+
+test("SessionContext: reserva el badge ámbar para sesiones que esperan decisión", () => {
+  const html = renderToString(createElement(SessionContext, {
+    sessions: [idle, working, decision], selected: null, filter: "", diagnostic: null,
+    onFilter: () => {}, onSelect: () => {}, onEditPresentation: () => {}, onNew: () => {},
+  }));
+  assert.match(html, /<b class="ronin-attention-badge">⚠ decisión<\/b>/);
+  assert.doesNotMatch(html, /cowork-idle<\/code><b class="ronin-attention-badge">/);
+  assert.doesNotMatch(html, /cowork-working<\/code><b class="ronin-attention-badge">/);
 });
