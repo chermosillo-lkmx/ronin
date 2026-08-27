@@ -1,6 +1,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { connect } from "node:net";
 import { promisify } from "node:util";
+import { tmuxArgs, tmuxCommand } from "./tmux.js";
 
 /**
  * One ttyd process per tmux session, serving a writable web terminal bound to
@@ -65,7 +66,7 @@ export function createTtydManager(deps: { hasTtyd?: () => Promise<boolean>; spaw
       const port = nextPort++;
       const proc = launch(
         ttydCommand(),
-        ["-p", String(port), "-i", "127.0.0.1", "-W", "-t", "fontSize=13", "tmux", "attach", "-t", session],
+        ["-p", String(port), "-i", "127.0.0.1", "-W", "-t", "fontSize=13", tmuxCommand(), ...tmuxArgs("attach", "-t", session)],
         { stdio: "ignore" }
       );
       const spawned = await new Promise<boolean>((resolve) => {
