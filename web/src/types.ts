@@ -128,6 +128,15 @@ export interface SessionPresentation {
   repo: string | null;
 }
 
+export type AttentionLevel = "decision" | "working" | "idle" | "shell" | "gone";
+
+export interface SessionAttention {
+  level: AttentionLevel;
+  paneId?: string;
+  question?: string;
+  since?: number;
+}
+
 export interface TmuxSessionInfo {
   name: string;
   kind: "managed" | "foreign";
@@ -138,6 +147,7 @@ export interface TmuxSessionInfo {
   adopted: boolean; // derivado de @cowork-adopted en el inventario (T3)
   presentation?: SessionPresentation;
   request?: string;
+  attention?: SessionAttention;
 }
 
 export type CheckLevel = "ok" | "warn" | "fail";
