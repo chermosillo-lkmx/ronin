@@ -50,7 +50,7 @@ export function shouldStartElectronMain(versions: { electron?: string }, process
   return Boolean(versions.electron) && (processType === undefined || processType === "browser");
 }
 
-let schemeRegistered = false;
+const schemeRegistered = new WeakSet<SchemeProtocol>();
 
 export function registerAppScheme(protocol: SchemeProtocol): void {
   protocol.registerSchemesAsPrivileged([{
@@ -59,11 +59,14 @@ export function registerAppScheme(protocol: SchemeProtocol): void {
   }]);
 }
 
+function ensureAppSchemeRegistered(protocol: SchemeProtocol): void {
+  if (schemeRegistered.has(protocol)) return;
+  registerAppScheme(protocol);
+  schemeRegistered.add(protocol);
+}
+
 export async function startMain(deps: MainDependencies, argv: string[] = process.argv): Promise<DesktopController | void> {
-  if (!schemeRegistered) {
-    registerAppScheme(deps.protocol);
-    schemeRegistered = true;
-  }
+  ensureAppSchemeRegistered(deps.protocol);
   await deps.app.whenReady();
   const desktopDeps: DesktopDependencies = {
     protocol: deps.protocol,
@@ -99,16 +102,27 @@ export async function startMain(deps: MainDependencies, argv: string[] = process
   return controller;
 }
 
-if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { type?: string }).type)) {
-  const electron = require("electron") as unknown as {
-    app: MainApp;
-    protocol: MainDependencies["protocol"];
-    ipcMain: any;
-    BrowserWindow: new (options: Parameters<DesktopDependencies["createWindow"]>[0]) => DesktopDependencies extends { createWindow: (...args: infer Args) => infer Result } ? Result : never;
-    utilityProcess: { fork(entry: string, options: { stdio: "pipe"; env: NodeJS.ProcessEnv }): ReturnType<typeof createBackendSupervisor> extends { [key: string]: unknown } ? any : never };
-    shell: DesktopDependencies["shell"];
-    net: { fetch(url: string, options?: Record<string, unknown>): Promise<Response> };
-  };
+export interface ElectronMain {
+  app: MainApp;
+  protocol: MainDependencies["protocol"];
+  ipcMain: any;
+  BrowserWindow: new (options: Parameters<DesktopDependencies["createWindow"]>[0]) => DesktopDependencies extends { createWindow: (...args: infer Args) => infer Result } ? Result : never;
+  utilityProcess: { fork(entry: string, options: { stdio: "pipe"; env: NodeJS.ProcessEnv }): ReturnType<typeof createBackendSupervisor> extends { [key: string]: unknown } ? any : never };
+  shell: DesktopDependencies["shell"];
+  net: { fetch(url: string, options?: Record<string, unknown>): Promise<Response> };
+}
+
+export interface ElectronEntryOptions {
+  argv?: string[];
+  env?: NodeJS.ProcessEnv;
+}
+
+export function startElectronEntry(electron: ElectronMain, options: ElectronEntryOptions = {}): Promise<void> {
+  // Electron exige este registro durante la evaluación síncrona; retrasarlo deja la app empaquetada sin ventana.
+  ensureAppSchemeRegistered(electron.protocol);
+
+  const argv = options.argv ?? process.argv;
+  const env = options.env ?? process.env;
   const root = electron.app.isPackaged
     ? resolveDesktopRoot(electron.app.getAppPath?.(), process.cwd())
     : join(__dirname, "..", "..", "..");
@@ -122,13 +136,13 @@ if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { typ
   // invocó — a diferencia de un `spawn` directo. Por eso el socket aislado del E2E viaja
   // como ARGUMENTO de CLI (mismo patrón que `--smoke-result=`), nunca como env var que
   // `run-electron-smoke.mjs` pondría en su propio `process.env` esperando que "se herede".
-  void (async () => {
-    const resolvedPath = await resolveLoginPath({ env: process.env });
-    const tmuxSocketArg = process.argv.find((argument) => argument.startsWith("--tmux-socket="));
+  return (async () => {
+    const resolvedPath = await resolveLoginPath({ env });
+    const tmuxSocketArg = argv.find((argument) => argument.startsWith("--tmux-socket="));
     const tmuxSocket = tmuxSocketArg?.slice("--tmux-socket=".length);
-    const tmuxBinary = resolveTmuxBinary({ env: process.env });
-    const ttydBinary = resolveBinary({ binary: "ttyd", environmentVariable: "COWORK_TTYD_BIN", env: process.env });
-    const desktopDataDir = electron.app.isPackaged && electron.app.getPath && !process.env.COWORK_DATA_DIR
+    const tmuxBinary = resolveTmuxBinary({ env });
+    const ttydBinary = resolveBinary({ binary: "ttyd", environmentVariable: "COWORK_TTYD_BIN", env });
+    const desktopDataDir = electron.app.isPackaged && electron.app.getPath && !env.COWORK_DATA_DIR
       ? join(electron.app.getPath("userData"), "data")
       : undefined;
     const dependencies: MainDependencies = {
@@ -140,7 +154,7 @@ if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { typ
     createSupervisor: (onExit) => createBackendSupervisor({
       fork: electron.utilityProcess.fork,
       entry: join(root, "server", "dist", "server-entry.js"),
-      env: backendEnvironment(process.env, { tmuxBinary, ttydBinary, dataDir: desktopDataDir, tmuxSocket, resolvedPath }),
+      env: backendEnvironment(env, { tmuxBinary, ttydBinary, dataDir: desktopDataDir, tmuxSocket, resolvedPath }),
       onExit,
     }),
     shell: electron.shell,
@@ -152,13 +166,15 @@ if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { typ
       root,
       isPackaged: electron.app.isPackaged === true,
       userDataPath: electron.app.isPackaged && electron.app.getPath ? electron.app.getPath("userData") : undefined,
-      dataDirOverride: process.env.COWORK_DATA_DIR,
+      dataDirOverride: env.COWORK_DATA_DIR,
     }),
     runSmoke: (desktopDeps, options) => runSmoke(desktopDeps, { exit: (code) => electron.app.exit?.(code), ...options }),
     };
-    await startMain(dependencies);
+    await startMain(dependencies, argv);
   })().catch((error) => {
-    const resultArg = process.argv.find((argument) => argument.startsWith("--smoke-result="));
+    // Sin --smoke-result el error antes era invisible y convertía una excepción de arranque en pantalla negra.
+    console.error(error);
+    const resultArg = argv.find((argument) => argument.startsWith("--smoke-result="));
     if (resultArg) {
       try {
         writeFileSync(resultArg.slice("--smoke-result=".length), JSON.stringify({ status: "fail", error: error instanceof Error ? error.message : String(error) }), "utf8");
@@ -168,4 +184,9 @@ if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { typ
     }
     process.exitCode = 1;
   });
+}
+
+if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { type?: string }).type)) {
+  const electron = require("electron") as unknown as ElectronMain;
+  void startElectronEntry(electron);
 }

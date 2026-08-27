@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { backendEnvironment, resolveDesktopRoot, shouldStartElectronMain, startMain } from "./index.js";
+import { backendEnvironment, resolveDesktopRoot, shouldStartElectronMain, startElectronEntry, startMain } from "./index.js";
 
 test("detects Electron's browser main process even when require.main is Electron", () => {
   assert.equal(shouldStartElectronMain({ electron: "43.2.0" }, "browser"), true);
@@ -145,4 +145,39 @@ test("startMain closes the backend before allowing the application to quit", asy
 
   assert.equal(event.prevented, true);
   assert.deepEqual(events, ["handle:app", "backend", "load", "close", "destroy", "quit"]);
+});
+
+test("la entrada de Electron registra app antes de ceder al arranque asíncrono", () => {
+  let registrations = 0;
+  const ready = new Promise<void>(() => {});
+
+  const starting = startElectronEntry({
+    app: { whenReady: () => ready, quit: () => {}, isPackaged: false },
+    protocol: { registerSchemesAsPrivileged: () => { registrations++; }, handle: () => {} },
+    ipcMain: {}, BrowserWindow: class {}, utilityProcess: { fork: () => {} }, shell: { openExternal: () => {} }, net: { fetch: async () => new Response("ok") },
+  }, { env: { COWORK_PATH: "/test" } });
+
+  assert.equal(registrations, 1);
+  void starting;
+});
+
+test("la entrada de Electron informa por stderr si el arranque asíncrono falla", async () => {
+  const previousExitCode = process.exitCode;
+  const originalError = console.error;
+  const errors: unknown[][] = [];
+  process.exitCode = undefined;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    await startElectronEntry({
+      app: { whenReady: async () => { throw new Error("arranque roto"); }, quit: () => {}, isPackaged: false },
+      protocol: { registerSchemesAsPrivileged: () => {}, handle: () => {} },
+      ipcMain: {}, BrowserWindow: class {}, utilityProcess: { fork: () => {} }, shell: { openExternal: () => {} }, net: { fetch: async () => new Response("ok") },
+    }, { env: { COWORK_PATH: "/test" } });
+
+    assert.equal(process.exitCode, 1);
+    assert.match(String(errors[0]?.[0]), /arranque roto/);
+  } finally {
+    console.error = originalError;
+    process.exitCode = previousExitCode;
+  }
 });
