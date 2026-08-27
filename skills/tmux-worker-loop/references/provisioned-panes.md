@@ -183,8 +183,9 @@ Relay findings prefixed `REVIEW:` in both cases — that prefix is what the role
 
 ## Notes
 
-- One ttyd renders all four panes, and tmux `mouse` is on: the operator can click any pane and type
-  into it directly. Assume a human may interject at any time.
+- The layout commands in `SKILL.md` enable tmux `mouse`, `window-size latest`, and `history-limit
+  50000` for the session. One ttyd renders all four panes, so the operator can click any pane and
+  type into it directly. Assume a human may interject at any time.
 - Ronin kills the whole session on Stop, so all four panes die together. You don't need to clean up.
 - If a pane dies, the remaining `%N` ids stay valid. Restart the tool in that pane (`start_pane`)
   rather than re-splitting — Ronin expects exactly four panes with their slot options set. Note that

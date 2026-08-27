@@ -64,10 +64,17 @@ export function createTtydManager(deps: { hasTtyd?: () => Promise<boolean>; spaw
         return null;
       }
       const port = nextPort++;
+      // Cinturón y tirantes: `tmux -u` no arregla los programas dentro del pane, por eso también
+      // pasamos locale; a su vez `-u` cubre clientes tmux antiguos que no detectan UTF-8 por locale.
+      const env = {
+        ...process.env,
+        LANG: process.env.LANG ?? "en_US.UTF-8",
+        LC_ALL: process.env.LC_ALL ?? "en_US.UTF-8",
+      };
       const proc = launch(
         ttydCommand(),
-        ["-p", String(port), "-i", "127.0.0.1", "-W", "-t", "fontSize=13", tmuxCommand(), ...tmuxArgs("attach", "-t", session)],
-        { stdio: "ignore" }
+        ["-p", String(port), "-i", "127.0.0.1", "-W", "-t", "fontSize=13", tmuxCommand(), "-u", ...tmuxArgs("attach", "-t", session)],
+        { stdio: "ignore", env }
       );
       const spawned = await new Promise<boolean>((resolve) => {
         proc.once("spawn", () => resolve(true));

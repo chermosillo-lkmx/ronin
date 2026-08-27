@@ -139,6 +139,7 @@ export async function hasSession(name: string): Promise<boolean> {
 export async function createSession(name: string, cwd: string, startCmd: string = CLAUDE_CMD): Promise<void> {
   const command = `${startCmd}; exec $SHELL -l`;
   await pexec("tmux", tmuxArgs("new-session", "-d", "-s", name, "-c", cwd, command));
+  await applyBaseSessionOptions(name);
 }
 
 /** Type literal text into the pane; optionally submit with Enter. */
@@ -377,6 +378,15 @@ async function tmuxOptional(args: string[]): Promise<void> {
   }
 }
 
+/** Base compartida para toda sesión creada por Ronin; fallar aquí nunca cancela su creación. */
+async function applyBaseSessionOptions(session: string): Promise<void> {
+  // `mouse` es opción de sesión (no de ventana); 50000 conserva scrollback suficiente para el operador.
+  await tmuxOptional(["set-option", "-t", session, "mouse", "on"]);
+  // Dos clientes ttyd hacen que tmux dimensione al más chico; "latest" deja mandar al más reciente.
+  await tmuxOptional(["set-option", "-t", session, "window-size", "latest"]);
+  await tmuxOptional(["set-option", "-t", session, "history-limit", "50000"]);
+}
+
 /**
  * Crea la sesión driver: UNA ventana con 4 panes en 2×2 (driver|worker / review|verify),
  * mouse on, y cada pane etiquetado con su rol. Devuelve los pane_id (%N) por rol.
@@ -400,6 +410,7 @@ export async function createDriverWindow(
     "new-session", "-d", "-s", session, "-n", "driver",
     "-c", cwd, "-x", DRIVER_COLS, "-y", DRIVER_ROWS, command,
   ));
+  await applyBaseSessionOptions(session);
 
   // El pane inicial de una sesión recién creada es determinístico; se lee su %N para no
   // depender nunca de índices (que tmux renumera al morir un pane).
@@ -428,12 +439,7 @@ export async function createDriverWindow(
     await tmuxOptional(["select-pane", "-t", panes[role], "-T", role]);
   }
 
-  // `mouse` es opción de SESIÓN (no de ventana): con -w se fijaría en la tabla equivocada.
-  await tmuxOptional(["set-option", "-t", session, "mouse", "on"]);
   await tmuxOptional(["set-option", "-t", session, "pane-border-status", "top"]);
-  // Dos clientes ttyd (Board + Sessions) harían que tmux dimensione al MÁS CHICO, recreando
-  // el problema de panes angostos; "latest" hace que mande el cliente más reciente.
-  await tmuxOptional(["set-option", "-t", session, "window-size", "latest"]);
 
   // Tras los splits el pane ACTIVO es el último partido (verify). Sin esto, cualquier `-t
   // <session>` — incluido el fallback de sendWhenReady — escribiría en el pane equivocado.

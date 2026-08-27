@@ -118,6 +118,9 @@ brain=$(tmux    split-window -h -c "$cwd" -t "$win" -P -F '#{pane_id}')
 reviewer=$(tmux split-window -v -c "$cwd" -t "$win" -P -F '#{pane_id}')
 impl=$(tmux     split-window -v -c "$cwd" -t "$brain" -P -F '#{pane_id}')
 tmux select-layout -t "$win" tiled
+tmux set-option -t "$win" mouse on
+tmux set-option -t "$win" window-size latest
+tmux set-option -t "$win" history-limit 50000
 
 # HARD GATE: exactly 4 panes, 4 distinct ids, none empty.
 n=$(tmux list-panes -t "$win" | wc -l | tr -d ' ')

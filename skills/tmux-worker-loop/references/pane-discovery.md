@@ -44,6 +44,9 @@ else
 EOF
   session="liebre-worker-$(date +%s)"
   tmux new-session -d -s "$session" -c "$cwd" -x 220 -y 50
+  tmux set-option -t "$session" mouse on
+  tmux set-option -t "$session" window-size latest
+  tmux set-option -t "$session" history-limit 50000
   sib="$session:0.0"
   if command -v osascript >/dev/null 2>&1; then
     if pgrep -x iTerm2 >/dev/null 2>&1 || pgrep -x iTerm >/dev/null 2>&1; then

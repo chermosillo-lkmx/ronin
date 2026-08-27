@@ -7,6 +7,7 @@ import {
   capturePaneAnsi,
   classifyTmuxInventoryError,
   clearAdoptedMark,
+  createDriverWindow,
   createSession,
   listSessionPaneIds,
   readAdoptedMark,
@@ -163,6 +164,26 @@ test("setAdoptedMark/readAdoptedMark/clearAdoptedMark: escriben, releen y borran
 test("setAdoptedMark: sobre una sesión inexistente LANZA (no traga) — el llamador necesita saberlo para el rollback", async () => {
   await withIsolatedSocket(async () => {
     await assert.rejects(() => setAdoptedMark("no-existe-esta-sesion", "v1|monorepo|%0|1700000000"));
+  });
+});
+
+test("createSession aplica las opciones base de scroll e historial", async () => {
+  await withIsolatedSocket(async (socket) => {
+    await createSession("cowork-base-session-test", "/tmp", "true");
+    const options = await Promise.all(["mouse", "window-size", "history-limit"].map(async (option) => (
+      await pexec("tmux", ["-L", socket, "show-options", "-t", "cowork-base-session-test", option], { env: envWithoutTmux() })).stdout.trim()
+    ));
+    assert.deepEqual(options, ["mouse on", "window-size latest", "history-limit 50000"]);
+  });
+});
+
+test("createDriverWindow recibe las mismas opciones base una sola vez", async () => {
+  await withIsolatedSocket(async (socket) => {
+    await createDriverWindow("cowork-base-driver-test", "/tmp", "true");
+    const options = await Promise.all(["mouse", "window-size", "history-limit"].map(async (option) => (
+      await pexec("tmux", ["-L", socket, "show-options", "-t", "cowork-base-driver-test", option], { env: envWithoutTmux() })).stdout.trim()
+    ));
+    assert.deepEqual(options, ["mouse on", "window-size latest", "history-limit 50000"]);
   });
 });
 

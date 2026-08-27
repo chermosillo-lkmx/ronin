@@ -13,6 +13,15 @@ function spawnCapturingArgs(captured: string[][]) {
   };
 }
 
+function spawnCapturingLaunches(captured: Array<{ args: string[]; options: { env?: NodeJS.ProcessEnv } | undefined }>) {
+  return (_command: string, args: readonly string[], options?: { env?: NodeJS.ProcessEnv }) => {
+    captured.push({ args: [...args], options });
+    const proc = new EventEmitter();
+    queueMicrotask(() => proc.emit("spawn"));
+    return proc as any;
+  };
+}
+
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
@@ -77,10 +86,57 @@ test("startTtyd conserva el argv de desarrollo sin configuración tmux", async (
 
     await manager.start(session);
 
-    assert.deepEqual(spawned, [["-p", "7781", "-i", "127.0.0.1", "-W", "-t", "fontSize=13", "tmux", "attach", "-t", session]]);
+    assert.deepEqual(spawned, [["-p", "7781", "-i", "127.0.0.1", "-W", "-t", "fontSize=13", "tmux", "-u", "attach", "-t", session]]);
   } finally {
     restoreEnv("COWORK_TMUX_BIN", previousBin);
     restoreEnv("COWORK_TMUX_SOCKET", previousSocket);
+  }
+});
+
+test("startTtyd completa LANG y LC_ALL UTF-8 cuando faltan y fuerza tmux -u", async () => {
+  const previousLang = process.env.LANG;
+  const previousLcAll = process.env.LC_ALL;
+  delete process.env.LANG;
+  delete process.env.LC_ALL;
+  try {
+    const spawned: Array<{ args: string[]; options: { env?: NodeJS.ProcessEnv } | undefined }> = [];
+    const manager = createTtydManager({
+      hasTtyd: async () => true,
+      waitReady: async () => true,
+      spawn: spawnCapturingLaunches(spawned) as any,
+    });
+
+    await manager.start("locale-ausente");
+
+    assert.equal(spawned[0].options?.env?.LANG, "en_US.UTF-8");
+    assert.equal(spawned[0].options?.env?.LC_ALL, "en_US.UTF-8");
+    assert.deepEqual(spawned[0].args.slice(-5), ["tmux", "-u", "attach", "-t", "locale-ausente"]);
+  } finally {
+    restoreEnv("LANG", previousLang);
+    restoreEnv("LC_ALL", previousLcAll);
+  }
+});
+
+test("startTtyd conserva los locales configurados por el usuario", async () => {
+  const previousLang = process.env.LANG;
+  const previousLcAll = process.env.LC_ALL;
+  process.env.LANG = "es_MX.UTF-8";
+  process.env.LC_ALL = "fr_FR.UTF-8";
+  try {
+    const spawned: Array<{ args: string[]; options: { env?: NodeJS.ProcessEnv } | undefined }> = [];
+    const manager = createTtydManager({
+      hasTtyd: async () => true,
+      waitReady: async () => true,
+      spawn: spawnCapturingLaunches(spawned) as any,
+    });
+
+    await manager.start("locale-configurado");
+
+    assert.equal(spawned[0].options?.env?.LANG, "es_MX.UTF-8");
+    assert.equal(spawned[0].options?.env?.LC_ALL, "fr_FR.UTF-8");
+  } finally {
+    restoreEnv("LANG", previousLang);
+    restoreEnv("LC_ALL", previousLcAll);
   }
 });
 
