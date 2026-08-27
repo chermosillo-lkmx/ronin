@@ -47,6 +47,34 @@ test("detectDecision: limpia el marco de una AskUserQuestion capturada de tmux",
   });
 });
 
+test("detectDecision: conserva el diálogo al inicio de un pane alto con cola vacía", () => {
+  const pane = [
+    "¿Qué camino seguimos?",
+    "❯ 1. UPDATE directo + revertir",
+    "  2. PATCH con JWT M2M",
+    ...Array<string>(50).fill(""),
+  ].join("\n");
+
+  assert.deepEqual(detectDecision(pane), {
+    question: "¿Qué camino seguimos?",
+    options: ["UPDATE directo + revertir", "PATCH con JWT M2M"],
+  });
+});
+
+test("detectDecision: no anuncia como pregunta el resto suelto de una fila envuelta", () => {
+  const pane = [
+    "│ Para probar el AC de `language=en` necesito encender el feature en dev sobre b",
+    "u-818. ¿Cómo lo hago?",
+    "",
+    "❯ 1. UPDATE directo + revertir",
+    "  2. PATCH con JWT M2M",
+  ].join("\n");
+
+  // El batch pide capture-pane -J, así que jamás reensamblamos capturas viejas: ante este formato
+  // irrecuperable es más seguro no alertar que publicar su fragmento final como una pregunta real.
+  assert.equal(detectDecision(pane), null);
+});
+
 test("detectDecision: no trunca guiones ni barras normales dentro de una opción", () => {
   const pane = [
     "¿Qué camino seguimos?",

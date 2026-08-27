@@ -107,6 +107,13 @@ test("buildCaptureArgs: separa cada comando de un batch de capture-pane", () => 
   const args = buildCaptureArgs(["%1", "%2"], 25);
 
   assert.equal(args.filter((arg) => arg === ";").length, 3);
+  assert.equal(args.filter((arg) => arg === "capture-pane").length, 2);
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === "capture-pane") {
+      const commandEnd = args.indexOf(";", index);
+      assert.ok(args.slice(index, commandEnd).includes("-J"), "cada captura debe unir las filas envueltas por tmux");
+    }
+  }
   for (let index = 0; index < args.length; index++) {
     if (args[index] === "capture-pane" || args[index] === "display-message") {
       if (index > 0) assert.equal(args[index - 1], ";", `${args[index]} debe empezar tras un separador`);

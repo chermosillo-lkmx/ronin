@@ -31,15 +31,25 @@ function cleanDecisionText(text: string): string {
  * una alerta. El picker /model sin numerar queda fuera a propósito por la misma razón.
  */
 export function detectDecision(pane: string): Decision | null {
-  const lines = (pane ?? "").split("\n").slice(-RECENT_LINES);
+  const capturedLines = (pane ?? "").split("\n");
+  // El diálogo real de Claude Code vive pegado a la caja de input, abajo. Si el pane tiene más
+  // filas que contenido, tmux devuelve su pantalla completa y deja una cola vacía: se descarta
+  // antes de aplicar la ventana reciente para no perder el diálogo que quedó arriba.
+  while (capturedLines.length && !capturedLines.at(-1)?.trim()) capturedLines.pop();
+  const lines = capturedLines.slice(-RECENT_LINES);
   const cursor = lines.findIndex((line) => NUMBERED_CURSOR.test(line));
   const generic = lines.findIndex((line) => GENERIC_CONFIRM.test(line));
   if (cursor < 0 && generic < 0) return null;
 
   const pivot = cursor >= 0 ? cursor : generic;
-  const questionLine = generic >= 0
-    ? lines[generic]
-    : [...lines.slice(0, pivot)].reverse().find((line) => /(?:\?|¿.*\?)\s*$/.test(line.trim()));
+  const questionIndex = generic >= 0
+    ? generic
+    : lines.findLastIndex((line, index) => index < pivot && /(?:\?|¿.*\?)\s*$/.test(line.trim()));
+  const questionLine = questionIndex >= 0 ? lines[questionIndex] : undefined;
+  // `capture-pane -J` une las filas que tmux envolvió. No reensamblamos capturas antiguas sin
+  // esa opción: si una continuación sigue inmediatamente a una fila de caja, anunciarla sola
+  // produciría una pregunta truncada; es preferible no anunciar decisión alguna.
+  if (questionIndex > 0 && lines[questionIndex - 1]?.includes("│") && !lines[questionIndex - 1]?.trim().endsWith("?")) return null;
   const question = questionLine && cleanDecisionText(questionLine);
   if (!question) return null;
   const options = cursor < 0 ? [] : lines.slice(cursor)

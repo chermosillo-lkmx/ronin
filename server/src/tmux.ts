@@ -231,7 +231,7 @@ export function buildCaptureArgs(paneIds: string[], lines: number): string[] {
   const args: string[] = [];
   for (let index = 0; index < paneIds.length; index++) {
     if (args.length) args.push(";");
-    args.push("capture-pane", "-p", "-S", `-${lines}`, "-t", paneIds[index]!, ";", "display-message", "-p", markers[index]!);
+    args.push("capture-pane", "-p", "-J", "-S", `-${lines}`, "-t", paneIds[index]!, ";", "display-message", "-p", markers[index]!);
   }
   return args;
 }
