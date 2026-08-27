@@ -155,6 +155,9 @@ export async function sendText(name: string, text: string, submit: boolean): Pro
 // de una pieza y la pausa deja que la caja termine de renderizar antes del Enter.
 const PASTE_BUFFER = "cowork-prompt";
 const PASTE_SETTLE_MS = 1200;
+// Límite compartido por envío pane-scoped, broadcast y lanzamiento: tres números iguales se
+// desincronizan sin ruido y reabren el mismo corte de prompt según la ruta que se use.
+export const PASTE_THRESHOLD_BYTES = 200;
 
 /** Entrega un prompt largo por buffer + bracketed paste. Para textos cortos basta sendText. */
 export async function pastePrompt(target: string, text: string, submit: boolean): Promise<void> {

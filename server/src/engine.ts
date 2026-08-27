@@ -4,13 +4,54 @@ import { resolveCwd } from "./repos.js";
 import { trustedRoots } from "./repo-roots.js";
 import { listAllSessions } from "./sessions.js";
 import { cycleDirForSession } from "./stages.js";
-import { clearAdoptedMark, readAdoptedMark, serializePerSession, setAdoptedMark } from "./tmux.js";
+import { capturePaneSafe, claudeAlive, clearAdoptedMark, isBusy, PASTE_THRESHOLD_BYTES, pastePrompt, promptPending, readAdoptedMark, sendKeys, sendText, serializePerSession, setAdoptedMark } from "./tmux.js";
 import { resolveFlow } from "./workflow.js";
+
+export interface PromptDeliveryDeps {
+  capturePaneSafe: typeof capturePaneSafe;
+  claudeAlive: typeof claudeAlive;
+  isBusy: typeof isBusy;
+  promptPending: typeof promptPending;
+  sendText: typeof sendText;
+  pastePrompt: typeof pastePrompt;
+  sendKeys: typeof sendKeys;
+  sleep: (ms: number) => Promise<void>;
+}
+
+const TUI_READY_ATTEMPTS = 10;
+const TUI_READY_INTERVAL_MS = 300;
+const PENDING_ENTER_ATTEMPTS = 2;
+
+const defaultPromptDeliveryDeps: PromptDeliveryDeps = {
+  capturePaneSafe, claudeAlive, isBusy, promptPending, sendText, pastePrompt, sendKeys,
+  sleep: async (ms) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); },
+};
+
+/**
+ * Espera la primera señal de Claude antes de escribir. El timeout es deliberado: un banner que
+ * cambie no puede bloquear la creación de una sesión para siempre; tras agotarlo se entrega y la
+ * ruta de paste todavía verifica el Enter compuesto de forma acotada.
+ */
+export async function deliverPromptWhenReady(session: string, prompt: string, deps: PromptDeliveryDeps = defaultPromptDeliveryDeps): Promise<void> {
+  for (let attempt = 0; attempt < TUI_READY_ATTEMPTS; attempt++) {
+    const pane = await deps.capturePaneSafe(session);
+    if (pane !== null && (deps.claudeAlive(pane) || deps.isBusy(pane))) break;
+    await deps.sleep(TUI_READY_INTERVAL_MS);
+  }
+
+  if (Buffer.byteLength(prompt, "utf8") > PASTE_THRESHOLD_BYTES) await deps.pastePrompt(session, prompt, true);
+  else await deps.sendText(session, prompt, true);
+
+  for (let attempt = 0; attempt < PENDING_ENTER_ATTEMPTS; attempt++) {
+    const pane = await deps.capturePaneSafe(session);
+    if (pane === null || !deps.promptPending(pane)) break;
+    await deps.sendKeys(session, "Enter");
+  }
+}
 
 /** Deliver an initial workflow request after the CLI is ready to receive it. */
 export async function sendWhenReady(session: string, prompt: string): Promise<void> {
-  const { sendText } = await import("./tmux.js");
-  await sendText(session, prompt, true);
+  await deliverPromptWhenReady(session, prompt);
 }
 
 /**

@@ -20,6 +20,7 @@ import {
   sendText,
   serializePerSession,
   openTerminal,
+  PASTE_THRESHOLD_BYTES,
 } from "./tmux.js";
 import { classifySession } from "./sessions.js";
 import { isSafeSessionName } from "./session-name.js";
@@ -563,10 +564,6 @@ app.delete("/api/sessions/:name/adopt", async (req, res) => {
 });
 
 const MAX_PANE_KEYS_BYTES = 16 * 1024;
-// El mismo umbral que documenta tmux.ts:84-89 para decidir sendText vs pastePrompt: por debajo,
-// `send-keys -l` + Enter sin pausa es seguro; por encima, el Enter se lo traga la caja de input
-// mientras sigue componiendo (gotcha heredado, verificado en vivo).
-const PANE_KEYS_PASTE_THRESHOLD = 200;
 
 function isPaneIdParam(value: string): boolean {
   return /^%\d+$/.test(value);
@@ -624,7 +621,7 @@ app.post("/api/sessions/:name/panes/:paneId/keys", async (req, res) => {
   if (membership === "elsewhere") return res.status(400).json({ error: "el pane pertenece a otra sesión", code: "PANE_NOT_IN_SESSION" });
   if (membership === "gone") return res.status(409).json({ error: "el pane ya no existe", code: "PANE_GONE" });
   const submit = req.body?.submit === true;
-  if (Buffer.byteLength(text, "utf8") > PANE_KEYS_PASTE_THRESHOLD) await pastePrompt(paneId, text, submit);
+  if (Buffer.byteLength(text, "utf8") > PASTE_THRESHOLD_BYTES) await pastePrompt(paneId, text, submit);
   else await sendText(paneId, text, submit);
   res.json({ ok: true });
 });
@@ -673,7 +670,10 @@ app.post("/api/sessions/:name/broadcast", async (req, res) => {
       }
     }
     const submit = req.body?.submit === true;
-    for (const target of targets) await sendText(target, text, submit);
+    for (const target of targets) {
+      if (Buffer.byteLength(text, "utf8") > PASTE_THRESHOLD_BYTES) await pastePrompt(target, text, submit);
+      else await sendText(target, text, submit);
+    }
     res.json({ ok: true, targets });
   });
 });
