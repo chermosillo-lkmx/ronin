@@ -31,6 +31,34 @@ test("detectDecision: extrae la pregunta de un diálogo numerado real", () => {
   assert.deepEqual(paneAttention(pane), { level: "decision", question: "Do you want to make this edit to sessions.ts?" });
 });
 
+test("detectDecision: limpia el marco de una AskUserQuestion capturada de tmux", () => {
+  const pane = [
+    "  │ Para probar el AC de `language=en` necesito encender el feature en dev sobre bu-818. ¿Cómo lo hago?",
+    "",
+    "  ❯ 1. UPDATE directo + revertir    ┌──────────────────────────────────────────────────────┐",
+    "    2. PATCH con JWT M2M            │ UPDATE language_business_settings                    │",
+    "    3. Otro negocio, no bu-818      │    SET enabled = true, secondary_language = 'en'     │",
+    "    4. Déjalo sin probar            │  WHERE business_id = 'bu-818';                       │",
+  ].join("\n");
+
+  assert.deepEqual(detectDecision(pane), {
+    question: "Para probar el AC de `language=en` necesito encender el feature en dev sobre bu-818. ¿Cómo lo hago?",
+    options: ["UPDATE directo + revertir", "PATCH con JWT M2M", "Otro negocio, no bu-818", "Déjalo sin probar"],
+  });
+});
+
+test("detectDecision: no trunca guiones ni barras normales dentro de una opción", () => {
+  const pane = [
+    "¿Qué camino seguimos?",
+    "❯ 1. PATCH con JWT M2M - reversible | auditado",
+  ].join("\n");
+
+  assert.deepEqual(detectDecision(pane), {
+    question: "¿Qué camino seguimos?",
+    options: ["PATCH con JWT M2M - reversible | auditado"],
+  });
+});
+
 test("detectDecision: no confunde el input ni el picker slash sin números con una decisión", () => {
   assert.equal(detectDecision(`${CLAUDE_IDLE}\n❯ texto a medio teclear`), null);
   assert.equal(detectDecision(`${CLAUDE_IDLE}\n❯ /model sonnet`), null);

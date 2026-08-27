@@ -12,6 +12,20 @@ const NUMBERED_OPTION = /^\s*(?:❯\s*)?\d+\.\s+(\S.*)$/;
 const GENERIC_CONFIRM = /(?:\[y\/n\]|\(y\/n\)|\(y\/N\)|¿continuar\?)/i;
 
 /**
+ * tmux puede capturar el borde de una caja TUI junto al texto útil. Sólo cortamos una caja vecina
+ * tras dos o más espacios: un carácter de caja suelto podría formar parte de una opción legítima,
+ * mientras que esa separación es la columna que deja la TUI entre el menú y su caja contigua.
+ */
+function cleanDecisionText(text: string): string {
+  const withoutNeighborBox = text.replace(/^(.+?\S)\s{2,}[\u2500-\u257f].*$/u, "$1");
+  return withoutNeighborBox
+    .trim()
+    .replace(/^[\u2500-\u257f]+\s*/u, "")
+    .replace(/\s*[\u2500-\u257f]+$/u, "")
+    .trim();
+}
+
+/**
  * Detecta sólo menús que pueden parar al operador. El cursor por sí mismo NO basta: Claude usa
  * `❯ ` en su caja de texto y llamarlo decisión convertiría cualquier prompt a medio escribir en
  * una alerta. El picker /model sin numerar queda fuera a propósito por la misma razón.
@@ -23,11 +37,15 @@ export function detectDecision(pane: string): Decision | null {
   if (cursor < 0 && generic < 0) return null;
 
   const pivot = cursor >= 0 ? cursor : generic;
-  const question = generic >= 0
-    ? lines[generic]!.trim()
-    : [...lines.slice(0, pivot)].reverse().find((line) => /(?:\?|¿.*\?)\s*$/.test(line.trim()))?.trim();
+  const questionLine = generic >= 0
+    ? lines[generic]
+    : [...lines.slice(0, pivot)].reverse().find((line) => /(?:\?|¿.*\?)\s*$/.test(line.trim()));
+  const question = questionLine && cleanDecisionText(questionLine);
   if (!question) return null;
-  const options = cursor < 0 ? [] : lines.slice(cursor).map((line) => line.match(NUMBERED_OPTION)?.[1]).filter((value): value is string => Boolean(value));
+  const options = cursor < 0 ? [] : lines.slice(cursor)
+    .map((line) => line.match(NUMBERED_OPTION)?.[1])
+    .filter((value): value is string => Boolean(value))
+    .map(cleanDecisionText);
   return { question, options };
 }
 
