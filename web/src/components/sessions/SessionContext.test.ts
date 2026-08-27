@@ -23,9 +23,17 @@ test("SessionContext: pinta decisión primero, con badge, pregunta y contador", 
   }));
   assert.match(html, /⚠ decisión/);
   assert.match(html, /Do you want to make this edit to sessions\.ts\?/);
-  assert.match(html, /2 sesiones · 1 esperan decisión/);
+  assert.match(html, /2 sesiones · 1 espera decisión/);
   assert.ok(html.indexOf("cowork-decision") < html.indexOf("cowork-idle"));
   assert.match(html, /attn-decision/);
+});
+
+test("SessionContext: usa plural cuando varias sesiones esperan decisión", () => {
+  const html = renderToString(createElement(SessionContext, {
+    sessions: [idle, decision, { ...decision, name: "cowork-second-decision" }], selected: null, filter: "", diagnostic: null,
+    onFilter: () => {}, onSelect: () => {}, onEditPresentation: () => {}, onNew: () => {},
+  }));
+  assert.match(html, /3 sesiones · 2 esperan decisión/);
 });
 
 test("SessionContext: reserva el badge ámbar para sesiones que esperan decisión", () => {
