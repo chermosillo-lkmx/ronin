@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createWorkflowCatalogItem, loadWorkflowCatalog, updateWorkflowCatalogItem } from "./workflow-catalog.js";
+import { createWorkflowCatalogItem, deleteWorkflowCatalogItem, loadWorkflowCatalog, updateWorkflowCatalogItem } from "./workflow-catalog.js";
 
 const valid = { stages: [{ key: "plan", label: "Plan", icon: "•" }], verifyAfter: null };
 
@@ -33,5 +33,24 @@ test("workflow catalog rename preserves its identity", () => {
     const updated = updateWorkflowCatalogItem(created.id, { name: "release-v2" }, dir);
     assert.equal(updated.id, created.id);
     assert.equal(updated.name, "release-v2");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("workflow catalog deletes a named item while preserving the other workflows", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cowork-workflows-"));
+  try {
+    const initial = loadWorkflowCatalog(dir).items[0]!;
+    const extra = createWorkflowCatalogItem("release", valid, dir);
+    deleteWorkflowCatalogItem(extra.id, dir);
+    assert.deepEqual(loadWorkflowCatalog(dir).items.map((item) => item.id), [initial.id]);
+    assert.throws(() => deleteWorkflowCatalogItem(extra.id, dir), /WORKFLOW_NOT_FOUND/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("workflow catalog refuses to delete its last item", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cowork-workflows-"));
+  try {
+    const only = loadWorkflowCatalog(dir).items[0]!;
+    assert.throws(() => deleteWorkflowCatalogItem(only.id, dir), /WORKFLOW_LAST/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

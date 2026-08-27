@@ -131,6 +131,14 @@ export async function updateWorkflow(id: string, input: { name?: string; config?
   return r.json();
 }
 
+export async function deleteWorkflow(id: string): Promise<void> {
+  const r = await fetch(`/api/workflows/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new WorkflowSaveError(e.error || "no se pudo eliminar el workflow", undefined, e.code);
+  }
+}
+
 export async function listLocalSkills(): Promise<SkillSummary[]> {
   const r = await fetch("/api/skills");
   return r.ok ? ((await r.json()).skills ?? []) : [];

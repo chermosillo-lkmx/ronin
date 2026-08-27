@@ -131,6 +131,16 @@ export function updateWorkflowCatalogItem(id: string, input: { name?: unknown; c
   return cloneItem(next);
 }
 
+/** Remove a named workflow without allowing the catalog to become empty. */
+export function deleteWorkflowCatalogItem(id: string, directory?: string): void {
+  const catalog = loadWorkflowCatalog(directory);
+  const index = catalog.items.findIndex((item) => item.id === id);
+  if (index < 0) throw new Error("WORKFLOW_NOT_FOUND");
+  if (catalog.items.length === 1) throw new Error("WORKFLOW_LAST");
+  catalog.items.splice(index, 1);
+  writeCatalog(catalog, directory);
+}
+
 export function findWorkflowCatalogItem(id: string, directory?: string): WorkflowCatalogItem | null {
   const found = loadWorkflowCatalog(directory).items.find((item) => item.id === id);
   return found ? cloneItem(found) : null;

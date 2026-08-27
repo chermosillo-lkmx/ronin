@@ -4,6 +4,7 @@ import {
   adoptServerConfig,
   cancel,
   createWorkflowDraft,
+  createWorkflowWorkspaceDraft,
   deriveGraph,
   setFieldError,
   setJsonText,
@@ -28,6 +29,11 @@ test("T14.108 createWorkflowDraft + setStages: editar en Stepper y cambiar a JSO
   assert.deepEqual(json.stages.map((s: WfStage) => s.key), ["planning", "implementing", "curl"]);
   // el "saved" original queda intacto — nada se persistió
   assert.deepEqual(next.saved, CFG);
+});
+
+test("WorkflowWorkspace crea el borrador inicial en Grafo y conserva la vista elegida", () => {
+  assert.equal(createWorkflowWorkspaceDraft(CFG).view, "graph");
+  assert.equal(createWorkflowWorkspaceDraft(CFG, "json").view, "json");
 });
 
 test("T14.109 setJsonText: editar en JSON y cambiar a Grafo muestra lo editado; JSON inválido NO contamina el borrador estructurado", () => {

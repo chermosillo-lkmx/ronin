@@ -50,6 +50,11 @@ export function createWorkflowDraft(cfg: WorkflowConfig, view: DraftView = "step
   };
 }
 
+/** Electron's named-workflow workspace opens in Grafo, unlike the legacy editor's Stepper default. */
+export function createWorkflowWorkspaceDraft(cfg: WorkflowConfig, view?: DraftView): WorkflowDraftState {
+  return createWorkflowDraft(cfg, view ?? "graph");
+}
+
 /** Structured edit (Stepper/Grafo) → re-serializes the JSON view so it never shows stale text. */
 export function setStages(state: WorkflowDraftState, stages: WfStage[], verifyAfter: string | null): WorkflowDraftState {
   return { ...state, stages, verifyAfter, jsonText: stringifyFlow({ stages, verifyAfter }), jsonError: null, fieldError: null };

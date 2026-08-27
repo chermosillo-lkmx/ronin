@@ -1041,6 +1041,27 @@ test("POST /api/workflows/analyze returns 202 and the analysis becomes done with
   }
 });
 
+test("DELETE /api/workflows devuelve 200, 404 y 409 sin tocar el catálogo real", async () => {
+  const { mkdirSync, mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { createWorkflowCatalogItem, loadWorkflowCatalog } = await import("./workflow-catalog.js");
+  const directory = mkdtempSync(join(tmpdir(), "ronin-api-workflows-"));
+  mkdirSync(directory, { recursive: true });
+  const token = ensureCapabilityToken();
+  const headers = { "x-ronin-capability": token };
+  try {
+    const initial = loadWorkflowCatalog(directory).items[0]!;
+    const extra = createWorkflowCatalogItem("release", { stages: [{ key: "plan", label: "Plan", icon: "•" }], verifyAfter: null }, directory);
+    const app = createApp({ catalogDirectory: directory });
+    assert.deepEqual(await invokeRequest(app, "DELETE", `/api/workflows/${extra.id}`, { headers }), { status: 200, body: { ok: true } });
+    assert.deepEqual(await invokeRequest(app, "DELETE", `/api/workflows/${extra.id}`, { headers }), { status: 404, body: { error: "WORKFLOW_NOT_FOUND", code: "WORKFLOW_NOT_FOUND" } });
+    assert.deepEqual(await invokeRequest(app, "DELETE", `/api/workflows/${initial.id}`, { headers }), { status: 409, body: { error: "no se puede eliminar el único workflow", code: "WORKFLOW_LAST" } });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 // ---- Foco de pane por sesión: el clic en la lista de panes mueve la ventana/pane activos de tmux ----
 
 test("POST /api/sessions/:name/panes/:paneId/focus valida y cambia la ventana activa (ttyd la sigue)", async () => {

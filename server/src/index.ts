@@ -37,7 +37,7 @@ import { emit, findTask, findWorker, snapshot, subscribe } from "./state.js";
 import { initTasks, refreshTasks, startAutoRefresh } from "./tasks-source.js";
 import { togglePin } from "./today.js";
 import { getWorkflow, saveWorkflow, validateStages, WorkflowValidationError, type WorkflowConfig } from "./workflow.js";
-import { createWorkflowCatalogItem, importWorkflowCatalogItem, loadWorkflowCatalog, updateWorkflowCatalogItem } from "./workflow-catalog.js";
+import { createWorkflowCatalogItem, deleteWorkflowCatalogItem, importWorkflowCatalogItem, loadWorkflowCatalog, updateWorkflowCatalogItem } from "./workflow-catalog.js";
 import { readPromptConfig, resetPromptTemplate, savePromptTemplate } from "./prompts.js";
 import { listRepos, readRepoConfig, saveRepoConfig } from "./repos.js";
 import { readRepoConfigFull, saveRepoOverrides } from "./repo-config.js";
@@ -107,6 +107,8 @@ export interface CreateAppOptions {
    * test nunca toque `server/data/workflows.json`.
    */
   insights?: { store: ProposalStore; analyzer: Analyzer; catalogDirectory?: string };
+  /** Catálogo aislado para pruebas HTTP; por defecto usa server/data/workflows.json. */
+  catalogDirectory?: string;
   /** Dependencias de terminal de sesión aislables: evitan arrancar ttyd/Terminal.app en tests HTTP. */
   terminal?: {
     hasSession?: typeof hasSession;
@@ -121,14 +123,14 @@ export interface CreateAppOptions {
 export function createApp(options: CreateAppOptions = {}): express.Express {
 const app = express();
 const harness = options.harness ?? createTestHarnessService({ store: createHarnessStore() });
-const insightsCatalogDir = options.insights?.catalogDirectory;
+const catalogDirectory = options.catalogDirectory ?? options.insights?.catalogDirectory;
 const insightsStore = options.insights?.store ?? createProposalStore();
 const analyzer =
   options.insights?.analyzer ??
   createAnalyzer({
     store: insightsStore,
     signals: (range) => collectSignals(range, defaultSignalDeps),
-    catalogNames: () => loadWorkflowCatalog(insightsCatalogDir).items.map((item) => item.name),
+    catalogNames: () => loadWorkflowCatalog(catalogDirectory).items.map((item) => item.name),
     runClaude: (prompt) => runClaudeP(prompt, { timeoutMs: 300_000, maxBytes: 256 * 1024 }),
   });
 const sessionPresentations = createSessionPresentationStore(dataPath("session-presentations.json"), listRepos);
@@ -498,27 +500,39 @@ app.post("/api/workflow/validate", (req, res) => {
 // Named workflows back the Electron shell. The legacy singular route above remains available
 // for the browser dashboard and is intentionally not coupled to a catalog item's immutable id.
 app.get("/api/workflows", (_req, res) => {
-  res.json(loadWorkflowCatalog());
+  res.json(loadWorkflowCatalog(catalogDirectory));
 });
 app.post("/api/workflows", (req, res) => {
   try {
-    res.status(201).json(createWorkflowCatalogItem(req.body?.name, req.body?.config ?? req.body));
+    res.status(201).json(createWorkflowCatalogItem(req.body?.name, req.body?.config ?? req.body, catalogDirectory));
   } catch (e) {
     res.status(400).json(workflowErrorBody(e));
   }
 });
 app.put("/api/workflows/:id", (req, res) => {
   try {
-    const item = updateWorkflowCatalogItem(req.params.id, { name: req.body?.name, config: req.body?.config }, undefined);
+    const item = updateWorkflowCatalogItem(req.params.id, { name: req.body?.name, config: req.body?.config }, catalogDirectory);
     res.json(item);
   } catch (e) {
     const status = (e as Error).message === "WORKFLOW_NOT_FOUND" ? 404 : 400;
     res.status(status).json(workflowErrorBody(e));
   }
 });
+// Las sesiones ya creadas conservan su copia congelada en flow.json; borrar del catálogo no las afecta.
+app.delete("/api/workflows/:id", (req, res) => {
+  try {
+    deleteWorkflowCatalogItem(req.params.id, catalogDirectory);
+    res.json({ ok: true });
+  } catch (e) {
+    const code = (e as Error).message;
+    if (code === "WORKFLOW_NOT_FOUND") return res.status(404).json({ error: code, code });
+    if (code === "WORKFLOW_LAST") return res.status(409).json({ error: "no se puede eliminar el único workflow", code });
+    res.status(400).json(workflowErrorBody(e));
+  }
+});
 app.post("/api/workflows/import", (req, res) => {
   try {
-    res.status(201).json(importWorkflowCatalogItem(req.body?.name, req.body?.config ?? req.body));
+    res.status(201).json(importWorkflowCatalogItem(req.body?.name, req.body?.config ?? req.body, catalogDirectory));
   } catch (e) {
     res.status(400).json(workflowErrorBody(e));
   }
@@ -573,7 +587,7 @@ app.post("/api/workflows/proposals/:id/accept", (req, res) => {
   }
   let item;
   try {
-    item = createWorkflowCatalogItem(req.body?.name ?? proposal.name, proposal.config, insightsCatalogDir);
+    item = createWorkflowCatalogItem(req.body?.name ?? proposal.name, proposal.config, catalogDirectory);
   } catch (e) {
     res.status(400).json(workflowErrorBody(e));
     return;
