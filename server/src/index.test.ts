@@ -562,7 +562,7 @@ test("POST /api/sessions/:name/{term,attach} valida la sesión y delega terminal
   assert.deepEqual(term, { status: 200, body: { url: "http://127.0.0.1:7781" } });
 
   const unavailable = await invokeRequest(app, "POST", "/api/sessions/sin-ttyd/term", { headers });
-  assert.deepEqual(unavailable, { status: 503, body: { error: "ttyd no encontrado — instálalo con `brew install ttyd`", code: "TTYD_UNAVAILABLE" } });
+  assert.deepEqual(unavailable, { status: 503, body: { error: "ttyd no pudo reservar un puerto propio; no se devolvió ninguna terminal", code: "TTYD_UNAVAILABLE" } });
 
   const attached = await invokeRequest(app, "POST", "/api/sessions/sesion-viva/attach", { headers });
   assert.deepEqual(attached, { status: 200, body: { ok: true } });
