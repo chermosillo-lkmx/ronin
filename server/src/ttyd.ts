@@ -58,6 +58,11 @@ export function reservePort(port: number): Promise<boolean> {
 
 const TTYD_PORT_CANDIDATES = 10;
 
+/** Resultado público del arranque: cada fallo guía una acción operativa distinta. */
+export type TtydStartResult =
+  | { ok: true; port: number }
+  | { ok: false; reason: "not-installed" | "no-free-port" };
+
 export function createTtydManager(deps: {
   hasTtyd?: () => Promise<boolean>;
   spawn?: typeof spawn;
@@ -65,22 +70,22 @@ export function createTtydManager(deps: {
   reservePort?: (port: number) => Promise<boolean>;
 } = {}) {
   const procs = new Map<string, { proc: ChildProcess; port: number }>();
-  const starts = new Map<string, Promise<number | null>>();
+  const starts = new Map<string, Promise<TtydStartResult>>();
   let nextPort = 7781;
   const available = deps.hasTtyd ?? hasTtyd;
   const launch = deps.spawn ?? spawn;
   const waitReady = deps.waitReady ?? waitForPort;
   const canReservePort = deps.reservePort ?? reservePort;
 
-  async function start(session: string): Promise<number | null> {
+  async function start(session: string): Promise<TtydStartResult> {
     const existing = procs.get(session);
-    if (existing) return existing.port;
+    if (existing) return { ok: true, port: existing.port };
     const pending = starts.get(session);
     if (pending) return pending;
-    const started = (async () => {
+    const started: Promise<TtydStartResult> = (async (): Promise<TtydStartResult> => {
       if (!(await available())) {
         console.warn("[claude-cowork] ttyd no está instalado. Instálalo con: brew install ttyd");
-        return null;
+        return { ok: false, reason: "not-installed" };
       }
       // Cinturón y tirantes: `tmux -u` no arregla los programas dentro del pane, por eso también
       // pasamos locale; a su vez `-u` cubre clientes tmux antiguos que no detectan UTF-8 por locale.
@@ -120,10 +125,10 @@ export function createTtydManager(deps: {
         }
         proc.on("exit", () => procs.delete(session));
         procs.set(session, { proc, port });
-        return port;
+        return { ok: true, port };
       }
       console.warn(`[claude-cowork] ttyd no pudo reservar un puerto propio para ${session} tras ${TTYD_PORT_CANDIDATES} intentos`);
-      return null;
+      return { ok: false, reason: "no-free-port" };
     })();
     starts.set(session, started);
     try { return await started; } finally { starts.delete(session); }

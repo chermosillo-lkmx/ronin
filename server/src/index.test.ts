@@ -531,15 +531,17 @@ test("POST /api/sessions limpia NUL y espacios antes de medir y lanzar una petic
   assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", mode: undefined, agent: undefined, request: "arregla CU-86e2" }]);
 });
 
-test("POST /api/sessions/:name/{term,attach} valida la sesión y delega terminales sin procesos reales", async () => {
+test("POST /api/sessions/:name/{term,attach} valida la sesión y traduce los fallos discriminados de ttyd", async () => {
   const token = ensureCapabilityToken();
   const calls: string[] = [];
   const app = createApp({
     terminal: {
-      hasSession: async (name: string) => name === "sesion-viva" || name === "sin-ttyd",
+      hasSession: async (name: string) => name === "sesion-viva" || name === "sin-ttyd" || name === "sin-puertos",
       startTtyd: async (name: string) => {
         calls.push(`ttyd:${name}`);
-        return name === "sin-ttyd" ? null : 7781;
+        if (name === "sin-ttyd") return { ok: false, reason: "not-installed" } as const;
+        if (name === "sin-puertos") return { ok: false, reason: "no-free-port" } as const;
+        return { ok: true, port: 7781 } as const;
       },
       openTerminal: async (name: string) => { calls.push(`attach:${name}`); },
     },
@@ -562,11 +564,14 @@ test("POST /api/sessions/:name/{term,attach} valida la sesión y delega terminal
   assert.deepEqual(term, { status: 200, body: { url: "http://127.0.0.1:7781" } });
 
   const unavailable = await invokeRequest(app, "POST", "/api/sessions/sin-ttyd/term", { headers });
-  assert.deepEqual(unavailable, { status: 503, body: { error: "ttyd no pudo reservar un puerto propio; no se devolvió ninguna terminal", code: "TTYD_UNAVAILABLE" } });
+  assert.deepEqual(unavailable, { status: 503, body: { error: "ttyd no encontrado — instálalo con `brew install ttyd`", code: "TTYD_UNAVAILABLE" } });
+
+  const noFreePort = await invokeRequest(app, "POST", "/api/sessions/sin-puertos/term", { headers });
+  assert.deepEqual(noFreePort, { status: 503, body: { error: "ttyd no pudo reservar un puerto propio; otra instancia de Ronin podría estar usando el rango de puertos", code: "TTYD_NO_PORT" } });
 
   const attached = await invokeRequest(app, "POST", "/api/sessions/sesion-viva/attach", { headers });
   assert.deepEqual(attached, { status: 200, body: { ok: true } });
-  assert.deepEqual(calls, ["ttyd:sesion-viva", "ttyd:sin-ttyd", "attach:sesion-viva"]);
+  assert.deepEqual(calls, ["ttyd:sesion-viva", "ttyd:sin-ttyd", "ttyd:sin-puertos", "attach:sesion-viva"]);
 });
 
 // ---- T5: render/input por pane, contra tmux REAL ----

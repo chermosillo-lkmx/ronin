@@ -480,9 +480,15 @@ app.post("/api/sessions/:name/term", async (req, res) => {
   const { name } = req.params;
   if (!isSafeSessionName(name)) return res.status(400).json({ error: "nombre de sesión inválido", code: "INVALID_SESSION" });
   if (!(await terminal.hasSession(name))) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
-  const port = await terminal.startTtyd(name);
-  if (port === null) return res.status(503).json({ error: "ttyd no pudo reservar un puerto propio; no se devolvió ninguna terminal", code: "TTYD_UNAVAILABLE" });
-  res.json({ url: `http://127.0.0.1:${port}` });
+  const started = await terminal.startTtyd(name);
+  if (!started.ok) {
+    // No colapsar estas causas: piden acciones opuestas y un único texto sería una pista falsa.
+    if (started.reason === "not-installed") {
+      return res.status(503).json({ error: "ttyd no encontrado — instálalo con `brew install ttyd`", code: "TTYD_UNAVAILABLE" });
+    }
+    return res.status(503).json({ error: "ttyd no pudo reservar un puerto propio; otra instancia de Ronin podría estar usando el rango de puertos", code: "TTYD_NO_PORT" });
+  }
+  res.json({ url: `http://127.0.0.1:${started.port}` });
 });
 
 // Attach conserva la vía nativa para quien necesita una Terminal.app independiente.

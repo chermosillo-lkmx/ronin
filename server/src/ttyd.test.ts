@@ -169,12 +169,20 @@ test("COWORK_TTYD_BIN controla tanto la comprobación como el spawn", async () =
         return proc as any;
       },
     });
-    assert.equal(await manager.start("con-bin-configurado"), 7781);
+    assert.deepEqual(await manager.start("con-bin-configurado"), { ok: true, port: 7781 });
     assert.deepEqual(spawned, ["/ruta/falsa/ttyd"]);
   } finally {
     if (previous === undefined) delete process.env.COWORK_TTYD_BIN;
     else process.env.COWORK_TTYD_BIN = previous;
   }
+});
+
+test("startTtyd distingue que ttyd no está instalado", async () => {
+  const manager = createTtydManager({
+    hasTtyd: async () => false,
+  });
+
+  assert.deepEqual(await manager.start("sin-ttyd-instalado"), { ok: false, reason: "not-installed" });
 });
 
 test("startTtyd deduplica solicitudes simultáneas de la misma sesión", async () => {
@@ -192,7 +200,7 @@ test("startTtyd deduplica solicitudes simultáneas de la misma sesión", async (
   });
 
   const [first, second] = await Promise.all([manager.start("misma-sesion"), manager.start("misma-sesion")]);
-  assert.deepEqual([first, second], [7781, 7781]);
+  assert.deepEqual([first, second], [{ ok: true, port: 7781 }, { ok: true, port: 7781 }]);
   assert.equal(spawned, 1);
 });
 
@@ -210,8 +218,8 @@ test("startTtyd reutiliza el ttyd ya vivo de la misma sesión", async () => {
     },
   });
 
-  assert.equal(await manager.start("reutilizada"), 7781);
-  assert.equal(await manager.start("reutilizada"), 7781);
+  assert.deepEqual(await manager.start("reutilizada"), { ok: true, port: 7781 });
+  assert.deepEqual(await manager.start("reutilizada"), { ok: true, port: 7781 });
   assert.equal(spawned, 1);
 });
 
@@ -229,10 +237,10 @@ test("startTtyd no devuelve el puerto hasta que ttyd acepta conexiones (evita el
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(settled, false);
   release(true);
-  assert.equal(await pending, 7781);
+  assert.deepEqual(await pending, { ok: true, port: 7781 });
 });
 
-test("startTtyd devuelve null y mata el proceso si el puerto nunca abre", async () => {
+test("startTtyd devuelve no-free-port y mata el proceso si el puerto nunca abre", async () => {
   let killed = false;
   const manager = createTtydManager({
     hasTtyd: async () => true,
@@ -240,10 +248,10 @@ test("startTtyd devuelve null y mata el proceso si el puerto nunca abre", async 
     reservePort: alwaysFree,
     spawn: () => { const proc = new EventEmitter() as any; proc.kill = () => { killed = true; }; queueMicrotask(() => proc.emit("spawn")); return proc; },
   });
-  assert.equal(await manager.start("muerta"), null);
+  assert.deepEqual(await manager.start("muerta"), { ok: false, reason: "no-free-port" });
   assert.equal(killed, true);
   // y una segunda llamada vuelve a intentar (no queda un puerto muerto cacheado)
-  assert.equal(await manager.start("muerta"), null);
+  assert.deepEqual(await manager.start("muerta"), { ok: false, reason: "no-free-port" });
 });
 
 test("startTtyd descarta un puerto que responde si el ttyd propio ya murió", async () => {
@@ -265,7 +273,7 @@ test("startTtyd descarta un puerto que responde si el ttyd propio ya murió", as
     },
   });
 
-  assert.equal(await manager.start("no-cruzar-sesiones"), null);
+  assert.deepEqual(await manager.start("no-cruzar-sesiones"), { ok: false, reason: "no-free-port" });
   assert.equal(spawned.length, 10);
 });
 
@@ -278,11 +286,11 @@ test("startTtyd salta el puerto base ocupado y lanza en el siguiente libre", asy
     spawn: spawnCapturingArgs(spawned) as any,
   });
 
-  assert.equal(await manager.start("puerto-base-ocupado"), 7782);
+  assert.deepEqual(await manager.start("puerto-base-ocupado"), { ok: true, port: 7782 });
   assert.equal(spawned[0][1], "7782");
 });
 
-test("startTtyd devuelve null al agotar los puertos candidatos", async () => {
+test("startTtyd distingue que no queda ningún puerto candidato libre", async () => {
   let spawned = 0;
   const manager = createTtydManager({
     hasTtyd: async () => true,
@@ -291,6 +299,6 @@ test("startTtyd devuelve null al agotar los puertos candidatos", async () => {
     spawn: () => { spawned++; throw new Error("no debe lanzar"); },
   });
 
-  assert.equal(await manager.start("sin-puertos"), null);
+  assert.deepEqual(await manager.start("sin-puertos"), { ok: false, reason: "no-free-port" });
   assert.equal(spawned, 0);
 });
