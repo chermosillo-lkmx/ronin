@@ -23,7 +23,9 @@ export function detectDecision(pane: string): Decision | null {
   if (cursor < 0 && generic < 0) return null;
 
   const pivot = cursor >= 0 ? cursor : generic;
-  const question = [...lines.slice(0, pivot)].reverse().find((line) => /(?:\?|¿.*\?)\s*$/.test(line.trim()))?.trim();
+  const question = generic >= 0
+    ? lines[generic]!.trim()
+    : [...lines.slice(0, pivot)].reverse().find((line) => /(?:\?|¿.*\?)\s*$/.test(line.trim()))?.trim();
   if (!question) return null;
   const options = cursor < 0 ? [] : lines.slice(cursor).map((line) => line.match(NUMBERED_OPTION)?.[1]).filter((value): value is string => Boolean(value));
   return { question, options };

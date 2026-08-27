@@ -36,6 +36,10 @@ test("detectDecision: no confunde el input ni el picker slash sin números con u
   assert.equal(detectDecision(`${CLAUDE_IDLE}\n❯ /model sonnet`), null);
 });
 
+test("detectDecision: reconoce la confirmación genérica y/n", () => {
+  assert.deepEqual(detectDecision("Aplicar el cambio ahora? [y/n]"), { question: "Aplicar el cambio ahora? [y/n]", options: [] });
+});
+
 test("paneAttention: distingue shell y pane desaparecido", () => {
   assert.equal(paneAttention("cesar@host repo % ").level, "shell");
   assert.equal(paneAttention(null).level, "gone");
