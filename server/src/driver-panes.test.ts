@@ -196,6 +196,13 @@ test("isBusy: true con el footer completo", () => {
   assert.equal(isBusy("* Pensando… (12s · esc to interrupt)"), true);
 });
 
+test("isBusy: true con el spinner actual aunque Claude ya no muestre 'esc to interrupt'", () => {
+  // Capturas reales: desde Claude Code actual el footer útil conserva glifo, verbo, elipsis y
+  // timer/token; exigir la frase vieja haría parecer idle a un pane que lleva minutos trabajando.
+  assert.equal(isBusy("· Schlepping… (16m 55s · ↓ 19.9k tokens)"), true);
+  assert.equal(isBusy("✢ Beboppin'… (22s · ↓ 631 tokens · thinking with high effort)"), true);
+});
+
 // REGRESIÓN (encontrada al escribir paneStatus): con el footer cortado por un pane angosto del 2×2,
 // isBusy daba false y el pane se leía como idle. No es cosmético: sendWhenReady y el relay usan
 // isBusy precisamente para NO escribir a mitad de turno, así que un busy mal leído hace que el

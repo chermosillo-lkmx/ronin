@@ -219,6 +219,35 @@ export async function capturePaneSafe(target: string): Promise<string | null> {
 }
 
 /**
+ * Captura la cola de todos los panes en UNA invocación a tmux. El inventario se refresca cada
+ * cinco segundos: hacer un proceso por pane convertiría una señal visual barata en coste lineal.
+ * Una falla global no se traduce en `gone`; deja el mapa vacío para que sessions.ts omita atención
+ * en vez de anunciarar panes muertos sin haberlos observado.
+ */
+export async function capturePanesTail(paneIds: string[], lines: number = 25): Promise<Map<string, string | null>> {
+  if (!paneIds.length) return new Map();
+  const markers = paneIds.map((paneId, index) => `__COWORK_CAPTURE_${index}_${paneId}__`);
+  const args: string[] = [];
+  for (let index = 0; index < paneIds.length; index++) {
+    args.push("capture-pane", "-p", "-S", `-${lines}`, "-t", paneIds[index]!, ";", "display-message", "-p", markers[index]!);
+  }
+  try {
+    const { stdout } = await pexec("tmux", tmuxArgs(...args));
+    const captures = new Map<string, string | null>();
+    let start = 0;
+    for (let index = 0; index < paneIds.length; index++) {
+      const end = stdout.indexOf(markers[index]!, start);
+      if (end < 0) return new Map(); // formato incompleto: no inferir cuáles panes siguen vivos
+      captures.set(paneIds[index]!, stdout.slice(start, end).replace(/\n$/, ""));
+      start = end + markers[index]!.length;
+    }
+    return captures;
+  } catch {
+    return new Map();
+  }
+}
+
+/**
  * T5: captura CON SGR (colores/estilo) para el visor por pane — `capture-pane -p` a secas
  * pierde el color. `target` puede ser un `%N` global (tmux lo resuelve sin importar la
  * sesión), lo que es justo lo que necesita `paneMembership` (index.ts) para distinguir "vive
@@ -738,7 +767,9 @@ export function claudeAlive(pane: string): boolean {
  * En ambos casos el fallo es hacia "idle", que es el lado seguro para claudeAlive pero NO para
  * sendWhenReady: por eso el envío verifica después, en vez de confiar sólo en esto.
  */
-const BUSY_FOOTER = /esc to interrupt|\(\d+[a-z]*(?:\s+\d+[a-z]*)?\s*·\s*esc to/i;
+// Claude Code actual reemplazó "esc to interrupt" por un spinner con verbo y elipsis. Se exige
+// timer dentro del paréntesis para no tratar una línea de conversación con `…` como actividad.
+const BUSY_FOOTER = /esc to interrupt|\(\d+[a-z]*(?:\s+\d+[a-z]*)?\s*·\s*esc to|[·✻✢⏺*]\s+[^\n(]+…\s*\(\d+[a-z]*(?:\s+\d+[a-z]*)?\s*·/i;
 
 export function isBusy(pane: string): boolean {
   return BUSY_FOOTER.test(pane);

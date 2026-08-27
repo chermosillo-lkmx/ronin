@@ -163,6 +163,16 @@ export interface SessionPresentation {
   repo: string | null;
 }
 
+/** Prioridad de atención viva: una decisión bloqueada siempre gana a trabajo en curso. */
+export type AttentionLevel = "decision" | "working" | "idle" | "shell" | "gone";
+
+export interface SessionAttention {
+  level: AttentionLevel;
+  paneId?: string;   // %N que determinó el rollup; la UI sólo lo muestra, nunca lo opera
+  question?: string; // sólo para decision: la pregunta concreta que detuvo el pane
+  since?: number;    // ms epoch; es estado vivo, no un dato histórico persistido
+}
+
 export interface TmuxSessionInfo {
   name: string;
   kind: "managed" | "foreign";
@@ -174,6 +184,7 @@ export interface TmuxSessionInfo {
   presentation?: SessionPresentation;
   /** Petición inicial persistida para una sesión workflow; ausente en terminales y sesiones ajenas. */
   request?: string;
+  attention?: SessionAttention;
 }
 
 // ---- Preflight (F1). Espejo manual en web/src/types.ts ----

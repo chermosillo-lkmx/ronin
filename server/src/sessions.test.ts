@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
+import { attachAttention, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
+import { AttentionTracker } from "./attention-tracker.js";
 
 // Salidas de `tmux list-sessions -F` y `tmux list-panes -a -F` con los formatos de sessions.ts.
 const SESSIONS = [
@@ -262,4 +263,22 @@ test("withLaunchRequests expone sólo la petición persistida de sesiones gestio
   const enriched = withLaunchRequests(sessions, (name) => name === "cowork-CU-42-driver" ? "arregla CU-42" : "no debe leerse");
   assert.equal(enriched.find((session) => session.name === "cowork-CU-42-driver")!.request, "arregla CU-42");
   assert.equal(enriched.find((session) => session.name === "dev-scratch")!.request, undefined);
+});
+
+test("attachAttention: no inventa atención cuando aún no hay capturas", () => {
+  const sessions = buildInventory(SESSIONS, PANES, () => false);
+  const attached = attachAttention(sessions, new Map(), 1_000, new AttentionTracker());
+  assert.equal(attached.every((session) => session.attention === undefined), true);
+});
+
+test("attachAttention: compone el rollup por sesión y conserva el since del tracker", () => {
+  const sessions = buildInventory(SESSIONS, PANES, () => false);
+  const captures = new Map<string, string | null>([
+    ["%20", "Claude Code\n❯ "],
+    ["%21", "Do you want to make this edit to sessions.ts?\n❯ 1. Yes"],
+  ]);
+  const attached = attachAttention(sessions, captures, 1_000, new AttentionTracker());
+  assert.deepEqual(attached.find((session) => session.name === "cowork-CU-42-driver")!.attention, {
+    level: "decision", paneId: "%21", question: "Do you want to make this edit to sessions.ts?", since: 1_000,
+  });
 });

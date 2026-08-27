@@ -3,12 +3,17 @@ import { join } from "node:path";
 import { isSafeSessionName } from "./session-name.js";
 import { cycleDirForSession } from "./stages.js";
 import {
+  capturePanesTail,
   listPanesRawResult,
   listSessionsRawResult,
   type TmuxDiagnostic,
   type TmuxRawResult,
 } from "./tmux.js";
+import { rollupAttention } from "./attention.js";
+import { AttentionTracker } from "./attention-tracker.js";
 import type { TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
+
+const attentionTracker = new AttentionTracker();
 
 /**
  * Inventario tmux completo: gestionadas por Ronin + ajenas al operador.
@@ -148,6 +153,24 @@ export function withLaunchRequests(sessions: TmuxSessionInfo[], readRequest: (na
     : session);
 }
 
+/**
+ * Añade atención sólo si hay una observación para CADA pane. Una captura global fallida no puede
+ * convertirse en "gone": ese nivel significa que tmux confirmó la ausencia de un pane, no que el
+ * poll falló. Las sesiones sin panes siguen sin campo porque no hay nada honesto que resumir.
+ */
+export function attachAttention(
+  sessions: TmuxSessionInfo[],
+  captures: Map<string, string | null>,
+  now: number,
+  tracker: AttentionTracker,
+): TmuxSessionInfo[] {
+  return sessions.map((session) => {
+    if (!session.panes.length || session.panes.some((pane) => !captures.has(pane.id))) return session;
+    const panes = new Map(session.panes.map((pane) => [pane.id, captures.get(pane.id)!]));
+    return { ...session, attention: tracker.track(session.name, rollupAttention(panes), now) };
+  });
+}
+
 function requestFromLaunch(name: string): string | undefined {
   try {
     const raw = JSON.parse(readFileSync(join(cycleDirForSession(name), "launch.json"), "utf8"));
@@ -203,5 +226,7 @@ export async function listAllSessions(): Promise<TmuxSessionInfo[]> {
 export async function readTmuxInventory(): Promise<TmuxInventoryResult> {
   const [sessionsResult, panesResult] = await Promise.all([listSessionsRawResult(), listPanesRawResult()]);
   const inventory = inventoryFromRaw(sessionsResult, panesResult, (name) => existsSync(cycleDirForSession(name)));
-  return { ...inventory, sessions: withLaunchRequests(inventory.sessions, requestFromLaunch) };
+  const sessions = withLaunchRequests(inventory.sessions, requestFromLaunch);
+  const captures = await capturePanesTail(sessions.flatMap((session) => session.panes.map((pane) => pane.id)));
+  return { ...inventory, sessions: attachAttention(sessions, captures, Date.now(), attentionTracker) };
 }
