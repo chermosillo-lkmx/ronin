@@ -3,12 +3,14 @@ import { test } from "node:test";
 import {
   claudeAlive,
   isBusy,
+  lastMeaningfulLine,
   paneStatus,
   parsePaneId,
   parsePaneRoleParam,
   parsePaneRoles,
   promptPending,
 } from "./tmux.js";
+import { TALL_CLAUDE_PANE } from "./claude-pane.fixture.js";
 
 // ---- parsePaneId: salida de `tmux split-window -P -F '#{pane_id}'` ----
 
@@ -84,6 +86,14 @@ const CLAUDE_PANE = [
 
 test("claudeAlive: true para un pane con la TUI de claude", () => {
   assert.equal(claudeAlive(CLAUDE_PANE), true);
+});
+
+test("claudeAlive: conserva el chrome de Claude arriba de 68 filas vacías de un pane alto", () => {
+  assert.equal(claudeAlive(TALL_CLAUDE_PANE), true);
+});
+
+test("lastMeaningfulLine: conserva el último contenido arriba de 68 filas vacías", () => {
+  assert.equal(lastMeaningfulLine(TALL_CLAUDE_PANE), "Context low · Run /clear to save 45k tokens");
 });
 
 test("claudeAlive: true mientras claude trabaja (footer de interrupción)", () => {

@@ -1,4 +1,4 @@
-import { claudeAlive, isBusy } from "./tmux.js";
+import { claudeAlive, isBusy, recentLines } from "./tmux.js";
 import type { AttentionLevel, SessionAttention } from "./types.js";
 
 export interface Decision {
@@ -31,12 +31,7 @@ function cleanDecisionText(text: string): string {
  * una alerta. El picker /model sin numerar queda fuera a propósito por la misma razón.
  */
 export function detectDecision(pane: string): Decision | null {
-  const capturedLines = (pane ?? "").split("\n");
-  // El diálogo real de Claude Code vive pegado a la caja de input, abajo. Si el pane tiene más
-  // filas que contenido, tmux devuelve su pantalla completa y deja una cola vacía: se descarta
-  // antes de aplicar la ventana reciente para no perder el diálogo que quedó arriba.
-  while (capturedLines.length && !capturedLines.at(-1)?.trim()) capturedLines.pop();
-  const lines = capturedLines.slice(-RECENT_LINES);
+  const lines = recentLines(pane, RECENT_LINES);
   const cursor = lines.findIndex((line) => NUMBERED_CURSOR.test(line));
   const generic = lines.findIndex((line) => GENERIC_CONFIRM.test(line));
   if (cursor < 0 && generic < 0) return null;

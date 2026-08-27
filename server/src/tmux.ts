@@ -185,6 +185,17 @@ const PENDING_RECENT_LINES = 10;
 const PASTED_MARKER = /\[pasted text/i;
 
 /**
+ * Normaliza una ventana reciente de captura de tmux. tmux devuelve la pantalla completa y, en
+ * un pane alto con el contenido arriba, deja decenas de líneas vacías al final que se comen
+ * cualquier ventana "reciente". Ya nos costó dos bugs: se elimina esa cola antes de acotar.
+ */
+export function recentLines(pane: string, count: number): string[] {
+  const lines = (pane ?? "").split("\n");
+  while (lines.length && !lines.at(-1)?.trim()) lines.pop();
+  return lines.slice(-count);
+}
+
+/**
  * ¿Hay un prompt COMPUESTO en la caja de input pero sin enviar? Se usa para reintentar el Enter
  * de forma acotada tras un paste largo, en vez de asumir que salió. PURA (testeable).
  */
@@ -755,7 +766,7 @@ const isChrome = (l: string): boolean => CLAUDE_CHROME.test(l) || BOX_LINE.test(
  * inmediatamente encima del prompt nuevo, dentro de cualquier ventana razonable.
  */
 export function claudeAlive(pane: string): boolean {
-  const lines = (pane ?? "").split("\n").slice(-CLAUDE_RECENT_LINES).map((l) => l.trim());
+  const lines = recentLines(pane, CLAUDE_RECENT_LINES).map((l) => l.trim());
   let lastContent = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
     if (lines[i]) {
@@ -829,8 +840,7 @@ const CHROME = /shift\+tab|to cycle|esc to interrupt|for shortcuts|bypass permis
 
 /** Last meaningful (non-chrome) line, trimmed and truncated — a live status hint. */
 export function lastMeaningfulLine(pane: string): string {
-  const lines = pane
-    .split("\n")
+  const lines = recentLines(pane, Number.MAX_SAFE_INTEGER)
     .map((l) => l.trim())
     .filter((l) => l && !CHROME.test(l));
   const last = lines[lines.length - 1] ?? "";
@@ -852,9 +862,7 @@ const CONTEXT_LEFT_THRESHOLD = 20;
  * count when parseable, else just a note; null when there's no signal.
  */
 export function parseContextPressure(pane: string): { tokens?: number; note: string } | null {
-  const recent = (pane ?? "")
-    .split("\n")
-    .slice(-PRESSURE_RECENT_LINES)
+  const recent = recentLines(pane, PRESSURE_RECENT_LINES)
     .map((l) => l.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 

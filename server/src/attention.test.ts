@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { detectDecision, paneAttention, rollupAttention } from "./attention.js";
+import { TALL_CLAUDE_PANE } from "./claude-pane.fixture.js";
 
 const CLAUDE_IDLE = [
   "Claude Code",
@@ -15,6 +16,10 @@ test("paneAttention: reconoce los spinners actuales de Claude como working", () 
 
 test("paneAttention: un Claude acabado con caja vacía sigue idle", () => {
   assert.equal(paneAttention(`✻ Cogitated for 4m 11s · done 11:50 AM\n${CLAUDE_IDLE}`).level, "idle");
+});
+
+test("paneAttention: un Claude arriba de 68 filas vacías sigue idle, no shell", () => {
+  assert.deepEqual(paneAttention(TALL_CLAUDE_PANE), { level: "idle" });
 });
 
 test("detectDecision: extrae la pregunta de un diálogo numerado real", () => {

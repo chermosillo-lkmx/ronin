@@ -1,13 +1,15 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { deliverPromptWhenReady, TUI_READY_ATTEMPTS, TUI_READY_INTERVAL_MS, type PromptDeliveryDeps } from "./engine.js";
+import { claudeAlive } from "./tmux.js";
+import { TALL_CLAUDE_PANE } from "./claude-pane.fixture.js";
 
-function deps(captures: Array<string | null>): PromptDeliveryDeps & { calls: string[] } {
+function deps(captures: Array<string | null>, alive: (pane: string) => boolean = (pane) => pane.includes("Claude Code")): PromptDeliveryDeps & { calls: string[] } {
   const calls: string[] = [];
   return {
     calls,
     capturePaneSafe: async () => captures.shift() ?? null,
-    claudeAlive: (pane) => pane.includes("Claude Code"),
+    claudeAlive: alive,
     isBusy: (pane) => pane.includes("working"),
     promptPending: (pane) => pane.includes("[Pasted text"),
     sendText: async (_session, text) => { calls.push(`text:${Buffer.byteLength(text)}`); },
@@ -28,6 +30,12 @@ test("deliverPromptWhenReady: un prompt corto conserva sendText", async () => {
   const d = deps(["Claude Code\n❯ ", "Claude Code\n❯ "]);
   await deliverPromptWhenReady("cowork-a", "x".repeat(50), d);
   assert.deepEqual(d.calls, ["text:50"]);
+});
+
+test("deliverPromptWhenReady: entrega al Claude visible arriba de 68 filas vacías", async () => {
+  const d = deps([TALL_CLAUDE_PANE], claudeAlive);
+  await deliverPromptWhenReady("cowork-pane-alto", "corto", d);
+  assert.deepEqual(d.calls, ["text:5"]);
 });
 
 test("deliverPromptWhenReady: espera una señal de TUI antes de entregar", async () => {

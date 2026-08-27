@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { parseContextPressure } from "./tmux.js";
+import { TALL_CLAUDE_PANE } from "./claude-pane.fixture.js";
 
 test("parseContextPressure: detects the '/clear to save NNNk tokens' warning + extracts tokens", () => {
   const pane = [
@@ -12,6 +13,13 @@ test("parseContextPressure: detects the '/clear to save NNNk tokens' warning + e
   const r = parseContextPressure(pane);
   assert.ok(r);
   assert.equal(r!.tokens, 45);
+});
+
+test("parseContextPressure: conserva el aviso arriba de 68 filas vacías de un pane alto", () => {
+  assert.deepEqual(parseContextPressure(TALL_CLAUDE_PANE), {
+    tokens: 45,
+    note: "/clear para ahorrar 45k tokens",
+  });
 });
 
 test("parseContextPressure: width-truncated warning still fires (note, tokens best-effort)", () => {
