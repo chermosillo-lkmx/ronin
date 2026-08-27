@@ -122,6 +122,23 @@ tmux set-option -t "$win" mouse on
 tmux set-option -t "$win" window-size latest
 tmux set-option -t "$win" history-limit 50000
 
+# Las tablas copy-mode son GLOBALES del servidor tmux, no de esta sesión: estos bindings también
+# afectan las sesiones propias del operador. Se acepta para que arrastrar en ttyd copie al sistema.
+clipboard_cmd=""
+if [ "$(uname -s)" = "Darwin" ]; then
+  clipboard_cmd="pbcopy"
+elif command -v wl-copy >/dev/null 2>&1; then
+  clipboard_cmd="wl-copy"
+elif command -v xclip >/dev/null 2>&1; then
+  clipboard_cmd="xclip -selection clipboard"
+elif command -v xsel >/dev/null 2>&1; then
+  clipboard_cmd="xsel --clipboard --input"
+fi
+if [ -n "$clipboard_cmd" ]; then
+  tmux bind-key -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$clipboard_cmd"
+  tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$clipboard_cmd"
+fi
+
 # HARD GATE: exactly 4 panes, 4 distinct ids, none empty.
 n=$(tmux list-panes -t "$win" | wc -l | tr -d ' ')
 ids=$(printf '%s\n' "$main" "$brain" "$reviewer" "$impl" | grep -c '^%')

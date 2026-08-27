@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import {
+  baseSessionOptionCommands,
   buildCaptureArgs,
   capturePaneAnsi,
   classifyTmuxInventoryError,
@@ -175,6 +176,24 @@ test("createSession aplica las opciones base de scroll e historial", async () =>
     ));
     assert.deepEqual(options, ["mouse on", "window-size latest", "history-limit 50000"]);
   });
+});
+
+test("las opciones base en darwin emiten los dos bind-key con pbcopy", () => {
+  assert.deepEqual(baseSessionOptionCommands("cowork-clipboard-darwin-test", "pbcopy"), [
+    ["set-option", "-t", "cowork-clipboard-darwin-test", "mouse", "on"],
+    ["set-option", "-t", "cowork-clipboard-darwin-test", "window-size", "latest"],
+    ["set-option", "-t", "cowork-clipboard-darwin-test", "history-limit", "50000"],
+    ["bind-key", "-T", "copy-mode", "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel", "pbcopy"],
+    ["bind-key", "-T", "copy-mode-vi", "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel", "pbcopy"],
+  ]);
+});
+
+test("las opciones base sin comando de portapapeles no emiten bind-key", () => {
+  assert.deepEqual(baseSessionOptionCommands("cowork-clipboard-none-test", null), [
+    ["set-option", "-t", "cowork-clipboard-none-test", "mouse", "on"],
+    ["set-option", "-t", "cowork-clipboard-none-test", "window-size", "latest"],
+    ["set-option", "-t", "cowork-clipboard-none-test", "history-limit", "50000"],
+  ]);
 });
 
 test("createDriverWindow recibe las mismas opciones base una sola vez", async () => {

@@ -389,13 +389,49 @@ async function tmuxOptional(args: string[]): Promise<void> {
   }
 }
 
+const CLIPBOARD_COPY_COMMANDS = [
+  ["wl-copy", "wl-copy"],
+  ["xclip", "xclip -selection clipboard"],
+  ["xsel", "xsel --clipboard --input"],
+] as const;
+
+async function clipboardCopyCommand(): Promise<string | null> {
+  if (process.platform === "darwin") return "pbcopy";
+
+  for (const [binary, command] of CLIPBOARD_COPY_COMMANDS) {
+    try {
+      await pexec("sh", ["-lc", `command -v ${binary} >/dev/null 2>&1`]);
+      return command;
+    } catch {
+      // Probar el siguiente candidato; sin ninguno dejamos el copy-mode normal de tmux.
+    }
+  }
+  return null;
+}
+
+export function baseSessionOptionCommands(session: string, copyCommand: string | null): string[][] {
+  const commands = [
+    ["set-option", "-t", session, "mouse", "on"],
+    ["set-option", "-t", session, "window-size", "latest"],
+    ["set-option", "-t", session, "history-limit", "50000"],
+  ];
+  if (!copyCommand) return commands;
+
+  // Las key tables son GLOBALES al servidor tmux, no por sesión: esto también cambia las
+  // sesiones propias del operador. Se acepta para que el arrastre desde ttyd copie al sistema.
+  commands.push(
+    ["bind-key", "-T", "copy-mode", "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel", copyCommand],
+    ["bind-key", "-T", "copy-mode-vi", "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel", copyCommand],
+  );
+  return commands;
+}
+
 /** Base compartida para toda sesión creada por Ronin; fallar aquí nunca cancela su creación. */
 async function applyBaseSessionOptions(session: string): Promise<void> {
+  const copyCommand = await clipboardCopyCommand();
   // `mouse` es opción de sesión (no de ventana); 50000 conserva scrollback suficiente para el operador.
-  await tmuxOptional(["set-option", "-t", session, "mouse", "on"]);
   // Dos clientes ttyd hacen que tmux dimensione al más chico; "latest" deja mandar al más reciente.
-  await tmuxOptional(["set-option", "-t", session, "window-size", "latest"]);
-  await tmuxOptional(["set-option", "-t", session, "history-limit", "50000"]);
+  for (const args of baseSessionOptionCommands(session, copyCommand)) await tmuxOptional(args);
 }
 
 /**
