@@ -129,18 +129,6 @@ test("requireCapability: token en disco pero cabecera ausente o incorrecta → 4
   }
 });
 
-test("requireCapability: /webhook/dm pasa sin capability — YA pasó por requireWebhookSecret (su propia puerta), no está exenta de facto", () => {
-  const { file, cleanup } = tempFile();
-  try {
-    const { req, res, next, outcome } = fakeReqRes("POST");
-    (req as any).path = "/webhook/dm";
-    requireCapability(req, res, next, file);
-    assert.deepEqual(outcome(), { statusCode: undefined, body: undefined, nextCalled: true });
-  } finally {
-    cleanup();
-  }
-});
-
 test("requireCapability: con la cabecera correcta, next() se llama y no se toca la respuesta", () => {
   const { file, cleanup } = tempFile();
   try {

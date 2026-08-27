@@ -8,9 +8,8 @@ import { promisify } from "node:util";
 import { CAPABILITY_FILE, ensureCapabilityToken, readCapabilityToken } from "./capability.js";
 import { createApp, startServer } from "./index.js";
 import { createSession } from "./tmux.js";
-import { cycleDirForSession, ensureCycleDir, writeFlow } from "./stages.js";
+import { cycleDirForSession } from "./stages.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
-import { workers } from "./state.js";
 
 const pexec = promisify(execFile);
 
@@ -144,9 +143,7 @@ function invokeRequest(
   });
 }
 
-test("startServer does not listen until initialization, engine, and background are ready", async () => {
-  const initialized = deferred<string>();
-  const engineReady = deferred<{ mode: "simulated"; close: () => void }>();
+test("startServer does not listen until background setup is ready", async () => {
   const events: string[] = [];
   const server = {
     address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43210 }),
@@ -155,19 +152,11 @@ test("startServer does not listen until initialization, engine, and background a
   const starting = startServer({
     port: 43210,
     deps: {
-      initTasks: () => initialized.promise,
-      startEngine: () => engineReady.promise,
       startBackground: async () => () => { events.push("background"); },
       listen: async () => { events.push("listen"); return server as any; },
     },
   });
 
-  await Promise.resolve();
-  assert.deepEqual(events, []);
-  initialized.resolve("mock");
-  await Promise.resolve();
-  assert.deepEqual(events, []);
-  engineReady.resolve({ mode: "simulated", close: () => { events.push("engine"); } });
   const handle = await starting;
   assert.deepEqual(events, ["listen"]);
 
@@ -177,7 +166,7 @@ test("startServer does not listen until initialization, engine, and background a
 
   await handle.close();
   await handle.close();
-  assert.deepEqual(events, ["listen", "socket", "background", "engine"]);
+  assert.deepEqual(events, ["listen", "socket", "background"]);
 });
 
 test("/api/health never publishes the boot token, only whether the caller presented it", async () => {
@@ -201,8 +190,6 @@ test("/api/health never publishes the boot token, only whether the caller presen
 });
 
 test("startServer generates the capability token exactly once, before listening", async () => {
-  const initialized = deferred<string>();
-  const engineReady = deferred<{ mode: "simulated"; close: () => void }>();
   const events: string[] = [];
   const server = {
     address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43211 }),
@@ -211,32 +198,24 @@ test("startServer generates the capability token exactly once, before listening"
   const starting = startServer({
     port: 43211,
     deps: {
-      initTasks: () => initialized.promise,
-      startEngine: () => engineReady.promise,
       startBackground: async () => () => {},
       ensureCapability: () => { events.push("capability"); return "fixture-token"; },
       listen: async () => { events.push("listen"); return server as any; },
     },
   });
 
-  initialized.resolve("mock");
-  engineReady.resolve({ mode: "simulated", close: () => {} });
   const handle = await starting;
   assert.deepEqual(events, ["capability", "listen"]);
   await handle.close();
 });
 
-test("startServer keeps the real loopback socket closed until ready and cleans acquired resources on startup failures", async () => {
+test("startServer keeps the real loopback socket closed until background setup is ready and cleans it on startup failures", async () => {
   const port = await freeLoopbackPort();
-  const initialized = deferred<string>();
-  const engineReady = deferred<{ mode: "simulated"; close: () => void }>();
   const backgroundReady = deferred<() => void>();
   const events: string[] = [];
   const starting = startServer({
     port,
     deps: {
-      initTasks: () => initialized.promise,
-      startEngine: () => engineReady.promise,
       startBackground: () => backgroundReady.promise,
       listen: listenOnLoopback,
     },
@@ -244,40 +223,18 @@ test("startServer keeps the real loopback socket closed until ready and cleans a
 
   await Promise.resolve();
   await assert.rejects(getStatus(port));
-  initialized.resolve("fixture");
-  await Promise.resolve();
-  await assert.rejects(getStatus(port));
-  engineReady.resolve({ mode: "simulated", close: () => { events.push("engine"); } });
-  await Promise.resolve();
-  await assert.rejects(getStatus(port));
   backgroundReady.resolve(() => { events.push("background"); });
   const handle = await starting;
   assert.equal(await getStatus(port), 200);
   await handle.close();
-  assert.deepEqual(events, ["background", "engine"]);
+  assert.deepEqual(events, ["background"]);
   await assert.rejects(getStatus(port));
 
   const failureCases = [
     {
-      name: "init",
-      initTasks: async () => { throw new Error("init failed"); },
-      startEngine: async () => ({ mode: "simulated" as const, close: () => { throw new Error("must not close"); } }),
-      startBackground: async () => () => { throw new Error("must not close"); },
-      expected: ["init"],
-    },
-    {
-      name: "engine",
-      initTasks: async () => "fixture",
-      startEngine: async () => { throw new Error("engine failed"); },
-      startBackground: async () => () => { throw new Error("must not close"); },
-      expected: ["init", "engine"],
-    },
-    {
       name: "background",
-      initTasks: async () => "fixture",
-      startEngine: async () => ({ mode: "simulated" as const, close: () => undefined }),
       startBackground: async () => { throw new Error("background failed"); },
-      expected: ["init", "engine", "background", "engine-close"],
+      expected: ["background"],
     },
   ] as const;
 
@@ -287,15 +244,6 @@ test("startServer keeps the real loopback socket closed until ready and cleans a
       startServer({
         port: await freeLoopbackPort(),
         deps: {
-          initTasks: async () => {
-            failureEvents.push("init");
-            return failure.initTasks();
-          },
-          startEngine: async (source) => {
-            failureEvents.push("engine");
-            const engine = await failure.startEngine(source);
-            return { ...engine, close: () => { failureEvents.push("engine-close"); return engine.close(); } };
-          },
           startBackground: async () => {
             failureEvents.push("background");
             return failure.startBackground();
@@ -312,27 +260,23 @@ test("startServer keeps the real loopback socket closed until ready and cleans a
   }
 });
 
-test("startServer cleans acquired resources when a background producer fails", async () => {
-  const events: string[] = [];
+test("startServer does not expose an engine dependency when a background producer fails", async () => {
   await assert.rejects(
     startServer({
       deps: {
-        initTasks: async () => "mock",
-        startEngine: async () => ({ mode: "simulated", close: () => { events.push("engine"); } }),
         startBackground: async () => { throw new Error("background failed"); },
         listen: async () => { throw new Error("must not listen"); },
       },
     }),
     /background failed/,
   );
-  assert.deepEqual(events, ["engine"]);
 });
 
 // ---- T4: requireCapability montada por MÉTODO sobre todo /api mutante ----
 
-test("requireCapability: GET/HEAD/OPTIONS nunca exigen cabecera — /api/state, /api/sessions, /api/workflow siguen respondiendo", async () => {
+test("requireCapability: GET/HEAD/OPTIONS nunca exigen cabecera — /api/sessions, /api/workflow siguen respondiendo", async () => {
   const app = createApp();
-  for (const path of ["/api/state", "/api/sessions", "/api/workflow", "/api/preflight"]) {
+  for (const path of ["/api/sessions", "/api/workflow", "/api/preflight"]) {
     const response = await invokeGet(app, path);
     assert.notEqual(response.status, 401, path);
     assert.notEqual(response.status, 503, path);
@@ -345,7 +289,6 @@ test("requireCapability: cualquier mutación de /api sin la cabecera correcta �
   const cases: Array<[string, string]> = [
     ["PUT", "/api/workflow"],
     ["PUT", "/api/repo-config/monorepo"],
-    ["POST", "/api/workers/x/stop"],
     ["DELETE", "/api/sessions/x"],
     ["DELETE", "/api/sessions/x/adopt"],
   ];
@@ -441,82 +384,6 @@ test("T12.100 POST /api/workflow/validate: verifyCmd → 400 VERIFY_CMD_NOT_ALLO
   assert.equal(response.status, 400);
   assert.equal((response.body as any).ok, false);
   assert.equal((response.body as any).error?.code, "VERIFY_CMD_NOT_ALLOWED");
-});
-
-test("T13.104 PUT /api/workflow: renombrar una etapa con un worker vivo en ella → 409 STAGE_IN_FLIGHT, y NO escribe workflow.json", async () => {
-  const token = ensureCapabilityToken();
-  const { getWorkflow } = await import("./workflow.js");
-  const before = getWorkflow();
-  // Un worker "vivo" cuya flow.json congelada usa las MISMAS keys que el workflow global real
-  // de este proceso (before) — así el rename de test choca de verdad contra su etapa en curso,
-  // sin inventar keys que no existan en el flow real que PUT /api/workflow va a editar.
-  const inFlightStageKey = before.stages[0].key;
-  const session = "cowork-t13-http-inflight";
-  const cycle = cycleDirForSession(session);
-  ensureCycleDir(cycle);
-  writeFlow(cycle, before);
-  const worker = {
-    id: "w-t13-http-inflight",
-    label: "test",
-    repo: "no-repo-override-zz",
-    taskId: session,
-    state: "busy" as const,
-    stage: "test",
-    startedAt: Date.now(),
-    session,
-    cycle,
-    stageKey: inFlightStageKey,
-  };
-  workers.push(worker as any);
-  try {
-    const renamedStages = before.stages.map((s, i) => (i === 0 ? { ...s, key: `${s.key}-renamed` } : s));
-    const app = createApp();
-    const response = await invokeRequest(app, "PUT", "/api/workflow", {
-      headers: { "x-ronin-capability": token },
-      body: { stages: renamedStages, verifyAfter: before.verifyAfter },
-    });
-    assert.equal(response.status, 409);
-    assert.equal((response.body as any).code, "STAGE_IN_FLIGHT");
-    assert.deepEqual(getWorkflow(), before); // el archivo real NUNCA se tocó
-  } finally {
-    const idx = workers.findIndex((w) => w.id === worker.id);
-    if (idx >= 0) workers.splice(idx, 1);
-    existsSync(cycle) && rmSync(cycle, { recursive: true, force: true });
-  }
-});
-
-// ---- T4: POST /api/webhook/dm — credencial PROPIA, no exención (B3 rev4) ----
-
-test("requireWebhookSecret: mandado por delante de requireCapability para /api/webhook/dm — sin su cabecera, 401/503 según configuración, y launchAdhoc no se llama", async () => {
-  const previousSecret = process.env.COWORK_WEBHOOK_SECRET;
-  delete process.env.COWORK_WEBHOOK_SECRET;
-  try {
-    const app = createApp();
-    const response = await invokeRequest(app, "POST", "/api/webhook/dm", { body: { text: "algo" } });
-    assert.equal(response.status, 503);
-    assert.equal((response.body as any).code, "WEBHOOK_SECRET_UNCONFIGURED");
-  } finally {
-    if (previousSecret === undefined) delete process.env.COWORK_WEBHOOK_SECRET;
-    else process.env.COWORK_WEBHOOK_SECRET = previousSecret;
-  }
-});
-
-test("requireWebhookSecret: NO exige la capability de los proxies — su credencial es la suya propia", async () => {
-  const previousSecret = process.env.COWORK_WEBHOOK_SECRET;
-  process.env.COWORK_WEBHOOK_SECRET = "s3cret";
-  try {
-    const app = createApp();
-    // Cabecera de webhook correcta, SIN cabecera de capability: no debe dar CAPABILITY_REQUIRED.
-    const response = await invokeRequest(app, "POST", "/api/webhook/dm", {
-      headers: { "x-ronin-webhook-secret": "s3cret" },
-      body: { text: "" },
-    });
-    assert.notEqual((response.body as any)?.code, "CAPABILITY_REQUIRED");
-    assert.notEqual(response.status, 401);
-  } finally {
-    if (previousSecret === undefined) delete process.env.COWORK_WEBHOOK_SECRET;
-    else process.env.COWORK_WEBHOOK_SECRET = previousSecret;
-  }
 });
 
 // ---- T4: POST/DELETE /api/sessions/:name/adopt ----

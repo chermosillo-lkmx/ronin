@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const BUNDLED_DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "data");
-const DEFAULT_DATA_FILES = ["actions.json", "clickup-seed.json", "jira-seed.json", "prompts.json", "workflow.json", "workflows.json"];
+const DEFAULT_DATA_FILES = ["prompts.json", "workflow.json", "workflows.json"];
 
 export function resolveDataDirectory(value: string | undefined, bundledDirectory: string): string {
   return value?.trim() || bundledDirectory;

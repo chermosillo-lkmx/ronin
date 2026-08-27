@@ -1,4 +1,5 @@
 import { writeJsonAtomic } from "./atomic.js";
+import { recordEvent } from "./history.js";
 import { CLAUDE_TERMINAL_CMD, CODEX_CMD } from "./config.js";
 import { sendWhenReady } from "./engine.js";
 import { listRepos, resolveCwd } from "./repos.js";
@@ -157,6 +158,7 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
       void deps.deliverPrompt(input.name, buildWorkflowRequestPrompt({ workflow: workflow.config, cycle, repo: input.repo, request, title, key: input.name }))
         .catch((error) => deps.logError?.(error));
     }
+    recordEvent({ type: "launch", key: input.name, title: input.request?.split(/\r?\n/, 1)[0] || input.name, repo: input.repo, source: "session", request: input.request });
     return { name: input.name, repo: input.repo, mode: "workflow", workflowId: workflow.id, cwd: resolved.cwd, worktree, branch };
   } catch (error) {
     if (tmuxCreated) await deps.killSession(input.name);
@@ -183,6 +185,7 @@ async function launchNormalTerminalSession(
     deps.ensureCycleDir(cycle);
     cycleCreated = true;
     deps.writeJsonAtomic(`${cycle}/launch.json`, terminalLaunchRecord(input, cwd, agent));
+    recordEvent({ type: "launch", key: input.name, title: input.request?.split(/\r?\n/, 1)[0] || input.name, repo: input.repo, source: "session", request: input.request });
     return { name: input.name, repo: input.repo, mode: "terminal", agent, cwd };
   } catch (error) {
     if (tmuxCreated) await deps.killSession(input.name);

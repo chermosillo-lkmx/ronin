@@ -3,17 +3,17 @@ import { dataPath } from "./data-dir.js";
 
 const FILE = dataPath("history.jsonl");
 
-export type EventType = "launch" | "complete" | "stop";
+export type EventType = "launch" | "close" | "adopt";
 
 export interface HistoryEvent {
   ts: number; // ms epoch
   type: EventType;
   key: string;
   title: string;
-  source: string;
+  source: "session";
   repo: string;
-  body?: string;      // opcional: mensaje disparador completo (task.body), clave para ad-hoc/custom
-  evidence?: string;  // opcional: snapshot compacto de la evidencia del worker al completar/parar
+  request?: string;
+  evidence?: string;
 }
 
 /** Recorta a n chars agregando "…[truncado]" para no inflar el JSONL/prompt. */

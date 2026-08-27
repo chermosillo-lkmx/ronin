@@ -3,10 +3,8 @@ import express from "express";
 import { existsSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { join } from "node:path";
-import { startDmPoller } from "./clickup-chat.js";
-import { CLICKUP_REFRESH_MS, DM_POLL, DM_POLL_MS, PORT, REPORT_SCHEDULE } from "./config.js";
-import { adoptSession, attachWorker, commitHotApply, focusPane, launchAction, launchAdhoc, launchCustom, launchPrReview, launchResearch, launchTask, planHotApply, releaseAdoption, start, StageInFlightError, stopEngine, stopWorker, workerInput, workerPane, workerPanes, type FocusResult, type LaunchOpts } from "./engine.js";
+import { PORT, REPORT_SCHEDULE } from "./config.js";
+import { adoptSession, releaseAdoption } from "./engine.js";
 import { AdoptCommitError, AdoptValidationError, type AdoptErrorCode } from "./adopt.js";
 import {
   capturePaneAnsi,
@@ -25,29 +23,20 @@ import {
 } from "./tmux.js";
 import { classifySession } from "./sessions.js";
 import { isSafeSessionName } from "./session-name.js";
-import { getActions, saveActions } from "./actions.js";
-import { readHistory } from "./history.js";
+import { readHistory, recordEvent } from "./history.js";
 import { generateReport, listReports, readReport, BadRequest } from "./reports.js";
 import { startReportSchedule } from "./report-schedule.js";
-import { setOrder } from "./order.js";
-import { cycleDirForSession, evidenceDir, readEvidence } from "./stages.js";
+import { cycleDirForSession } from "./stages.js";
 import { startTtyd } from "./ttyd.js";
-import { classifyDM } from "./classify.js";
-import { emit, findTask, findWorker, snapshot, subscribe } from "./state.js";
-import { initTasks, refreshTasks, startAutoRefresh } from "./tasks-source.js";
-import { togglePin } from "./today.js";
 import { getWorkflow, saveWorkflow, validateStages, WorkflowValidationError, type WorkflowConfig } from "./workflow.js";
 import { createWorkflowCatalogItem, deleteWorkflowCatalogItem, importWorkflowCatalogItem, loadWorkflowCatalog, updateWorkflowCatalogItem } from "./workflow-catalog.js";
 import { readPromptConfig, resetPromptTemplate, savePromptTemplate } from "./prompts.js";
 import { listRepos, readRepoConfig, saveRepoConfig } from "./repos.js";
 import { readRepoConfigFull, saveRepoOverrides } from "./repo-config.js";
-import { readConnectorSettings, saveAllowedRoots, saveConnectorSettings } from "./settings.js";
+import { saveAllowedRoots } from "./settings.js";
 import { trustedRoots } from "./repo-roots.js";
-import { fetchClickUpDescription, testClickUp } from "./clickup.js";
-import { testJira } from "./jira.js";
-import { testGitLab } from "./gitlab.js";
 import { ensureCapabilityToken, requireCapability } from "./capability.js";
-import { constantTimeEqual, corsOptions, requireLocalOrigin, requireWebhookSecret } from "./security.js";
+import { constantTimeEqual, corsOptions, requireLocalOrigin } from "./security.js";
 import { runPreflight } from "./preflight.js";
 import { listAllSessions, readTmuxInventory } from "./sessions.js";
 import { launchManagedSession, SessionLaunchError } from "./session-launch.js";
@@ -153,11 +142,6 @@ app.use(cors(corsOptions));
 // Los tres guards van ANTES de express.json(): no hay razón para parsear el cuerpo de una
 // petición que vamos a rechazar. Cubren TODO /api, incluidos sus OPTIONS.
 app.use("/api", requireLocalOrigin);
-// `/api/webhook/dm` recibe SU PROPIA credencial (B3 rev4: no es una excepción de
-// requireCapability, es una puerta previa) — por eso se monta ANTES y con su propio path.
-// requireCapability la deja pasar dos líneas más abajo PORQUE YA PASÓ por ésta, no porque
-// esté exenta.
-app.use("/api/webhook/dm", requireWebhookSecret);
 // Puerta general: por MÉTODO, no enumerando rutas — GET/HEAD/OPTIONS pasan sin mirar nada
 // (requireCapability.ts), todo lo demás exige `X-Ronin-Capability` en tiempo constante.
 app.use("/api", requireCapability);
@@ -174,67 +158,6 @@ app.get("/api/health", (req, res) => {
   res.json({ version: 1, ok: true, service: "ronin-api", tokenOk });
 });
 
-/**
- * Extract per-launch overrides from a request body (sanitized again in the engine).
- * `mode`/`reviewTool` se validan contra ALLOWLIST aquí, en la frontera HTTP: `reviewTool`
- * termina siendo un comando que el driver teclea en un pane, así que nunca se acepta el
- * `String(body.x)` crudo. Sólo lo consume la ruta de lanzamiento del tablero — jamás el
- * webhook de DMs (mismo criterio que `verifyCmd`).
- */
-function launchOpts(body: any): LaunchOpts {
-  const o: LaunchOpts = {};
-  if (typeof body?.plannerModel === "string" && body.plannerModel.trim()) o.plannerModel = body.plannerModel.trim();
-  if (typeof body?.workerModel === "string" && body.workerModel.trim()) o.workerModel = body.workerModel.trim();
-  if (body?.mode === "driver") o.mode = "driver";
-  if (body?.reviewTool === "codex" || body?.reviewTool === "agent") o.reviewTool = body.reviewTool;
-  return o;
-}
-
-/** Mapea el resultado tipado de focusPane/attachWorker a su HTTP. Ver plan §2.6. */
-function sendFocusResult(res: express.Response, result: FocusResult) {
-  if (result === "ok" || result === "noop") return res.json({ ok: true, result });
-  if (result === "no-session") return res.status(404).json({ error: "no session for worker" });
-  // 409 y no 404: la sesión existe: lo que falta son los 4 roles. Un "no session" aquí mandaría al
-  // operador a buscar el problema donde no está.
-  if (result === "degraded") {
-    return res.status(409).json({ error: "layout degradado: no se pudieron resolver los 4 panes" });
-  }
-  return res.status(502).json({ error: "tmux no aplicó el zoom" });
-}
-
-// Full snapshot (initial load / polling fallback)
-app.get("/api/state", (_req, res) => {
-  res.json(snapshot());
-});
-
-// Server-Sent Events: push a full snapshot on every state change
-app.get("/api/stream", (req, res) => {
-  res.set({
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-  });
-  res.flushHeaders();
-
-  const send = (data: unknown) => res.write(`data: ${JSON.stringify(data)}\n\n`);
-  send(snapshot());
-
-  const unsubscribe = subscribe(send);
-  const keepAlive = setInterval(() => res.write(": ping\n\n"), 15000);
-
-  req.on("close", () => {
-    clearInterval(keepAlive);
-    unsubscribe();
-  });
-});
-
-// Create + launch an ad-hoc task (from a DM/mention): simple worker, no skill
-app.post("/api/adhoc", async (req, res) => {
-  const text = String(req.body?.text ?? "").trim();
-  if (!text) return res.status(400).json({ error: "empty text" });
-  const worker = await launchAdhoc(text, String(req.body?.title ?? ""), String(req.body?.repo ?? "monorepo"));
-  res.json({ worker });
-});
 
 // Repo keys the custom-request modal can target (folder is resolved server-side)
 app.get("/api/repos", (_req, res) => {
@@ -275,19 +198,8 @@ app.put("/api/repo-config/:repo", (req, res) => {
   try {
     const repo = req.params.repo;
     const body = req.body ?? {};
-    // T13: the EFFECTIVE next flow for this repo's live workers — either the override being
-    // set (allowVerifyCmd:true, gitignored, same as saveRepoOverrides) or, when the repo is
-    // reverting to inheritWorkflow, the global default it will now resolve to.
-    const nextFlow =
-      !body.inheritWorkflow && body.workflow && Array.isArray((body.workflow as any).stages)
-        ? validateStages(body.workflow as Partial<WorkflowConfig>, { allowVerifyCmd: true, strict: true })
-        : getWorkflow();
-    const ops = planHotApply(nextFlow, repo);
-    const saved = saveRepoOverrides(repo, body);
-    commitHotApply(ops);
-    res.json(saved);
+    res.json(saveRepoOverrides(repo, body));
   } catch (e) {
-    if (e instanceof StageInFlightError) return void res.status(409).json({ error: e.message, code: e.code });
     res.status(400).json(workflowErrorBody(e));
   }
 });
@@ -352,124 +264,6 @@ app.put("/api/repo-config/:repo/skills", (req, res) => {
   } catch (e) { res.status(400).json(workflowErrorBody(e)); }
 });
 
-// Leer / editar credenciales de conectores (data/settings.json) desde el UI. Tokens enmascarados.
-app.get("/api/connectors", (_req, res) => {
-  res.json(readConnectorSettings());
-});
-app.put("/api/connectors", async (req, res) => {
-  try {
-    const settings = saveConnectorSettings(req.body); // valida (throw → 400); baseUrl allowlist
-    await refreshTasks(); // aplica creds nuevas al tablero en runtime (side-effect; no se devuelve)
-    res.json(settings); // bare, como /api/repos-config y /api/workflow
-  } catch (e) {
-    res.status(400).json({ error: (e as Error).message });
-  }
-});
-app.post("/api/connectors/:name/test", async (req, res) => {
-  const name = req.params.name;
-  if (name === "clickup") return res.json(await testClickUp());
-  if (name === "jira") return res.json(await testJira());
-  if (name === "gitlab") return res.json(await testGitLab());
-  return res.status(400).json({ error: "conector desconocido" });
-});
-
-// Create + launch a free-text request that runs the composable workflow loop
-app.post("/api/custom", async (req, res) => {
-  const text = String(req.body?.text ?? "").trim();
-  if (!text) return res.status(400).json({ error: "empty text" });
-  const repo = String(req.body?.repo ?? "monorepo");
-  const stageKeys: string[] | undefined = Array.isArray(req.body?.stageKeys)
-    ? req.body.stageKeys.filter((x: unknown) => typeof x === "string")
-    : undefined;
-  const worker = await launchCustom(text, repo, stageKeys, launchOpts(req.body));
-  res.json({ worker });
-});
-
-// Generic DM webhook: classify via `claude -p`; if it's a task, launch it; else ignore.
-app.post("/api/webhook/dm", async (req, res) => {
-  const text = String(req.body?.text ?? "").trim();
-  if (!text) return res.status(400).json({ error: "empty text" });
-  const c = await classifyDM(text);
-  if (!c.isTask) return res.json({ launched: false, reason: "no es una tarea" });
-  const worker = await launchAdhoc(c.task || text, c.task, "monorepo", c.complexity === "complex");
-  res.json({ launched: true, complexity: c.complexity, task: c.task, worker });
-});
-
-// PR reviewer: pass a PR URL (+ optional task URL); verify the PR, curl-test in dev after merge
-app.post("/api/pr-review", async (req, res) => {
-  const prUrl = String(req.body?.prUrl ?? "").trim();
-  if (!prUrl) return res.status(400).json({ error: "missing prUrl" });
-  const worker = await launchPrReview(
-    prUrl,
-    String(req.body?.taskUrl ?? ""),
-    String(req.body?.title ?? ""),
-    String(req.body?.repo ?? "ant-liebre-api")
-  );
-  res.json({ worker });
-});
-
-// Start (or reuse) an embedded interactive terminal (ttyd) for the worker
-app.post("/api/workers/:id/term", async (req, res) => {
-  const worker = findWorker(req.params.id);
-  if (!worker?.session) return res.status(404).json({ error: "no session for worker" });
-  const port = await startTtyd(worker.session);
-  if (port === null) return res.status(503).json({ error: "ttyd no instalado (brew install ttyd)", code: "TTYD_UNAVAILABLE" });
-  // 127.0.0.1 (not "localhost") — ttyd binds IPv4 while the browser may resolve localhost to ::1.
-  res.json({ url: `http://127.0.0.1:${port}` });
-});
-
-// Respond to a worker (type into its pane)
-app.post("/api/workers/:id/input", async (req, res) => {
-  const text = String(req.body?.text ?? "");
-  const result = await workerInput(req.params.id, text);
-  if (result === "ok") return res.json({ ok: true });
-  if (result === "no-session") return res.status(404).json({ error: "no session for worker" });
-  if (result === "gone") return res.status(409).json({ error: "el pane ya no existe", code: "PANE_GONE" });
-  // "elsewhere" (movido a otra sesión) y "unresolved" (sin target que verificar) comparten el
-  // mismo código: ninguno es "no hay sesión", ambos son "este pane concreto no es escribible".
-  return res.status(400).json({ error: "el pane pertenece a otra sesión", code: "PANE_NOT_IN_SESSION" });
-});
-
-// Launch a worker for a task (simulated, or a real tmux+claude session in live mode)
-app.post("/api/tasks/:id/launch", async (req, res) => {
-  const stageKeys: string[] | undefined = Array.isArray(req.body?.stageKeys)
-    ? req.body.stageKeys.filter((x: unknown) => typeof x === "string")
-    : undefined;
-  const opts = launchOpts(req.body); // per-launch model overrides (sanitized server-side)
-  const worker = await launchTask(req.params.id, stageKeys, opts);
-  if (!worker) return res.status(404).json({ error: "task not found" });
-  res.json(worker);
-});
-
-// Launch a read-only research worker for a task (investigates + proposes a plan)
-app.post("/api/tasks/:id/research", async (req, res) => {
-  const worker = await launchResearch(req.params.id);
-  if (!worker) return res.status(404).json({ error: "task not found" });
-  res.json({ worker });
-});
-
-// Launch a user-defined custom action worker for a task (decoupled del tablero, como research).
-// 404 si la tarea o la acción no existe.
-app.post("/api/tasks/:id/action/:key", async (req, res) => {
-  const worker = await launchAction(req.params.id, req.params.key);
-  if (!worker) return res.status(404).json({ error: "task or action not found" });
-  res.json({ worker });
-});
-
-// Best-effort description for the preview modal: body → clickup lazy fetch → title fallback
-app.get("/api/tasks/:id/description", async (req, res) => {
-  const task = findTask(req.params.id);
-  if (!task) return res.status(404).json({ error: "task not found" });
-  if (task.body && task.body.trim()) return res.json({ description: task.body });
-  if (task.source === "clickup") {
-    const desc = await fetchClickUpDescription(task.id);
-    if (desc) {
-      task.body = desc;                    // cachea en el objeto vivo (snapshot lo clona)
-      return res.json({ description: desc });
-    }
-  }
-  res.json({ description: task.title });    // fallback
-});
 
 // Read / edit the composable workflow (data/workflow.json)
 app.get("/api/workflow", (_req, res) => {
@@ -478,16 +272,8 @@ app.get("/api/workflow", (_req, res) => {
 app.put("/api/workflow", (req, res) => {
   try {
     const input = { stages: req.body?.stages, verifyAfter: req.body?.verifyAfter ?? null };
-    // T13: plan the hot-apply against every affected LIVE worker BEFORE writing anything — a
-    // rename/removal/reorder that would orphan an already-written sentinel aborts the save
-    // entirely (409), rather than persisting an edit no live worker can safely follow.
-    const ops = planHotApply(validateStages(input, { strict: true }));
-    const saved = saveWorkflow(input);
-    commitHotApply(ops);
-    emit(); // snapshot.stages changed → push to all clients
-    res.json(saved);
+    res.json(saveWorkflow(input));
   } catch (e) {
-    if (e instanceof StageInFlightError) return void res.status(409).json({ error: e.message, code: e.code });
     res.status(400).json(workflowErrorBody(e));
   }
 });
@@ -633,57 +419,7 @@ app.post("/api/prompts/:key/reset", (req, res) => {
   }
 });
 
-// Leer / editar las acciones custom (data/actions.json). Bare JSON como /api/workflow. Sin emit():
-// las acciones no forman parte de Snapshot (la App las trae aparte). Registry inválido → 400.
-app.get("/api/actions", (_req, res) => {
-  res.json(getActions());
-});
-app.put("/api/actions", (req, res) => {
-  try {
-    res.json(saveActions(req.body));
-  } catch (e) {
-    res.status(400).json({ error: (e as Error).message });
-  }
-});
 
-// Stop a worker (kills its tmux session in live mode)
-app.post("/api/workers/:id/stop", async (req, res) => {
-  const ok = await stopWorker(req.params.id);
-  if (!ok) return res.status(404).json({ error: "worker not found" });
-  res.json({ ok: true });
-});
-
-// Open a visible Terminal attached to the worker's tmux session (live mode).
-// `role` (modo driver) zoomea ese pane ANTES de abrir, para que la terminal nativa lo muestre a
-// pantalla completa. Si el zoom no se pudo aplicar, no se abre nada (ver attachWorker).
-app.post("/api/workers/:id/attach", async (req, res) => {
-  const role = parsePaneRoleParam(req.body?.role);
-  if (!role.ok) return res.status(400).json({ error: "rol inválido" });
-  sendFocusResult(res, await attachWorker(req.params.id, role.role));
-});
-
-// Zoom de tmux sobre un pane concreto (`role: null` → volver a los 4 panes).
-// OJO: el zoom es estado de la VENTANA, no del cliente — lo ven todos los attachados.
-app.post("/api/workers/:id/focus", async (req, res) => {
-  const role = parsePaneRoleParam(req.body?.role);
-  if (!role.ok) return res.status(400).json({ error: "rol inválido" });
-  sendFocusResult(res, await focusPane(req.params.id, role.role));
-});
-
-// Los 4 panes de una sesión driver con su estado + qué rol está zoomeado ahora mismo
-app.get("/api/workers/:id/panes", async (req, res) => {
-  const result = await workerPanes(req.params.id);
-  if (!result) return res.status(404).json({ error: "no session for worker" });
-  if (result === "degraded") {
-    return res.status(409).json({ error: "layout degradado: no se pudieron resolver los 4 panes" });
-  }
-  res.json(result);
-});
-
-// Inventario tmux completo: gestionadas por Ronin + ajenas al operador (F1).
-// Sólo lectura: dos `tmux list-*`, ~4 ms cada uno. Sin caché a propósito — es más barato
-// recalcularlo que arriesgarse a mostrarlo rancio (mismo criterio que los badges de salud
-// del driver, que también se derivan en cada poll).
 app.get("/api/sessions", async (_req, res) => {
   const inventory = await readInventory();
   const presentations = sessionPresentations.list(inventory.sessions.map((session) => session.name));
@@ -734,6 +470,7 @@ app.delete("/api/sessions/:name", async (req, res) => {
   if (req.body?.confirm !== true) return res.status(400).json({ error: "confirmación requerida", code: "CONFIRMATION_REQUIRED" });
   if (!(await hasSession(name))) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
   await killSession(name);
+  recordEvent({ type: "close", key: name, title: name, repo: "", source: "session" });
   res.json({ ok: true });
 });
 
@@ -948,10 +685,7 @@ app.get("/api/preflight", async (_req, res) => {
 });
 
 // Manual re-sync of the board (refresh button)
-app.post("/api/refresh", async (_req, res) => {
-  const result = await refreshTasks();
-  res.json(result);
-});
+// The sessions inventory is authoritative; board refresh no longer exists.
 
 // Work history (JSONL). ?from=&to= in ms (default: last 7 days).
 app.get("/api/history", (req, res) => {
@@ -989,54 +723,6 @@ app.get("/api/reports/:name", (req, res) => {
   }
 });
 
-// Pin / unpin a task into "today's plan"
-app.post("/api/today/pin/:id", (req, res) => {
-  const pins = togglePin(req.params.id, true);
-  emit();
-  res.json({ pins });
-});
-app.post("/api/today/unpin/:id", (req, res) => {
-  const pins = togglePin(req.params.id, false);
-  emit();
-  res.json({ pins });
-});
-
-// Persist the user's manual task ordering (secondary sort within priority)
-app.post("/api/order", (req, res) => {
-  const ids: string[] = Array.isArray(req.body?.order)
-    ? req.body.order.filter((x: unknown) => typeof x === "string")
-    : [];
-  setOrder(ids);
-  emit();
-  res.json({ ok: true });
-});
-
-// Live terminal content of a worker's tmux pane. `?role=` (modo driver) elige cuál; sin él, el
-// pane del driver. Un role con typo es 400 aquí igual que en POST: tragárselo devolvería el pane
-// driver como si nada, y el usuario vería el pane equivocado sin ninguna señal.
-app.get("/api/workers/:id/pane", async (req, res) => {
-  const role = parsePaneRoleParam(req.query.role);
-  if (!role.ok) return res.status(400).json({ error: "rol inválido" });
-  const result = await workerPane(req.params.id, role.role);
-  if (!result) return res.status(404).json({ error: "worker not found" });
-  res.json(result);
-});
-
-// Evidence artifacts produced by the worker (markdown + screenshot names)
-app.get("/api/workers/:id/evidence", (req, res) => {
-  const worker = findWorker(req.params.id);
-  if (!worker?.cycle) return res.status(404).json({ error: "worker not found" });
-  res.json(readEvidence(worker.cycle));
-});
-
-// Serve a single evidence image (screenshot). Name is sanitized to its basename.
-app.get("/api/workers/:id/evidence/file/:name", (req, res) => {
-  const worker = findWorker(req.params.id);
-  if (!worker?.cycle) return res.status(404).end();
-  const safe = req.params.name.replace(/[/\\]/g, "").replace(/\.\./g, "");
-  if (!/\.(png|jpe?g|gif|webp)$/i.test(safe)) return res.status(400).end();
-  res.sendFile(join(evidenceDir(worker.cycle), safe));
-});
 
 // ---- Test harness (/api/tests). El renderer manda IDENTIFICADORES (repo/perfil/suite), nunca
 // texto ejecutable: parseSelection rechaza cualquier otra forma antes de llegar al servicio.
@@ -1126,8 +812,6 @@ return app;
 }
 
 type Cleanup = () => void | Promise<void>;
-type EngineHandle = { mode: "simulated" | "live"; close: Cleanup };
-
 export interface ServerHandle {
   app: express.Express;
   server: Server;
@@ -1138,8 +822,6 @@ export interface ServerHandle {
 export interface ServerDependencies {
   createApp: () => express.Express;
   ensureCapability: () => string;
-  initTasks: () => Promise<string>;
-  startEngine: (taskSource: string) => Promise<EngineHandle>;
   startBackground: () => Promise<Cleanup>;
   listen: (app: express.Express, port: number) => Promise<Server>;
 }
@@ -1168,15 +850,9 @@ function listenOnLoopback(app: express.Express, port: number): Promise<Server> {
   });
 }
 
-async function startDefaultEngine(taskSource: string): Promise<EngineHandle> {
-  const mode = await start(taskSource);
-  return { mode, close: stopEngine };
-}
-
 async function startDefaultBackground(): Promise<Cleanup> {
-  const cleanups: Cleanup[] = [startAutoRefresh(CLICKUP_REFRESH_MS)];
+  const cleanups: Cleanup[] = [];
   try {
-    if (DM_POLL) cleanups.push(await startDmPoller(DM_POLL_MS));
     if (REPORT_SCHEDULE) cleanups.push(startReportSchedule());
   } catch (error) {
     await Promise.allSettled(cleanups.reverse().map((cleanup) => cleanup()));
@@ -1190,33 +866,27 @@ async function startDefaultBackground(): Promise<Cleanup> {
 const defaultDependencies: ServerDependencies = {
   createApp,
   ensureCapability: ensureCapabilityToken,
-  initTasks,
-  startEngine: startDefaultEngine,
   startBackground: startDefaultBackground,
   listen: listenOnLoopback,
 };
 
 /**
- * Starts only after data, engine and background producers are ready. Binding is intentionally
+ * Starts only after local capability and background producers are ready. Binding is intentionally
  * last, so a successful health response proves the runtime exists rather than merely a socket.
  */
 export async function startServer(options: StartServerOptions = {}): Promise<ServerHandle> {
   const deps = { ...defaultDependencies, ...options.deps };
   const app = deps.createApp();
   const requestedPort = options.port ?? PORT;
-  let engine: EngineHandle | undefined;
   let background: Cleanup | undefined;
   let server: Server | undefined;
 
   try {
     deps.ensureCapability();
-    const source = await deps.initTasks();
-    engine = await deps.startEngine(source);
     background = await deps.startBackground();
     server = await deps.listen(app, requestedPort);
   } catch (error) {
     if (background) await background();
-    if (engine) await engine.close();
     throw error;
   }
 
@@ -1225,12 +895,11 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
   const close = once(async () => {
     await closeServer(server!);
     await background!();
-    await engine!.close();
   });
 
   console.log(
     `[claude-cowork] server en http://localhost:${port}  ` +
-      `(modo: ${engine.mode}, auto-refresh: ${Math.round(CLICKUP_REFRESH_MS / 1000)}s)`,
+      `(sesiones gestionadas listas)`,
   );
   return { app, server, port, close: async () => { await close(); } };
 }

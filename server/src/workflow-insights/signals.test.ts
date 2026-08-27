@@ -36,19 +36,19 @@ function fakeDeps(overrides: FakeOverrides = {}): SignalDeps {
   };
 }
 
-test("collectSignals groups history by key with counts and window, and caps at 80 tasks", async () => {
+test("collectSignals groups session history by session name with launch/close/adopt counts and caps at 80 sessions", async () => {
   const events: HistoryEvent[] = [
-    { ts: from + 1, type: "launch", key: "CU-1", title: "A", source: "clickup", repo: "api", body: "b" },
-    { ts: from + 2, type: "stop", key: "CU-1", title: "A", source: "clickup", repo: "api" },
-    { ts: from + 3, type: "launch", key: "CU-1", title: "A", source: "clickup", repo: "api" },
-    { ts: from + 4, type: "complete", key: "CU-1", title: "A", source: "clickup", repo: "api", evidence: "hecho" },
-    ...Array.from({ length: 100 }, (_, i) => ({ ts: from + 10 + i, type: "launch" as const, key: `X-${i}`, title: `t${i}`, source: "jira", repo: "api" })),
+    { ts: from + 1, type: "launch", key: "cowork-api", title: "cowork-api", source: "session", repo: "api", request: "b" },
+    { ts: from + 2, type: "close", key: "cowork-api", title: "cowork-api", source: "session", repo: "api" },
+    { ts: from + 3, type: "launch", key: "cowork-api", title: "cowork-api", source: "session", repo: "api" },
+    { ts: from + 4, type: "adopt", key: "cowork-api", title: "cowork-api", source: "session", repo: "api", evidence: "hecho" },
+    ...Array.from({ length: 100 }, (_, i) => ({ ts: from + 10 + i, type: "launch" as const, key: `session-${i}`, title: `session-${i}`, source: "session" as const, repo: "api" })),
   ];
   const s = await collectSignals(range, fakeDeps({ events }));
-  const cu = s.tasks.find((t) => t.key === "CU-1")!;
-  assert.deepEqual([cu.launches, cu.stops, cu.completes, cu.lastEvidence], [2, 1, 1, "hecho"]);
+  const session = s.tasks.find((t) => t.key === "cowork-api")!;
+  assert.deepEqual([session.launches, session.closes, session.adoptions, session.lastEvidence], [2, 1, 1, "hecho"]);
   assert.equal(s.tasks.length, 80);
-  assert.equal(s.tasks[0].key, "CU-1"); // más eventos primero
+  assert.equal(s.tasks[0].key, "cowork-api"); // más eventos primero
 });
 
 test("collectSignals caps commits per repo and reads only evidence files modified in the window", async () => {
@@ -80,14 +80,14 @@ test("collectSignals never throws when a repo folder is missing", async () => {
   assert.deepEqual(s.evidence, []);
 });
 
-test("collectSignals truncates body to 300 chars and lastEvidence to 500 chars", async () => {
+test("collectSignals truncates request to 300 chars and lastEvidence to 500 chars", async () => {
   const events: HistoryEvent[] = [
-    { ts: from + 1, type: "launch", key: "CU-9", title: "T", source: "clickup", repo: "api", body: "b".repeat(400) },
-    { ts: from + 2, type: "complete", key: "CU-9", title: "T", source: "clickup", repo: "api", evidence: "e".repeat(600) },
+    { ts: from + 1, type: "launch", key: "cowork-api", title: "cowork-api", source: "session", repo: "api", request: "b".repeat(400) },
+    { ts: from + 2, type: "adopt", key: "cowork-api", title: "cowork-api", source: "session", repo: "api", evidence: "e".repeat(600) },
   ];
   const s = await collectSignals(range, fakeDeps({ events }));
-  const t = s.tasks.find((x) => x.key === "CU-9")!;
-  assert.equal(t.body!.length, 300);
+  const t = s.tasks.find((x) => x.key === "cowork-api")!;
+  assert.equal(t.request!.length, 300);
   assert.equal(t.lastEvidence!.length, 500);
 });
 

@@ -14,18 +14,18 @@ import type { AnalysisRange } from "./model.js";
  * `defaultSignalDeps`) para poder testear con fakes.
  */
 
-export interface TaskSignal {
+export interface SessionSignal {
   key: string;
   title: string;
   source: string;
   repo: string;
   launches: number;
-  stops: number;
-  completes: number;
+  closes: number;
+  adoptions: number;
   firstTs: number;
   lastTs: number;
   lastEvidence?: string;
-  body?: string;
+  request?: string;
 }
 
 export interface EvidenceSignal {
@@ -37,7 +37,7 @@ export interface EvidenceSignal {
 
 export interface Signals {
   range: { from: string; to: string };
-  tasks: TaskSignal[];
+  tasks: SessionSignal[];
   commits: Record<string, { hash: string; subject: string; ts: number }[]>;
   evidence: EvidenceSignal[];
 }
@@ -106,8 +106,8 @@ export const defaultSignalDeps: SignalDeps = {
   readFile: defaultReadFile,
 };
 
-function collectTasks(events: HistoryEvent[]): TaskSignal[] {
-  const byKey = new Map<string, TaskSignal>();
+function collectTasks(events: HistoryEvent[]): SessionSignal[] {
+  const byKey = new Map<string, SessionSignal>();
   const bodyTs = new Map<string, number>();
   const evidenceTs = new Map<string, number>();
 
@@ -120,22 +120,22 @@ function collectTasks(events: HistoryEvent[]): TaskSignal[] {
         source: ev.source,
         repo: ev.repo,
         launches: 0,
-        stops: 0,
-        completes: 0,
+        closes: 0,
+        adoptions: 0,
         firstTs: ev.ts,
         lastTs: ev.ts,
       };
       byKey.set(ev.key, t);
     }
     if (ev.type === "launch") t.launches++;
-    else if (ev.type === "stop") t.stops++;
-    else if (ev.type === "complete") t.completes++;
+    else if (ev.type === "close") t.closes++;
+    else if (ev.type === "adopt") t.adoptions++;
     t.firstTs = Math.min(t.firstTs, ev.ts);
     t.lastTs = Math.max(t.lastTs, ev.ts);
 
     const prevBodyTs = bodyTs.get(ev.key);
-    if (ev.body !== undefined && (prevBodyTs === undefined || ev.ts >= prevBodyTs)) {
-      t.body = truncateChars(ev.body, BODY_MAX);
+    if (ev.request !== undefined && (prevBodyTs === undefined || ev.ts >= prevBodyTs)) {
+      t.request = truncateChars(ev.request, BODY_MAX);
       bodyTs.set(ev.key, ev.ts);
     }
     const prevEvidenceTs = evidenceTs.get(ev.key);
@@ -146,7 +146,7 @@ function collectTasks(events: HistoryEvent[]): TaskSignal[] {
   }
 
   const tasks = [...byKey.values()];
-  tasks.sort((a, b) => b.launches + b.stops + b.completes - (a.launches + a.stops + a.completes));
+  tasks.sort((a, b) => b.launches + b.closes + b.adoptions - (a.launches + a.closes + a.adoptions));
   return tasks.slice(0, LIMITS.tasks);
 }
 
