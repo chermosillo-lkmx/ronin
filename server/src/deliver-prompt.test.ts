@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { deliverPromptWhenReady, type PromptDeliveryDeps } from "./engine.js";
+import { deliverPromptWhenReady, TUI_READY_ATTEMPTS, TUI_READY_INTERVAL_MS, type PromptDeliveryDeps } from "./engine.js";
 
 function deps(captures: Array<string | null>): PromptDeliveryDeps & { calls: string[] } {
   const calls: string[] = [];
@@ -36,12 +36,24 @@ test("deliverPromptWhenReady: espera una señal de TUI antes de entregar", async
   assert.deepEqual(d.calls, ["wait", "wait", "text:5"]);
 });
 
+test("deliverPromptWhenReady: conserva el prompt hasta una TUI que aparece en el intento 40", async () => {
+  const d = deps([...Array<string>(39).fill("shell$ "), "Claude Code\n❯ ", "Claude Code\n❯ "]);
+  await deliverPromptWhenReady("cowork-arranque-frio", "corto", d);
+
+  assert.equal(d.calls.filter((call) => call === "wait").length, 39);
+  assert.ok(d.calls.includes("text:5"));
+});
+
 test("deliverPromptWhenReady: no entrega texto a un pane que nunca prueba tener la CLI viva", async () => {
   const d = deps(["zsh: command not found: claude", "shell$ "]);
   await deliverPromptWhenReady("cowork-a", "$(touch /tmp/no-debe-ejecutarse)", d);
 
   assert.equal(d.calls.some((call) => call.startsWith("text:") || call.startsWith("paste:")), false);
-  assert.ok(d.calls.includes("log:COWORK_PROMPT_NOT_DELIVERED_NO_CLI:cowork-a"));
+  assert.ok(d.calls.includes("log:COWORK_PROMPT_NOT_DELIVERED_NO_CLI:cowork-a:waited_ms=30000"));
+});
+
+test("deliverPromptWhenReady: el presupuesto para un arranque frío es al menos 30 segundos", async () => {
+  assert.ok(TUI_READY_ATTEMPTS * TUI_READY_INTERVAL_MS >= 30_000);
 });
 
 test("deliverPromptWhenReady: reintenta Enter de forma acotada mientras queda paste pendiente", async () => {

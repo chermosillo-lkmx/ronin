@@ -19,8 +19,10 @@ export interface PromptDeliveryDeps {
   log: (message: string) => void;
 }
 
-const TUI_READY_ATTEMPTS = 10;
-const TUI_READY_INTERVAL_MS = 300;
+// Claude Code puede tardar ~30 s en su arranque en frío. Esta espera se ejecuta fire-and-forget
+// desde session-launch, así que ampliar el presupuesto no retrasa la respuesta HTTP del lanzamiento.
+export const TUI_READY_ATTEMPTS = 100;
+export const TUI_READY_INTERVAL_MS = 300;
 const PENDING_ENTER_ATTEMPTS = 2;
 
 const defaultPromptDeliveryDeps: PromptDeliveryDeps = {
@@ -46,7 +48,7 @@ export async function deliverPromptWhenReady(session: string, prompt: string, de
     await deps.sleep(TUI_READY_INTERVAL_MS);
   }
   if (!cliReady) {
-    deps.log(`COWORK_PROMPT_NOT_DELIVERED_NO_CLI:${session}`);
+    deps.log(`COWORK_PROMPT_NOT_DELIVERED_NO_CLI:${session}:waited_ms=${TUI_READY_ATTEMPTS * TUI_READY_INTERVAL_MS}`);
     return;
   }
 
