@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import {
+  buildCaptureArgs,
   capturePaneAnsi,
   classifyTmuxInventoryError,
   clearAdoptedMark,
@@ -10,6 +11,7 @@ import {
   listSessionPaneIds,
   readAdoptedMark,
   readPaneGeometry,
+  parseCaptureBatch,
   sendText,
   setAdoptedMark,
   tmuxCommand,
@@ -99,6 +101,41 @@ test("clasifica binario ausente y socket inaccesible", () => {
   const inaccessible = Object.assign(new Error("Command failed"), { code: "EPERM", stderr: "error connecting to /private/tmp/tmux-501/default (Operation not permitted)" });
   assert.equal(classifyTmuxInventoryError(missing)?.code, "TMUX_NOT_FOUND");
   assert.equal(classifyTmuxInventoryError(inaccessible)?.code, "TMUX_SERVER_UNREACHABLE");
+});
+
+test("buildCaptureArgs: separa cada comando de un batch de capture-pane", () => {
+  const args = buildCaptureArgs(["%1", "%2"], 25);
+
+  assert.equal(args.filter((arg) => arg === ";").length, 3);
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === "capture-pane" || args[index] === "display-message") {
+      if (index > 0) assert.equal(args[index - 1], ";", `${args[index]} debe empezar tras un separador`);
+    }
+  }
+});
+
+test("parseCaptureBatch: asigna cada captura de stdout a su pane", () => {
+  const stdout = "primera captura\n__COWORK_CAPTURE_0__\nsegunda captura\n__COWORK_CAPTURE_1__\n";
+
+  assert.deepEqual(
+    parseCaptureBatch(stdout, ["%1", "%2"]),
+    new Map([["%1", "primera captura"], ["%2", "segunda captura"]]),
+  );
+});
+
+test("parseCaptureBatch: un marcador faltante invalida el batch completo", () => {
+  const stdout = "primera captura\n__COWORK_CAPTURE_0__\nsegunda captura\n";
+
+  assert.deepEqual(parseCaptureBatch(stdout, ["%1", "%2"]), new Map());
+});
+
+test("parseCaptureBatch: no confunde una mención del marcador dentro de una captura", () => {
+  const stdout = "texto __COWORK_CAPTURE_0__ mostrado\n__COWORK_CAPTURE_0__\nsegunda captura\n__COWORK_CAPTURE_1__\n";
+
+  assert.deepEqual(
+    parseCaptureBatch(stdout, ["%1", "%2"]),
+    new Map([["%1", "texto __COWORK_CAPTURE_0__ mostrado"], ["%2", "segunda captura"]]),
+  );
 });
 
 // ---- @cowork-adopted (T2/T4), contra tmux REAL en un socket propio y desechable ----

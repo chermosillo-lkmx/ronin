@@ -221,6 +221,36 @@ export async function capturePaneSafe(target: string): Promise<string | null> {
   }
 }
 
+function captureMarkers(paneIds: string[]): string[] {
+  return paneIds.map((_, index) => `__COWORK_CAPTURE_${index}__`);
+}
+
+/** Construye el batch tmux: cada comando queda separado por su propio `;`. PURA (testeable). */
+export function buildCaptureArgs(paneIds: string[], lines: number): string[] {
+  const markers = captureMarkers(paneIds);
+  const args: string[] = [];
+  for (let index = 0; index < paneIds.length; index++) {
+    if (args.length) args.push(";");
+    args.push("capture-pane", "-p", "-S", `-${lines}`, "-t", paneIds[index]!, ";", "display-message", "-p", markers[index]!);
+  }
+  return args;
+}
+
+/** Parsea un batch completo; un marcador ausente invalida todas las capturas. PURA (testeable). */
+export function parseCaptureBatch(stdout: string, paneIds: string[]): Map<string, string | null> {
+  const markers = captureMarkers(paneIds);
+  const outputLines = stdout.split(/\r?\n/);
+  const captures = new Map<string, string | null>();
+  let start = 0;
+  for (let index = 0; index < paneIds.length; index++) {
+    const end = outputLines.indexOf(markers[index]!, start);
+    if (end < 0) return new Map(); // formato incompleto: no inferir cuáles panes siguen vivos
+    captures.set(paneIds[index]!, outputLines.slice(start, end).join("\n"));
+    start = end + 1;
+  }
+  return captures;
+}
+
 /**
  * Captura la cola de todos los panes en UNA invocación a tmux. El inventario se refresca cada
  * cinco segundos: hacer un proceso por pane convertiría una señal visual barata en coste lineal.
@@ -229,22 +259,9 @@ export async function capturePaneSafe(target: string): Promise<string | null> {
  */
 export async function capturePanesTail(paneIds: string[], lines: number = 25): Promise<Map<string, string | null>> {
   if (!paneIds.length) return new Map();
-  const markers = paneIds.map((paneId, index) => `__COWORK_CAPTURE_${index}_${paneId}__`);
-  const args: string[] = [];
-  for (let index = 0; index < paneIds.length; index++) {
-    args.push("capture-pane", "-p", "-S", `-${lines}`, "-t", paneIds[index]!, ";", "display-message", "-p", markers[index]!);
-  }
   try {
-    const { stdout } = await pexec("tmux", tmuxArgs(...args));
-    const captures = new Map<string, string | null>();
-    let start = 0;
-    for (let index = 0; index < paneIds.length; index++) {
-      const end = stdout.indexOf(markers[index]!, start);
-      if (end < 0) return new Map(); // formato incompleto: no inferir cuáles panes siguen vivos
-      captures.set(paneIds[index]!, stdout.slice(start, end).replace(/\n$/, ""));
-      start = end + markers[index]!.length;
-    }
-    return captures;
+    const { stdout } = await pexec("tmux", tmuxArgs(...buildCaptureArgs(paneIds, lines)));
+    return parseCaptureBatch(stdout, paneIds);
   } catch {
     return new Map();
   }
