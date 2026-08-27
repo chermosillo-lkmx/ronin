@@ -7,12 +7,21 @@ import { promisify } from "node:util";
  * localhost (IPv4). The dashboard embeds it (iframe) for full interactivity.
  */
 const pexecFile = promisify(execFile);
-let ttydAvailable: Promise<boolean> | undefined;
 
-async function hasTtyd(): Promise<boolean> {
-  ttydAvailable ??= pexecFile("ttyd", ["--version"]).then(() => true, () => false);
-  return ttydAvailable;
+/** The desktop main process resolves Homebrew ttyd before launching this backend. */
+export function ttydCommand(): string {
+  return process.env.COWORK_TTYD_BIN?.trim() || "ttyd";
 }
+
+export function createTtydAvailability(run = pexecFile): () => Promise<boolean> {
+  let ttydAvailable: Promise<boolean> | undefined;
+  return async () => {
+    ttydAvailable ??= run(ttydCommand(), ["--version"]).then(() => true, () => false);
+    return ttydAvailable;
+  };
+}
+
+const hasTtyd = createTtydAvailability();
 
 /**
  * ttyd tarda unos ms entre `spawn` y `listen`. Si devolvemos el puerto antes, el iframe carga
@@ -55,7 +64,7 @@ export function createTtydManager(deps: { hasTtyd?: () => Promise<boolean>; spaw
       }
       const port = nextPort++;
       const proc = launch(
-        "ttyd",
+        ttydCommand(),
         ["-p", String(port), "-i", "127.0.0.1", "-W", "-t", "fontSize=13", "tmux", "attach", "-t", session],
         { stdio: "ignore" }
       );

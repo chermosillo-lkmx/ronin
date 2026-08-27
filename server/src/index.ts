@@ -481,7 +481,7 @@ app.post("/api/sessions/:name/term", async (req, res) => {
   if (!isSafeSessionName(name)) return res.status(400).json({ error: "nombre de sesión inválido", code: "INVALID_SESSION" });
   if (!(await terminal.hasSession(name))) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
   const port = await terminal.startTtyd(name);
-  if (port === null) return res.status(503).json({ error: "ttyd no instalado (brew install ttyd)", code: "TTYD_UNAVAILABLE" });
+  if (port === null) return res.status(503).json({ error: "ttyd no encontrado — instálalo con `brew install ttyd`", code: "TTYD_UNAVAILABLE" });
   res.json({ url: `http://127.0.0.1:${port}` });
 });
 

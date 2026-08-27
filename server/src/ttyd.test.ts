@@ -1,7 +1,36 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { createTtydManager } from "./ttyd.js";
+import { createTtydAvailability, createTtydManager, ttydCommand } from "./ttyd.js";
+
+test("COWORK_TTYD_BIN controla tanto la comprobación como el spawn", async () => {
+  const previous = process.env.COWORK_TTYD_BIN;
+  process.env.COWORK_TTYD_BIN = "/ruta/falsa/ttyd";
+  try {
+    const checked: string[] = [];
+    const available = createTtydAvailability(async (command) => { checked.push(command); });
+    assert.equal(ttydCommand(), "/ruta/falsa/ttyd");
+    assert.equal(await available(), true);
+    assert.deepEqual(checked, ["/ruta/falsa/ttyd"]);
+
+    const spawned: string[] = [];
+    const manager = createTtydManager({
+      hasTtyd: available,
+      waitReady: async () => true,
+      spawn: (command) => {
+        spawned.push(command);
+        const proc = new EventEmitter();
+        queueMicrotask(() => proc.emit("spawn"));
+        return proc as any;
+      },
+    });
+    assert.equal(await manager.start("con-bin-configurado"), 7781);
+    assert.deepEqual(spawned, ["/ruta/falsa/ttyd"]);
+  } finally {
+    if (previous === undefined) delete process.env.COWORK_TTYD_BIN;
+    else process.env.COWORK_TTYD_BIN = previous;
+  }
+});
 
 test("startTtyd deduplica solicitudes simultáneas de la misma sesión", async () => {
   let spawned = 0;

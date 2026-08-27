@@ -5,7 +5,7 @@ import { resolveCapabilityFile } from "./capability-path.js";
 import { createBackendSupervisor } from "./backend-supervisor.js";
 import { createPtyManager } from "./pty.js";
 import { runSmoke } from "./smoke.js";
-import { resolveTmuxBinary } from "./tmux-path.js";
+import { resolveBinary, resolveTmuxBinary } from "./tmux-path.js";
 
 export interface MainApp {
   whenReady(): Promise<void>;
@@ -33,11 +33,12 @@ export function resolveDesktopRoot(appPath: string | undefined, cwd: string): st
 
 export function backendEnvironment(
   base: NodeJS.ProcessEnv,
-  options: { tmuxBinary?: string; dataDir?: string; tmuxSocket?: string },
+  options: { tmuxBinary?: string; ttydBinary?: string; dataDir?: string; tmuxSocket?: string },
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
   if (options.dataDir) env.COWORK_DATA_DIR = options.dataDir;
   if (options.tmuxBinary) env.COWORK_TMUX_BIN = options.tmuxBinary;
+  if (options.ttydBinary) env.COWORK_TTYD_BIN = options.ttydBinary;
   if (options.tmuxSocket) env.COWORK_TMUX_SOCKET = options.tmuxSocket;
   return env;
 }
@@ -121,6 +122,7 @@ if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { typ
   const tmuxSocketArg = process.argv.find((argument) => argument.startsWith("--tmux-socket="));
   const tmuxSocket = tmuxSocketArg?.slice("--tmux-socket=".length);
   const tmuxBinary = resolveTmuxBinary({ env: process.env });
+  const ttydBinary = resolveBinary({ binary: "ttyd", environmentVariable: "COWORK_TTYD_BIN", env: process.env });
   const desktopDataDir = electron.app.isPackaged && electron.app.getPath && !process.env.COWORK_DATA_DIR
     ? join(electron.app.getPath("userData"), "data")
     : undefined;
@@ -133,7 +135,7 @@ if (shouldStartElectronMain(process.versions, (process as NodeJS.Process & { typ
     createSupervisor: (onExit) => createBackendSupervisor({
       fork: electron.utilityProcess.fork,
       entry: join(root, "server", "dist", "server-entry.js"),
-      env: backendEnvironment(process.env, { tmuxBinary, dataDir: desktopDataDir, tmuxSocket }),
+      env: backendEnvironment(process.env, { tmuxBinary, ttydBinary, dataDir: desktopDataDir, tmuxSocket }),
       onExit,
     }),
     shell: electron.shell,

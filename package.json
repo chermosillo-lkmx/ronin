@@ -16,7 +16,7 @@
     "build:desktop": "tsc -p tsconfig.desktop.json",
     "package:desktop": "npm run build -w web && npm run build:server && npm run build:desktop && electron-builder --config electron-builder.yml",
     "package:desktop:dir": "npm run build -w web && npm run build:server && npm run build:desktop && electron-builder --config electron-builder.yml --dir",
-    "test:desktop": "node --import tsx --test desktop/main/backend-supervisor.test.ts desktop/main/renderer-readiness.test.ts desktop/main/window-security.test.ts desktop/main/pty.test.ts desktop/main/ipc.test.ts desktop/main/session-name.test.ts desktop/main/capability-path.test.ts desktop/main/smoke.test.ts desktop/main/bootstrap.test.ts desktop/main/app-protocol.test.ts desktop/main/tmux-path.test.ts desktop/main/index.test.ts desktop/preload/index.test.ts desktop/test/electron-launcher.test.mjs",
+    "test:desktop": "node --import tsx --test desktop/main/backend-supervisor.test.ts desktop/main/renderer-readiness.test.ts desktop/main/window-security.test.ts desktop/main/pty.test.ts desktop/main/ipc.test.ts desktop/main/session-name.test.ts desktop/main/capability-path.test.ts desktop/main/smoke.test.ts desktop/main/bootstrap.test.ts desktop/main/app-protocol.test.ts desktop/main/tmux-path.test.ts desktop/main/ttyd-path.test.ts desktop/main/index.test.ts desktop/preload/index.test.ts desktop/test/electron-launcher.test.mjs",
     "dev:electron": "npm run build:server && npm run build:desktop && concurrently --kill-others --success first -n VITE,ELECTRON \"npm run dev -w web\" \"node desktop/electron-launcher.mjs desktop/dist/main/index.js --dev\"",
     "tests:all": "node scripts/run-tests.mjs all",
     "tests:failed": "node scripts/run-tests.mjs failed",
