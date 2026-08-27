@@ -1,1 +1,1 @@
-export const APP_VIEWS = ["board", "settings", "reports", "sessions", "sesiones", "preflight", "workflow", "tests", "skills"] as const;
+export const APP_VIEWS = ["sessions", "settings", "reports", "preflight", "workflow", "tests", "skills"] as const;

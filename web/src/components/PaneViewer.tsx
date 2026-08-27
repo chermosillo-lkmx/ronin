@@ -67,18 +67,31 @@ export function PaneViewer({ session, paneId, kind, className = "" }: PaneViewer
     // 200ms el pane enfocado (P4/§6.1 del plan) — esta pantalla siempre está "enfocada" al
     // montarse, no hay rejilla de celdas de fondo con intervalo distinto todavía.
     const POLL_MS = 200;
+    let timer: number | undefined;
+    let refresh: Promise<void> | undefined;
+    let disposeRequested = false;
+    const disposeTerminal = () => {
+      if (disposeRequested) return;
+      disposeRequested = true;
+      terminal.dispose();
+    };
     const loop = async () => {
       if (disposed) return;
-      await paneTerminal.poll().catch(() => {});
+      refresh = paneTerminal.poll().catch(() => {});
+      await refresh;
+      refresh = undefined;
       if (!disposed) timer = window.setTimeout(loop, POLL_MS);
     };
-    let timer = window.setTimeout(loop, 0);
+    timer = window.setTimeout(loop, 0);
 
     return () => {
       disposed = true;
-      window.clearTimeout(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
       dataSubscription.dispose();
-      terminal.dispose();
+      // Wait for the in-flight capture to observe `disposed` before tearing down xterm. This
+      // prevents a StrictMode cleanup from disposing its dimensions while a refresh unwinds.
+      if (refresh) void refresh.finally(disposeTerminal);
+      else disposeTerminal();
     };
   }, [session, paneId, kind]);
 

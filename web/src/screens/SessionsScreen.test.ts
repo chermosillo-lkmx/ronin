@@ -22,3 +22,11 @@ test("SessionWorkspace renders ttyd, its fallback and Attach", () => {
   }));
   assert.match(fallback, /respaldo de sólo lectura/);
 });
+
+test("SessionWorkspace does not mount a pane fallback while resolving ttyd", () => {
+  const loading = renderToString(createElement(SessionWorkspace, {
+    session, diagnostic: null, onRefresh: async () => {}, onNew: () => {},
+  }));
+  assert.match(loading, /conectando terminal/);
+  assert.doesNotMatch(loading, /pane-view-fallback/);
+});
