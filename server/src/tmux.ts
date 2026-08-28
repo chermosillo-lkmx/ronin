@@ -780,6 +780,9 @@ const BOX_LINE = /^[╭╮╰╯│─┌┐└┘├┤]{8,}$/;
 // Cuántas líneas del final se consideran "la pantalla actual". Mismo motivo que
 // PRESSURE_RECENT_LINES: el scrollback viejo no debe producir falsos positivos.
 const CLAUDE_RECENT_LINES = 40;
+// DOS, no tres: basta para el selector `/rc` que se envuelve bajo el footer en un pane angosto;
+// una ventana mayor retrasaría innecesariamente la detección de que Claude ya murió.
+const CLAUDE_RECENT_NON_EMPTY_LINES = 2;
 
 const isChrome = (l: string): boolean => CLAUDE_CHROME.test(l) || BOX_LINE.test(l) || CLAUDE_MODEL.test(l);
 
@@ -791,28 +794,26 @@ const isChrome = (l: string): boolean => CLAUDE_CHROME.test(l) || BOX_LINE.test(
  *
  * PERO no basta con que el chrome APAREZCA en la captura: cuando el proceso claude muere sin
  * limpiar la pantalla (el patrón de crash más común — casi ningún CLI hace clear al salir), su
- * último frame se queda visible y el shell escribe su prompt DEBAJO. Verificado en vivo: un
- * `kill -9` al claude del pane dejaba `claudeAlive` en true indefinidamente, y sólo pasaba a
- * false al correr `clear` — es decir, la caída no se detectaba nunca en el caso real.
+ * último frame se queda visible y el shell escribe debajo. Por eso la regla es POSICIONAL y se
+ * limita a las DOS últimas líneas no vacías: el `/rc` que se envuelve bajo el footer aún conserva
+ * chrome en esa ventana, pero una salida adicional del shell deja el frame rancio a tres líneas
+ * del final y la muerte se detecta pronto.
  *
- * El discriminador correcto es POSICIONAL: la TUI de claude mantiene su caja de input clavada
- * como lo ÚLTIMO de la pantalla. Si hay contenido DESPUÉS del último chrome (un prompt de
- * shell, la salida de un comando), entonces claude ya no maneja el pane, por muy visible que
- * siga su frame anterior. Acotar a las últimas líneas no alcanzaría: el chrome rancio queda
- * inmediatamente encima del prompt nuevo, dentro de cualquier ventana razonable.
+ * COSTE ACEPTADO: si Claude acaba de morir y el shell sólo imprimió SU PROMPT, el chrome rancio
+ * todavía está entre esas dos líneas y se leerá como vivo durante ese rato. Se acepta porque los
+ * únicos consumidores actuales son `paneAttention` (semáforo) y `deliverPromptWhenReady`
+ * (comprobación de arranque); ya no existe el detector de driver caído que motivó la regla de
+ * exigir chrome en la última línea. No se reintroduce el caso peligroso de pegar un prompt en un
+ * shell: si Claude nunca arrancó (`command not found`), no hay chrome en NINGUNA de las dos
+ * últimas líneas y esto sigue dando false. La asimetría que ya produjo dos bugs es la contraria:
+ * no entregar un prompt es peor que tardar un poll en notar un pane muerto.
  */
 export function claudeAlive(pane: string): boolean {
-  const lines = recentLines(pane, CLAUDE_RECENT_LINES).map((l) => l.trim());
-  let lastContent = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i]) {
-      lastContent = i;
-      break;
-    }
-  }
-  if (lastContent < 0) return false;      // pane vacío
-  if (!isChrome(lines[lastContent])) return false; // algo más escribió lo último → claude no manda
-  return true;
+  const lastNonEmpty = recentLines(pane, CLAUDE_RECENT_LINES)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-CLAUDE_RECENT_NON_EMPTY_LINES);
+  return lastNonEmpty.some(isChrome);
 }
 
 // ---- pane interpretation (same heuristic as the tmux-worker-loop skill) ----
