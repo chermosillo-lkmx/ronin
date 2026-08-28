@@ -93,6 +93,13 @@ const BYPASS_FOOTER_WITH_WRAPPED_RC = [
   "                                                  /rc",
 ].join("\n");
 
+// Captura literal del pane %136: Claude puede apilar decoraciones propias bajo su footer.
+const BYPASS_FOOTER_WITH_UPDATE_AND_RC = [
+  "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents",
+  "                                                 ✔ Update installed · Restart to update",
+  "                                                                                    /rc",
+].join("\n");
+
 test("claudeAlive: true para un pane con la TUI de claude", () => {
   assert.equal(claudeAlive(CLAUDE_PANE), true);
 });
@@ -103,6 +110,14 @@ test("claudeAlive: true cuando /rc se envuelve bajo el footer de bypass", () => 
 
 test("paneAttention: el footer de bypass con /rc envuelto está idle, no shell", () => {
   assert.equal(paneAttention(BYPASS_FOOTER_WITH_WRAPPED_RC).level, "idle");
+});
+
+test("claudeAlive: true con aviso de actualización y /rc bajo el footer", () => {
+  assert.equal(claudeAlive(BYPASS_FOOTER_WITH_UPDATE_AND_RC), true);
+});
+
+test("paneAttention: el footer con aviso de actualización y /rc está idle, no shell", () => {
+  assert.equal(paneAttention(BYPASS_FOOTER_WITH_UPDATE_AND_RC).level, "idle");
 });
 
 test("claudeAlive: conserva el chrome de Claude arriba de 68 filas vacías de un pane alto", () => {
@@ -156,11 +171,8 @@ const STALE_FRAME_THEN_SHELL = [
   "cesar@Cesars-MacBook-Pro cowork-CU-42 % ",
 ].join("\n");
 
-// Precio aceptado de la ventana de dos: tras morir, un único prompt bajo el chrome todavía se
-// lee como vivo durante un poll. Hoy sólo alimenta paneAttention y deliverPromptWhenReady; un
-// pane donde Claude nunca arrancó no tiene chrome en las dos últimas líneas y sigue siendo shell.
-test("claudeAlive: true cuando claude murió y su frame quedó rancio sobre un prompt de shell", () => {
-  assert.equal(claudeAlive(STALE_FRAME_THEN_SHELL), true);
+test("claudeAlive: false cuando claude murió y su frame quedó rancio sobre un prompt de shell", () => {
+  assert.equal(claudeAlive(STALE_FRAME_THEN_SHELL), false);
 });
 
 test("claudeAlive: true para ese MISMO frame mientras claude sigue vivo (sin prompt debajo)", () => {
@@ -287,8 +299,8 @@ test("paneStatus: shell para un pane sin claude — es 'sin arrancar', NO 'caíd
   }
 });
 
-test("paneStatus: idle durante el precio aceptado del frame rancio sobre un único prompt", () => {
-  assert.equal(paneStatus(STALE_FRAME_THEN_SHELL), "idle");
+test("paneStatus: shell al detectar un frame rancio sobre un único prompt", () => {
+  assert.equal(paneStatus(STALE_FRAME_THEN_SHELL), "shell");
 });
 
 // "No pude leer" (null) y "leí y estaba vacío") ("") son cosas distintas: el mismo criterio que
