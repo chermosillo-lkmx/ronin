@@ -10,6 +10,7 @@ const RECENT_LINES = 25;
 const NUMBERED_CURSOR = /^\s*❯\s*\d+\.\s+(\S.*)$/;
 const NUMBERED_OPTION = /^\s*(?:❯\s*)?\d+\.\s+(\S.*)$/;
 const GENERIC_CONFIRM = /(?:\[y\/n\]|\(y\/n\)|\(y\/N\)|¿continuar\?)/i;
+const HORIZONTAL_RULE = /^\s*[\u2500\u2501\u2504\u2505\u2508\u2509\u254c\u254d]{3,}\s*$/u;
 
 /**
  * tmux puede capturar el borde de una caja TUI junto al texto útil. Sólo cortamos una caja vecina
@@ -25,6 +26,19 @@ function cleanDecisionText(text: string): string {
     .trim();
 }
 
+function isInputDraftCursor(lines: string[], cursor: number): boolean {
+  for (let index = cursor - 1; index >= 0; index -= 1) {
+    const line = lines[index]!;
+    if (line.trim()) {
+      // La caja de entrada de Claude está cerrada por una regla horizontal justo antes del texto.
+      // Exigimos una regla inequívoca y completa: ante cualquier forma dudosa preferimos alertar,
+      // porque perder una decisión real cuesta más que reportar una decisión de más.
+      return HORIZONTAL_RULE.test(line);
+    }
+  }
+  return false;
+}
+
 /**
  * Detecta sólo menús que pueden parar al operador. El cursor por sí mismo NO basta: Claude usa
  * `❯ ` en su caja de texto y llamarlo decisión convertiría cualquier prompt a medio escribir en
@@ -32,7 +46,7 @@ function cleanDecisionText(text: string): string {
  */
 export function detectDecision(pane: string): Decision | null {
   const lines = recentLines(pane, RECENT_LINES);
-  const cursor = lines.findIndex((line) => NUMBERED_CURSOR.test(line));
+  const cursor = lines.findIndex((line, index) => NUMBERED_CURSOR.test(line) && !isInputDraftCursor(lines, index));
   const generic = lines.findIndex((line) => GENERIC_CONFIRM.test(line));
   if (cursor < 0 && generic < 0) return null;
 

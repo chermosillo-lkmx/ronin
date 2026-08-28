@@ -36,14 +36,33 @@ test("detectDecision: extrae la pregunta de un diálogo numerado real", () => {
   assert.deepEqual(paneAttention(pane), { level: "decision", question: "Do you want to make this edit to sessions.ts?" });
 });
 
+test("detectDecision: descarta un borrador numerado delimitado por reglas horizontales", () => {
+  const pane = [
+    "¿Qué quieres que haga después?",
+    "────────────────────────────────────────────────────────────",
+    "❯ 1. el job",
+    "  2. haz el PR pero",
+    "────────────────────────────────────────────────────────────",
+    "  86e30j7mq  ⎇ CU-86e30j7mq/bulk-unlink-event-loop*  ▓░░░░ 38%",
+    "  ⏵⏵ auto mode on (shift+tab to cycle)",
+  ].join("\n");
+
+  assert.equal(detectDecision(pane), null);
+  assert.notEqual(paneAttention(pane).level, "decision");
+});
+
 test("detectDecision: limpia el marco de una AskUserQuestion capturada de tmux", () => {
   const pane = [
+    "←  ☐ Write en dev  ☐ translated_*  ✔ Submit  →",
+    "",
     "  │ Para probar el AC de `language=en` necesito encender el feature en dev sobre bu-818. ¿Cómo lo hago?",
     "",
-    "  ❯ 1. UPDATE directo + revertir    ┌──────────────────────────────────────────────────────┐",
-    "    2. PATCH con JWT M2M            │ UPDATE language_business_settings                    │",
-    "    3. Otro negocio, no bu-818      │    SET enabled = true, secondary_language = 'en'     │",
-    "    4. Déjalo sin probar            │  WHERE business_id = 'bu-818';                       │",
+    "❯ 1. UPDATE directo + revertir    ┌──────────────────────────────────────────────┐",
+    "  2. PATCH con JWT M2M            │ UPDATE language_business_settings            │",
+    "  3. Otro negocio, no bu-818      │  WHERE business_id = 'bu-818';               │",
+    "  4. Déjalo sin probar            └──────────────────────────────────────────────┘",
+    "",
+    "Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel",
   ].join("\n");
 
   assert.deepEqual(detectDecision(pane), {
