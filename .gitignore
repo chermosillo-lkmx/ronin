@@ -20,3 +20,6 @@ server/data/test-runs.json
 server/data/test-artifacts/
 server/data/workflow-proposals.json
 .superpowers/
+
+# artefactos incrementales de tsc: se regeneran en cada build
+*.tsbuildinfo
