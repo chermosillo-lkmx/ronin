@@ -93,11 +93,13 @@ const BYPASS_FOOTER_WITH_WRAPPED_RC = [
   "                                                  /rc",
 ].join("\n");
 
-// Captura literal del pane %136: Claude puede apilar decoraciones propias bajo su footer.
-const BYPASS_FOOTER_WITH_UPDATE_AND_RC = [
+// Captura literal del pane %136: Claude apila cuatro líneas alineadas a la derecha bajo chrome.
+const LIVE_PANE_136 = [
+  "  cowork-86e30kcqp-DIOT-residual-tasa-0  ⎇ ronin/cowork-86e30kcqp-DIOT-residual-tasa-0  ▓▓░░░ 50%",
   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents",
-  "                                                 ✔ Update installed · Restart to update",
-  "                                                                                    /rc",
+  "                                                           ✔ Update installed · Restart to update",
+  "                                                           new task? /clear to save 503.7k tokens",
+  "                                                                                              /rc",
 ].join("\n");
 
 test("claudeAlive: true para un pane con la TUI de claude", () => {
@@ -112,12 +114,12 @@ test("paneAttention: el footer de bypass con /rc envuelto está idle, no shell",
   assert.equal(paneAttention(BYPASS_FOOTER_WITH_WRAPPED_RC).level, "idle");
 });
 
-test("claudeAlive: true con aviso de actualización y /rc bajo el footer", () => {
-  assert.equal(claudeAlive(BYPASS_FOOTER_WITH_UPDATE_AND_RC), true);
+test("claudeAlive: true para %136 con cuatro decoraciones sangradas bajo chrome", () => {
+  assert.equal(claudeAlive(LIVE_PANE_136), true);
 });
 
-test("paneAttention: el footer con aviso de actualización y /rc está idle, no shell", () => {
-  assert.equal(paneAttention(BYPASS_FOOTER_WITH_UPDATE_AND_RC).level, "idle");
+test("paneAttention: %136 con cuatro decoraciones sangradas está idle, no shell", () => {
+  assert.equal(paneAttention(LIVE_PANE_136).level, "idle");
 });
 
 test("claudeAlive: conserva el chrome de Claude arriba de 68 filas vacías de un pane alto", () => {
@@ -183,6 +185,14 @@ test("claudeAlive: true para ese MISMO frame mientras claude sigue vivo (sin pro
 test("claudeAlive: false si el shell ya imprimió salida de comandos bajo el frame rancio", () => {
   const withOutput = [STALE_FRAME_THEN_SHELL, "total 24", "drwxr-xr-x  5 cesar staff 160 Jul 22 10:01 ."].join("\n");
   assert.equal(claudeAlive(withOutput), false);
+});
+
+test("claudeAlive: false si más de seis líneas sangradas esconden chrome", () => {
+  const exhausted = [
+    "  ⏵⏵ bypass permissions on · ? for shortcuts",
+    ...Array.from({ length: 7 }, (_, index) => `    decoración desconocida ${index + 1}`),
+  ].join("\n");
+  assert.equal(claudeAlive(exhausted), false);
 });
 
 test("claudeAlive: chrome viejo lejos en el scrollback no cuenta como vivo", () => {

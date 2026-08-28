@@ -781,16 +781,12 @@ const BOX_LINE = /^[╭╮╰╯│─┌┐└┘├┤]{8,}$/;
 // PRESSURE_RECENT_LINES: el scrollback viejo no debe producir falsos positivos.
 const CLAUDE_RECENT_LINES = 40;
 
+// Las decoraciones de Claude se alinean a la derecha; su footer chrome usa sólo dos espacios.
+const CLAUDE_DECORATION_INDENT_SPACES = 4;
+// No se recorre media pantalla sólo porque la TUI siga agregando decoraciones bajo el footer.
+const MAX_CLAUDE_DECORATION_LINES = 6;
+
 const isChrome = (l: string): boolean => CLAUDE_CHROME.test(l) || BOX_LINE.test(l) || CLAUDE_MODEL.test(l);
-
-// Líneas que Claude agrega debajo de su footer sin ser contenido ni estado del proceso. Se
-// reconocen por su FORMA para tolerar textos/versiones nuevos, no por un literal concreto.
-const SHORT_SLASH_COMMAND = /^\/\S{1,24}$/;
-const UPDATE_NOTICE = /^(?:✔|✓)\s+\S.*\s+·\s+\S.*$/u;
-const BRANCH_OR_PROGRESS = /(?:^|\s)⎇(?:\s|$)|[▓░]{2,}/u;
-
-const isClaudeDecoration = (line: string): boolean =>
-  SHORT_SLASH_COMMAND.test(line) || UPDATE_NOTICE.test(line) || BRANCH_OR_PROGRESS.test(line);
 
 /**
  * ¿El pane sigue corriendo claude, o cayó a un shell desnudo (el driver murió)?
@@ -800,10 +796,11 @@ const isClaudeDecoration = (line: string): boolean =>
  *
  * PERO no basta con que el chrome APAREZCA en la captura: cuando el proceso claude muere sin
  * limpiar la pantalla (el patrón de crash más común — casi ningún CLI hace clear al salir), su
- * último frame se queda visible y el shell escribe debajo. Se recorre desde abajo, saltando sólo
- * decoraciones propias de Claude (selector slash, aviso de actualización, rama/progreso), y la
- * PRIMERA línea restante debe ser chrome. Así se tolera que Claude apile decoraciones bajo el
- * footer sin convertir un prompt o salida de shell bajo un frame rancio en un falso "vivo".
+ * último frame se queda visible y el shell escribe debajo. Se recorre desde abajo, saltando como
+ * máximo seis líneas con cuatro o más espacios iniciales: las decoraciones de Claude se alinean a
+ * la derecha, mientras su footer chrome sólo usa dos. La PRIMERA línea no sangrada debe ser
+ * chrome. Así una decoración nueva no depende de una lista de textos, sin convertir un prompt o
+ * salida de shell en columna 0 bajo un frame rancio en un falso "vivo".
  *
  * Tampoco se usa `#{pane_current_command}` ni el árbol de procesos: medido en vivo, el pane %78
  * con el footer de Claude mostraba `zsh` y ningún hijo, mientras %119 mostraba `2.1.248` sólo por
@@ -812,9 +809,16 @@ const isClaudeDecoration = (line: string): boolean =>
  */
 export function claudeAlive(pane: string): boolean {
   const lines = recentLines(pane, CLAUDE_RECENT_LINES);
+  let skippedDecorations = 0;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index]!.trim();
-    if (!line || isClaudeDecoration(line)) continue;
+    const rawLine = lines[index]!;
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (rawLine.startsWith(" ".repeat(CLAUDE_DECORATION_INDENT_SPACES))) {
+      skippedDecorations += 1;
+      if (skippedDecorations > MAX_CLAUDE_DECORATION_LINES) return false;
+      continue;
+    }
     return isChrome(line);
   }
   return false;
