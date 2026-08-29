@@ -934,3 +934,38 @@ export function parseContextPressure(pane: string): { tokens?: number; note: str
   }
   return null;
 }
+
+const USAGE_LIMIT_RECENT_LINES = 20;
+export type UsageLimit = { tool: "claude" | "codex"; state: "approaching" | "reached"; resetAt?: string };
+
+function usageLimitState(line: string): UsageLimit["state"] | null {
+  const suffix = "(?:\\s*[.·—:]\\s*.*)?";
+  if (new RegExp(`^(?:(?:usage|rate)\\s+limit\\s+(?:has\\s+been\\s+)?(?:reached|exceeded)|(?:you(?:'ve| have)\\s+)?(?:reached|hit|exceeded)\\s+(?:your\\s+)?(?:usage|rate)\\s+limit)${suffix}$`, "i").test(line)) return "reached";
+  if (new RegExp(`^(?:you(?: are|'re)\\s+)?(?:approaching|near(?:ing)?)\\s+(?:your\\s+)?(?:usage|rate)\\s+limit${suffix}$`, "i").test(line)) return "approaching";
+  return null;
+}
+
+/**
+ * Best-effort only: Claude and Codex do not expose a local quota percentage. This reads the
+ * warning their TUI happens to paint, so it deliberately returns null unless both its chrome and
+ * an unambiguous limit form are visible in the recent capture.
+ */
+export function parseUsageLimit(pane: string): UsageLimit | null {
+  const recent = recentLines(pane, USAGE_LIMIT_RECENT_LINES)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const tool = claudeAlive(pane) && recent.some((line) => /^Claude Code(?:\s+v?[\w.-]+)?$/i.test(line)) ? "claude"
+    : recent.some((line) => /^(?:OpenAI )?Codex(?:\s+v?[\w.-]+)?$/i.test(line)) ? "codex"
+      : null;
+  if (!tool) return null;
+
+  const states = recent.map(usageLimitState).filter((state): state is UsageLimit["state"] => state !== null);
+  const state = states.includes("reached") ? "reached" : states[0];
+  if (!state) return null;
+
+  const resetAt = recent
+    .filter((line) => /\b(?:resets?(?:\s+at)?|try again\s+after)\b/i.test(line))
+    .map((line) => line.match(/\b(?:today|tomorrow|(?:mon|tues|wednes|thurs|fri|satur|sun)day)(?:\s+at)?\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:,?\s+\d{4})?(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?)?|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\s*(?:a\.?m\.?|p\.?m\.?)?|\b\d{1,2}\s*(?:a\.?m\.?|p\.?m\.?)?\b/i)?.[0]?.trim())
+    .find((value): value is string => Boolean(value));
+  return resetAt ? { tool, state, resetAt } : { tool, state };
+}

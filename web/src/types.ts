@@ -137,6 +137,13 @@ export interface SessionAttention {
   since?: number;
 }
 
+/** Espejo de server/src/types.ts: aviso best-effort de la TUI, nunca una cuota oficial. */
+export interface SessionUsageLimit {
+  tool: "claude" | "codex";
+  state: "approaching" | "reached";
+  resetAt?: string;
+}
+
 export interface TmuxSessionInfo {
   name: string;
   kind: "managed" | "foreign";
@@ -148,6 +155,7 @@ export interface TmuxSessionInfo {
   presentation?: SessionPresentation;
   request?: string;
   attention?: SessionAttention;
+  usageLimit?: SessionUsageLimit;
 }
 
 export type CheckLevel = "ok" | "warn" | "fail";

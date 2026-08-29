@@ -6,12 +6,13 @@ import {
   capturePanesTail,
   listPanesRawResult,
   listSessionsRawResult,
+  parseUsageLimit,
   type TmuxDiagnostic,
   type TmuxRawResult,
 } from "./tmux.js";
 import { rollupAttention } from "./attention.js";
 import { AttentionTracker } from "./attention-tracker.js";
-import type { TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
+import type { SessionUsageLimit, TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
 
 const attentionTracker = new AttentionTracker();
 
@@ -171,6 +172,26 @@ export function attachAttention(
   });
 }
 
+/** `reached` wins; equal states preserve tmux pane order for a stable, explainable rollup. */
+export function rollupUsageLimit(panes: Map<string, string | null>): SessionUsageLimit | null {
+  let winner: SessionUsageLimit | null = null;
+  for (const pane of panes.values()) {
+    const next = pane === null ? null : parseUsageLimit(pane);
+    if (next && (!winner || (next.state === "reached" && winner.state === "approaching"))) winner = next;
+  }
+  return winner;
+}
+
+/** Same capture boundary as attention: an unread pane must not turn into a claim about its TUI. */
+export function attachUsageLimit(sessions: TmuxSessionInfo[], captures: Map<string, string | null>): TmuxSessionInfo[] {
+  return sessions.map((session) => {
+    if (!session.panes.length || session.panes.some((pane) => !captures.has(pane.id))) return session;
+    const panes = new Map(session.panes.map((pane) => [pane.id, captures.get(pane.id)!]));
+    const usageLimit = rollupUsageLimit(panes);
+    return usageLimit ? { ...session, usageLimit } : session;
+  });
+}
+
 function requestFromLaunch(name: string): string | undefined {
   try {
     const raw = JSON.parse(readFileSync(join(cycleDirForSession(name), "launch.json"), "utf8"));
@@ -228,5 +249,5 @@ export async function readTmuxInventory(): Promise<TmuxInventoryResult> {
   const inventory = inventoryFromRaw(sessionsResult, panesResult, (name) => existsSync(cycleDirForSession(name)));
   const sessions = withLaunchRequests(inventory.sessions, requestFromLaunch);
   const captures = await capturePanesTail(sessions.flatMap((session) => session.panes.map((pane) => pane.id)));
-  return { ...inventory, sessions: attachAttention(sessions, captures, Date.now(), attentionTracker) };
+  return { ...inventory, sessions: attachUsageLimit(attachAttention(sessions, captures, Date.now(), attentionTracker), captures) };
 }

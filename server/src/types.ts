@@ -173,6 +173,13 @@ export interface SessionAttention {
   since?: number;    // ms epoch; es estado vivo, no un dato histórico persistido
 }
 
+/** Aviso best-effort de la TUI; no representa una cuota ni un porcentaje oficial. */
+export interface SessionUsageLimit {
+  tool: "claude" | "codex";
+  state: "approaching" | "reached";
+  resetAt?: string;
+}
+
 export interface TmuxSessionInfo {
   name: string;
   kind: "managed" | "foreign";
@@ -185,6 +192,7 @@ export interface TmuxSessionInfo {
   /** Petición inicial persistida para una sesión workflow; ausente en terminales y sesiones ajenas. */
   request?: string;
   attention?: SessionAttention;
+  usageLimit?: SessionUsageLimit;
 }
 
 // ---- Preflight (F1). Espejo manual en web/src/types.ts ----

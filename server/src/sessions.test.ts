@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { attachAttention, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
+import { attachAttention, attachUsageLimit, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
 import { AttentionTracker } from "./attention-tracker.js";
 
 // Salidas de `tmux list-sessions -F` y `tmux list-panes -a -F` con los formatos de sessions.ts.
@@ -281,4 +281,26 @@ test("attachAttention: compone el rollup por sesión y conserva el since del tra
   assert.deepEqual(attached.find((session) => session.name === "cowork-CU-42-driver")!.attention, {
     level: "decision", paneId: "%21", question: "Do you want to make this edit to sessions.ts?", since: 1_000,
   });
+});
+
+test("attachUsageLimit: reached gana a approaching entre los panes de una sesión", () => {
+  const sessions = buildInventory(SESSIONS, PANES, () => false);
+  const captures = new Map<string, string | null>([
+    ["%20", "Claude Code\nApproaching usage limit\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"],
+    ["%21", "OpenAI Codex\nUsage limit reached · resets 15:00\n> "],
+  ]);
+  const attached = attachUsageLimit(sessions, captures);
+  assert.deepEqual(attached.find((session) => session.name === "cowork-CU-42-driver")!.usageLimit, {
+    tool: "codex", state: "reached", resetAt: "15:00",
+  });
+});
+
+test("attachUsageLimit: sin avisos no añade el campo al inventario", () => {
+  const sessions = buildInventory(SESSIONS, PANES, () => false);
+  const captures = new Map<string, string | null>([
+    ["%20", "Claude Code\nImplementing…\n❯ "],
+    ["%21", "OpenAI Codex\nReviewing…\n> "],
+  ]);
+  const attached = attachUsageLimit(sessions, captures);
+  assert.equal("usageLimit" in attached.find((session) => session.name === "cowork-CU-42-driver")!, false);
 });
