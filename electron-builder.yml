@@ -1,3 +1,4 @@
+icon: desktop/build/icon.icns
 appId: com.ronin.desktop
 productName: Ronin
 directories:
