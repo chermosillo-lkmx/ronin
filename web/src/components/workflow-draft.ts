@@ -60,6 +60,13 @@ export function setStages(state: WorkflowDraftState, stages: WfStage[], verifyAf
   return { ...state, stages, verifyAfter, jsonText: stringifyFlow({ stages, verifyAfter }), jsonError: null, fieldError: null };
 }
 
+/** Inserta una etapa vacía sin tocar el arreglo del borrador que la originó. */
+export function insertStageAt(stages: WfStage[], index: number): WfStage[] {
+  const next = [...stages];
+  next.splice(index, 0, { key: "", label: "Nueva etapa", icon: "•", instruction: "" });
+  return next;
+}
+
 /** V8's JSON.parse SyntaxError carries a 0-based character offset in its message ("... at position N"). */
 function syntaxErrorPosition(text: string, error: unknown): JsonError {
   const message = error instanceof Error ? error.message : String(error);

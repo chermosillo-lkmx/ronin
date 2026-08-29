@@ -147,6 +147,12 @@
 .wf-graph-edge-verify { stroke-dasharray: 4 3; }
 .wf-graph-arrowhead { fill: var(--color-neutral-500); }
 .wf-graph-gate-dot { fill: var(--status-warn); }
+.wf-graph-node-interactive { cursor: pointer; }
+.wf-graph-node-interactive:hover rect,.wf-graph-node-interactive:focus rect { stroke: var(--color-accent); stroke-width: 2; }
+.wf-graph-add { cursor: pointer; }
+.wf-graph-add circle { fill: var(--color-accent-900); stroke: var(--color-accent); stroke-width: 1.5; }
+.wf-graph-add text { fill: var(--color-accent-200); font-size: 17px; font-weight: 700; pointer-events: none; }
+.wf-graph-add:hover circle,.wf-graph-add:focus circle { fill: var(--color-accent-800); }
 
 .wf-json-editor { display: flex; flex-direction: column; gap: var(--space-2); }
 .wf-json-textarea {

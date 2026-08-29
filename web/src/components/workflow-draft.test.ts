@@ -6,6 +6,7 @@ import {
   createWorkflowDraft,
   createWorkflowWorkspaceDraft,
   deriveGraph,
+  insertStageAt,
   setFieldError,
   setJsonText,
   setStages,
@@ -34,6 +35,30 @@ test("T14.108 createWorkflowDraft + setStages: editar en Stepper y cambiar a JSO
 test("WorkflowWorkspace crea el borrador inicial en Grafo y conserva la vista elegida", () => {
   assert.equal(createWorkflowWorkspaceDraft(CFG).view, "graph");
   assert.equal(createWorkflowWorkspaceDraft(CFG, "json").view, "json");
+});
+
+test("insertStageAt agrega una etapa nueva al final sin mutar el arreglo de origen", () => {
+  const source: WfStage[] = [{ key: "plan", label: "Plan", icon: "📋" }];
+  const next = insertStageAt(source, source.length);
+
+  assert.deepEqual(next, [
+    source[0],
+    { key: "", label: "Nueva etapa", icon: "•", instruction: "" },
+  ]);
+  assert.deepEqual(source, [{ key: "plan", label: "Plan", icon: "📋" }]);
+  assert.notEqual(next, source);
+});
+
+test("insertStageAt inserta la etapa nueva en el índice indicado", () => {
+  const source: WfStage[] = [
+    { key: "plan", label: "Plan", icon: "📋" },
+    { key: "impl", label: "Implementar", icon: "⌨️" },
+  ];
+
+  const next = insertStageAt(source, 1);
+
+  assert.deepEqual(next.map((stage) => stage.key), ["plan", "", "impl"]);
+  assert.deepEqual(next[1], { key: "", label: "Nueva etapa", icon: "•", instruction: "" });
 });
 
 test("T14.109 setJsonText: editar en JSON y cambiar a Grafo muestra lo editado; JSON inválido NO contamina el borrador estructurado", () => {
