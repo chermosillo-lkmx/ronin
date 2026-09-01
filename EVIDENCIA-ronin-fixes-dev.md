@@ -72,7 +72,7 @@ Resultado: 4 renglones proporcionales dentro de una caja de 390 px ⇒ cualquier
 |---|---|
 | `web/src/components/NewSessionDialog.tsx` | `textarea` de la petición: `rows={12}`, `className="ronin-request-input"`, `spellCheck={false}`; la nota del modo terminal menciona el atajo de copiado |
 | `web/src/ronin-shell.css` | `.ronin-new-session` se separa de `.ronin-inline-modal>div` y pasa a `min(760px, 92vw)` + `max-height: 88vh` + `overflow: auto`; nueva regla `.ronin-request-input` (ancho completo, `min-height: 220px`, `resize: vertical`, monoespaciada) |
-| `server/src/tmux.ts` | nuevo `serverDefaultOptionCommands()` + `applyServerDefaults()`: fija `set-option -g history-limit 50000` **antes** del `new-session`, en `createSession` y `createDriverWindow`; `baseSessionOptionCommands()` añade 4 binds en la tabla `root` (`M-`/`S-MouseDrag1Pane → copy-mode -M`, `M-`/`S-WheelUpPane → copy-mode -e`) |
+| `server/src/tmux.ts` | nuevo `serverDefaultOptionCommands()` + `applyServerDefaults()`: fija `set-option -g history-limit 50000` **antes** del `new-session`, en `createSession` y `createDriverWindow`; `baseSessionOptionCommands()` reescribe el bind `root` de `MouseDrag1Pane` quitándole el término `mouse_any_flag` (ver §Corrección) |
 | `skills/tmux-worker-loop/SKILL.md` | mismo `set-option -g history-limit` previo a los splits + los 4 binds nuevos (si el skill diverge del server, vuelve la asimetría) |
 | `skills/tmux-worker-loop/references/pane-discovery.md` | idem para la ruta de provisión de panes |
 | `server/src/tmux.test.ts` | + assert de `history_limit` del pane inicial (`createSession`) y de los 4 panes (`createDriverWindow`); + los 4 binds `root` en los dos casos de `baseSessionOptionCommands` |
@@ -159,10 +159,53 @@ estado previo.
   (`npm run package:desktop`) para que el binario instalado tome los cambios: los binds y el
   `history-limit` los aplica el **server**, así que la app instalada seguirá creando sesiones con el
   comportamiento viejo hasta que se reempaquete.
-- **Verificación manual que falta y no puedo hacer por mí mismo:** confirmar en la UI que
-  Opción+arrastre (o Shift+arrastre) sobre un pane con `claude` corriendo selecciona y copia. La
-  cadena está probada por sus dos extremos — tmux tiene los binds (C3) y el destino sigue siendo
-  `pbcopy` (C4) —, pero el tramo de en medio depende de que xterm.js/ttyd reenvíe el modificador del
-  ratón, y eso sólo se ve con un ratón real sobre la ventana.
 - No se ingirió nada al backup-tester: no hay `$BACKUP_TESTER_URL`/`$BACKUP_TESTER_INGEST_TOKEN` en
   este entorno ni reporter JUnit en las suites; no había `junit.xml` que subir.
+
+---
+
+## Corrección posterior (1-sep-2026, `f5274c5`)
+
+El pendiente que había quedado abierto —"confirmar con un ratón real que Opción+arrastre copia"—
+se midió y **la respuesta fue que no**. Los 4 binds `M-`/`S-` de `52e2c74` son **inertes** en la
+superficie real del producto.
+
+### Cómo se midió
+
+Se reprodujo la pila completa en aislamiento (socket tmux propio + `ttyd` en :7999 + una página con
+el terminal dentro de un `<iframe>`, igual que la app), con el pane pidiendo el reporte de ratón
+(`printf '\033[?1000h\033[?1002h\033[?1006h'` ⇒ `mouse_any_flag=1`, lo mismo que hacen las TUI de
+Claude y Codex). Con los binds de `root` instrumentados a `run-shell "echo … >> log"`:
+
+```
+arrastre con OPCIÓN  -> log: plain-Down, plain-Drag, plain-Drag, plain-Drag
+arrastre con SHIFT   -> log: plain-Down, plain-Drag, plain-Drag, plain-Drag
+```
+
+Es decir: **xterm.js/ttyd entrega el evento a tmux sin el modificador**. Un bind `M-MouseDrag1Pane`
+o `S-MouseDrag1Pane` no se dispara nunca por esta vía. Portapapeles tras cada intento: sin cambio.
+
+### Arreglo real
+
+Quitarle al bind por defecto de tmux el término que reenvía el arrastre a la aplicación:
+
+```
+bind-key -T root MouseDrag1Pane if-shell -F '#{pane_in_mode}' 'send-keys -M' 'copy-mode -M'
+```
+
+El clic simple (`MouseDown1Pane`) se deja intacto, así la TUI conserva sus elementos interactivos;
+sólo el **arrastre** deja de llegarle. Verificado end-to-end en la misma pila, con `mouse_any_flag=1`:
+
+```
+arrastre SIMPLE con el ratón tomado -> pbpaste = "RONIN_PROBE_LINEA_DOS"   (antes: sin cambio)
+```
+
+Suites tras el cambio: server **478/478** (incluye el test de integración nuevo
+"el arrastre entra a copy-mode aunque la aplicación tenga tomado el ratón", que lee `list-keys -T
+root` y exige que el bind no mencione `mouse_any_flag`), web **60/60**.
+
+### Lo que esto cambia del veredicto original
+
+- **C3 queda obsoleto**: los binds que comprobaba existían, pero no servían. Lo sustituye el test de
+  integración citado arriba más la medición end-to-end de esta sección.
+- C1, C1b, C2, C4, C5 y C6 siguen en pie sin cambios.
