@@ -231,3 +231,66 @@ test("a declared artifact path that escapes the repo via symlink is not copied",
     cleanup();
   }
 });
+
+/**
+ * `--root`: el gate de una etapa corre en el worktree de la sesión, no en el checkout que
+ * `repos.json` mapea. Sin poder redirigir la raíz, una sesión aprobaría código que no es el suyo.
+ * La ruta llega SÓLO por el CLI y se valida contra las raíces confiables: la API HTTP nunca la
+ * acepta, porque el renderer manda identificadores, nunca rutas.
+ */
+test("start({root}) corre la suite en la raíz indicada en vez de la de repos.json", async () => {
+  const { dir, repoRoot, service, store, cleanup } = setup();
+  try {
+    const worktree = join(dir, "worktree");
+    writeFixtureRepo(repoRoot);
+    writeFixtureRepo(worktree);
+    store.saveRepo("fixture", { profiles: [{ name: "dev", variables: {} }], suites: { unit: UNIT } });
+
+    const result = await service.start(
+      { kind: "suites", repo: "fixture", profile: "dev", suites: ["unit"] },
+      { root: worktree, trustedRoots: [realpathSync(dir)] },
+    );
+    const run = service.getRun(result.runIds[0])!;
+    assert.equal(run.cwd, realpathSync(join(worktree, "svc")));
+    assert.notEqual(run.cwd, realpathSync(join(repoRoot, "svc")));
+  } finally {
+    cleanup();
+  }
+});
+
+test("start({root}) bloquea una raíz fuera de las raíces confiables, sin ejecutar nada", async () => {
+  const { dir, repoRoot, service, store, cleanup } = setup();
+  const fuera = mkdtempSync(join(tmpdir(), "ronin-fuera-"));
+  try {
+    writeFixtureRepo(repoRoot);
+    writeFixtureRepo(fuera);
+    store.saveRepo("fixture", { profiles: [{ name: "dev", variables: {} }], suites: { unit: UNIT } });
+
+    const result = await service.start(
+      { kind: "suites", repo: "fixture", profile: "dev", suites: ["unit"] },
+      { root: fuera, trustedRoots: [realpathSync(dir)] },
+    );
+    const run = service.getRun(result.runIds[0])!;
+    assert.equal(run.status, "blocked");
+    assert.match(run.reason ?? "", /raíz/i);
+    assert.equal(run.cwd, undefined);
+  } finally {
+    rmSync(fuera, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("start({root}) bloquea una raíz que no existe", async () => {
+  const { dir, repoRoot, service, store, cleanup } = setup();
+  try {
+    writeFixtureRepo(repoRoot);
+    store.saveRepo("fixture", { profiles: [{ name: "dev", variables: {} }], suites: { unit: UNIT } });
+    const result = await service.start(
+      { kind: "suites", repo: "fixture", profile: "dev", suites: ["unit"] },
+      { root: join(dir, "no-existe"), trustedRoots: [realpathSync(dir)] },
+    );
+    assert.equal(service.getRun(result.runIds[0])!.status, "blocked");
+  } finally {
+    cleanup();
+  }
+});

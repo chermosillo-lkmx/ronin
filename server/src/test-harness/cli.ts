@@ -7,8 +7,13 @@ import { COMMAND_SUITES, isSuite, type Run, type RunSelection, type TestSuite } 
  * Nunca imprime valores de perfil: sólo ids, estados, conteos y cobertura.
  */
 
+export interface CliStartOptions {
+  /** Raíz alternativa del repo (el worktree de una sesión). El service la valida. */
+  root?: string;
+}
+
 export interface CliHarness {
-  start(selection: RunSelection): Promise<{ batchId?: string; runIds: string[] }>;
+  start(selection: RunSelection, options: CliStartOptions): Promise<{ batchId?: string; runIds: string[] }>;
   waitForAll(runIds: string[]): Promise<void>;
   getRun(runId: string): Run | undefined;
 }
@@ -28,6 +33,8 @@ Verbos:
 
 Opciones:
   --profile <nombre>          perfil de entorno (obligatorio salvo --help)
+  --root <ruta>               raíz alternativa del repo (p. ej. el worktree de una sesión);
+                              debe caer dentro de una raíz confiable
   --json                      imprime el resumen como JSON
   -h, --help                  esta ayuda
 
@@ -37,8 +44,16 @@ interface ParsedArgs {
   verb?: string;
   positional: string[];
   profile?: string;
+  root?: string;
   json: boolean;
   help: boolean;
+}
+
+/** Una bandera con valor nunca se traga la siguiente opción: sin valor real, error de argumentos. */
+function valorDe(flag: string, raw: string | undefined): string {
+  const value = raw?.trim();
+  if (!value || value.startsWith("-")) throw new Error(`${flag} requiere una ruta`);
+  return value;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -49,6 +64,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (a === "--json") out.json = true;
     else if (a === "--profile") out.profile = argv[++i];
     else if (a.startsWith("--profile=")) out.profile = a.slice("--profile=".length);
+    else if (a === "--root") out.root = valorDe("--root", argv[++i]);
+    else if (a.startsWith("--root=")) out.root = valorDe("--root", a.slice("--root=".length));
     else if (a.startsWith("-")) throw new Error(`opción desconocida: ${a}`);
     else if (out.verb === undefined) out.verb = a;
     else out.positional.push(a);
@@ -115,7 +132,7 @@ export async function runCli(argv: string[], harness: CliHarness, io: CliIo): Pr
 
   let started: { batchId?: string; runIds: string[] };
   try {
-    started = await harness.start(selection);
+    started = await harness.start(selection, args.root === undefined ? {} : { root: args.root });
   } catch (e) {
     io.error(`error: ${(e as Error).message}`);
     return 2;

@@ -3,13 +3,16 @@ import test from "node:test";
 import type { Run, RunSelection } from "./model.js";
 import { runCli, type CliHarness } from "./cli.js";
 
-function fakeHarness(runs: Partial<Run>[]): CliHarness & { calls: RunSelection[] } {
+function fakeHarness(runs: Partial<Run>[]): CliHarness & { calls: RunSelection[]; opciones: unknown[] } {
   const calls: RunSelection[] = [];
+  const opciones: unknown[] = [];
   const byId = new Map(runs.map((r, i) => [r.runId ?? `r${i}`, { runId: `r${i}`, repo: "api", suite: "unit", profile: "dev", createdAt: "", status: "passed", ...r } as Run]));
   return {
     calls,
-    async start(selection) {
+    opciones,
+    async start(selection, options) {
       calls.push(selection);
+      opciones.push(options);
       return { batchId: selection.kind === "suites" ? undefined : "b1", runIds: [...byId.keys()] };
     },
     async waitForAll() {},
@@ -113,4 +116,37 @@ test("built CLI all --profile dev exits 0 and persists real unit totals and cove
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+/**
+ * `--root` es la única vía por la que entra una ruta al harness: la usa el gate de una etapa
+ * para probar el worktree de la sesión en vez del checkout de repos.json. El service la valida
+ * contra las raíces confiables; aquí sólo se comprueba que el CLI la transporta sin tocarla.
+ */
+test("CLI pasa --root al service como opción, no como parte de la selección declarada", async () => {
+  const harness = fakeHarness([{ status: "passed" }]);
+  const code = await runCli(["suite", "api", "unit", "--profile", "dev", "--root", "/tmp/wt"], harness, io());
+
+  assert.equal(code, 0);
+  assert.deepEqual(harness.calls[0], { kind: "suites", repo: "api", profile: "dev", suites: ["unit"] });
+  assert.deepEqual(harness.opciones[0], { root: "/tmp/wt" });
+});
+
+test("CLI acepta --root=<ruta> y sin la bandera no manda raíz alguna", async () => {
+  const pegado = fakeHarness([{ status: "passed" }]);
+  await runCli(["suite", "api", "unit", "--profile", "dev", "--root=/tmp/wt2"], pegado, io());
+  assert.deepEqual(pegado.opciones[0], { root: "/tmp/wt2" });
+
+  const sinRaiz = fakeHarness([{ status: "passed" }]);
+  await runCli(["suite", "api", "unit", "--profile", "dev"], sinRaiz, io());
+  assert.deepEqual(sinRaiz.opciones[0], {});
+});
+
+test("CLI rechaza --root sin valor con el código de argumentos inválidos", async () => {
+  const harness = fakeHarness([{ status: "passed" }]);
+  const o = io();
+  assert.equal(await runCli(["suite", "api", "unit", "--profile", "dev", "--root"], harness, o), 64);
+  assert.equal(harness.calls.length, 0);
+  assert.match(o.err.join("\n"), /--root/);
 });

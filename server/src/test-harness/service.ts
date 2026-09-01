@@ -2,6 +2,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { copyFileSync, existsSync, realpathSync, rmSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { resolveCwd as defaultResolveCwd } from "../repos.js";
+import { isWithinTrustedRoot, trustedRoots as defaultTrustedRoots } from "../repo-roots.js";
 import { boundOutput, readCoverageFile, readJUnitFile, redactEvidence } from "./artifacts.js";
 import type { HarnessStore } from "./config.js";
 import {
@@ -61,6 +62,19 @@ export interface MatrixRow {
   configured: boolean;
   profiles: string[];
   cells: Record<TestSuite, MatrixCell>;
+}
+
+/**
+ * Opciones de arranque que NO viajan en la selección declarada. `root` redirige la raíz del
+ * repo (el worktree de una sesión en vez del checkout de repos.json) y llega SÓLO por el CLI:
+ * la ruta HTTP llama a `start(selection)` sin opciones, porque el renderer manda
+ * identificadores y nunca rutas. Se valida contra las raíces confiables — la misma política
+ * independiente que usa el resto del server, nunca derivada del valor que se está validando.
+ */
+export interface StartOptions {
+  root?: string;
+  /** Sólo para pruebas: sustituye la política de raíces confiables del proceso. */
+  trustedRoots?: string[];
 }
 
 export interface StartResult {
@@ -210,7 +224,28 @@ export function createTestHarnessService(options: ServiceOptions) {
   }
 
   /** Crea (y encola o bloquea) una corrida repo×suite. Nunca lanza por configuración: bloquea. */
-  function startSuite(repo: string, suiteKey: TestSuite, profileName: string, batchId?: string): Run {
+  /**
+   * Resuelve la raíz efectiva de una corrida. Sin `root` es la de repos.json; con `root` es la
+   * indicada, siempre que exista y caiga dentro de una raíz confiable. Nunca lanza: devuelve el
+   * motivo para que la corrida quede `blocked` en vez de ejecutarse en un sitio inesperado.
+   */
+  function effectiveRoot(repo: string, options: StartOptions): { cwd: string } | { reason: string } {
+    if (options.root === undefined) {
+      const mapped = resolveCwd(repo);
+      return mapped.real ? { cwd: mapped.cwd } : { reason: `carpeta del repo ${repo} no existe (repos.json)` };
+    }
+    let real: string;
+    try {
+      real = realpathSync(options.root);
+    } catch {
+      return { reason: `la raíz indicada no existe: ${options.root}` };
+    }
+    const roots = options.trustedRoots ?? defaultTrustedRoots();
+    if (!isWithinTrustedRoot(real, roots)) return { reason: `la raíz indicada queda fuera de las raíces confiables: ${options.root}` };
+    return { cwd: real };
+  }
+
+  function startSuite(repo: string, suiteKey: TestSuite, profileName: string, batchId?: string, options: StartOptions = {}): Run {
     const harness = store.readRepo(repo);
     const base: Omit<Run, "runId" | "status" | "createdAt"> = { repo: harness.repo, suite: suiteKey, profile: profileName, ...(batchId ? { batchId } : {}) };
     const profile = harness.config.profiles.find((p) => p.name === profileName);
@@ -218,8 +253,8 @@ export function createTestHarnessService(options: ServiceOptions) {
     if (!(COMMAND_SUITES as readonly string[]).includes(suiteKey)) return blockedRun(base, `suite ${suiteKey} no ejecutable en este corte (sólo ${COMMAND_SUITES.join("/")})`);
     const suite = harness.config.suites[suiteKey];
     if (!suite) return blockedRun(base, `suite ${suiteKey} sin configurar: declara command/junitPath en Pruebas → ${harness.repo}`);
-    const root = resolveCwd(harness.repo);
-    if (!root.real) return blockedRun(base, `carpeta del repo ${harness.repo} no existe (repos.json)`);
+    const root = effectiveRoot(harness.repo, options);
+    if ("reason" in root) return blockedRun(base, root.reason);
     let cwdReal: string;
     try {
       const rootReal = realpathSync(root.cwd);
@@ -243,10 +278,10 @@ export function createTestHarnessService(options: ServiceOptions) {
     return store.listHarnessRepos().filter((r) => store.readRepo(r).configured);
   }
 
-  async function start(selection: RunSelection): Promise<StartResult> {
+  async function start(selection: RunSelection, options: StartOptions = {}): Promise<StartResult> {
     if (selection.kind === "suites") {
       if (!store.listHarnessRepos().includes(selection.repo)) throw new HarnessError(`repo desconocido: ${selection.repo}`, "REPO_NOT_FOUND", 404);
-      return { runIds: selection.suites.map((s) => startSuite(selection.repo, s, selection.profile).runId) };
+      return { runIds: selection.suites.map((s) => startSuite(selection.repo, s, selection.profile, undefined, options).runId) };
     }
     const batch: Batch = { batchId: newId("batch"), kind: selection.kind, profile: selection.profile, createdAt: now().toISOString(), runIds: [] };
     for (const repo of reposWithProfile(selection.profile)) {
