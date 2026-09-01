@@ -180,15 +180,28 @@ test("createSession aplica las opciones base de scroll e historial", async () =>
   });
 });
 
+/**
+ * Verificado contra ttyd + xterm.js: el modificador (Opción/Shift) NO llega a tmux, así que la
+ * única vía de escape posible es que el arrastre ignore `mouse_any_flag`. Si alguien restaura el
+ * bind por defecto, copiar vuelve a ser imposible en cuanto la TUI toma el ratón.
+ */
+test("el arrastre entra a copy-mode aunque la aplicación tenga tomado el ratón", async () => {
+  await withIsolatedSocket(async (socket) => {
+    await createSession("cowork-drag-bind-test", "/tmp", "true");
+    const { stdout } = await pexec("tmux", ["-L", socket, "list-keys", "-T", "root"], { env: envWithoutTmux() });
+    const bind = stdout.split("\n").find((line) => /\sMouseDrag1Pane\s/.test(line)) ?? "";
+    assert.match(bind, /pane_in_mode/);
+    assert.doesNotMatch(bind, /mouse_any_flag/);
+    assert.match(bind, /copy-mode -M/);
+  });
+});
+
 test("las opciones base en darwin emiten los dos bind-key con pbcopy", () => {
   assert.deepEqual(baseSessionOptionCommands("cowork-clipboard-darwin-test", "pbcopy"), [
     ["set-option", "-t", "cowork-clipboard-darwin-test", "mouse", "on"],
     ["set-option", "-t", "cowork-clipboard-darwin-test", "window-size", "latest"],
     ["set-option", "-t", "cowork-clipboard-darwin-test", "history-limit", "50000"],
-    ["bind-key", "-T", "root", "M-MouseDrag1Pane", "copy-mode", "-M"],
-    ["bind-key", "-T", "root", "S-MouseDrag1Pane", "copy-mode", "-M"],
-    ["bind-key", "-T", "root", "M-WheelUpPane", "copy-mode", "-e"],
-    ["bind-key", "-T", "root", "S-WheelUpPane", "copy-mode", "-e"],
+    ["bind-key", "-T", "root", "MouseDrag1Pane", "if-shell", "-F", "#{pane_in_mode}", "send-keys -M", "copy-mode -M"],
     ["bind-key", "-T", "copy-mode", "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel", "pbcopy"],
     ["bind-key", "-T", "copy-mode-vi", "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel", "pbcopy"],
   ]);
@@ -199,10 +212,7 @@ test("las opciones base sin comando de portapapeles no emiten bind-key", () => {
     ["set-option", "-t", "cowork-clipboard-none-test", "mouse", "on"],
     ["set-option", "-t", "cowork-clipboard-none-test", "window-size", "latest"],
     ["set-option", "-t", "cowork-clipboard-none-test", "history-limit", "50000"],
-    ["bind-key", "-T", "root", "M-MouseDrag1Pane", "copy-mode", "-M"],
-    ["bind-key", "-T", "root", "S-MouseDrag1Pane", "copy-mode", "-M"],
-    ["bind-key", "-T", "root", "M-WheelUpPane", "copy-mode", "-e"],
-    ["bind-key", "-T", "root", "S-WheelUpPane", "copy-mode", "-e"],
+    ["bind-key", "-T", "root", "MouseDrag1Pane", "if-shell", "-F", "#{pane_in_mode}", "send-keys -M", "copy-mode -M"],
   ]);
 });
 

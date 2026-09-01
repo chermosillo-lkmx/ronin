@@ -419,12 +419,14 @@ export function baseSessionOptionCommands(session: string, copyCommand: string |
     ["set-option", "-t", session, "mouse", "on"],
     ["set-option", "-t", session, "window-size", "latest"],
     ["set-option", "-t", session, "history-limit", "50000"],
-    // La aplicación puede tomar el reporte del ratón. Estos modificadores siempre entran a
-    // copy-mode en tmux y preservan selección/copiar y scroll aunque la app lo haya tomado.
-    ["bind-key", "-T", "root", "M-MouseDrag1Pane", "copy-mode", "-M"],
-    ["bind-key", "-T", "root", "S-MouseDrag1Pane", "copy-mode", "-M"],
-    ["bind-key", "-T", "root", "M-WheelUpPane", "copy-mode", "-e"],
-    ["bind-key", "-T", "root", "S-WheelUpPane", "copy-mode", "-e"],
+    // El bind por defecto de tmux reenvía el arrastre a la aplicación en cuanto ésta pide el
+    // reporte del ratón (`mouse_any_flag`), que es justo lo que hacen las TUI de Claude y Codex:
+    // el arrastre deja de seleccionar y ya no hay forma de copiar. Aquí se quita ese término y el
+    // arrastre entra SIEMPRE a copy-mode; el clic simple se deja intacto, así la TUI conserva sus
+    // elementos interactivos. No sirve un modificador como vía de escape (Opción/Shift): medido
+    // contra ttyd, xterm.js entrega el evento a tmux SIN el modificador, así que un bind `M-`/`S-`
+    // nunca se dispara en la superficie real del producto.
+    ["bind-key", "-T", "root", "MouseDrag1Pane", "if-shell", "-F", "#{pane_in_mode}", "send-keys -M", "copy-mode -M"],
   ];
   if (!copyCommand) return commands;
 

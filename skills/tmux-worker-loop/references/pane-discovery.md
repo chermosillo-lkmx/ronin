@@ -52,12 +52,11 @@ EOF
   tmux set-option -t "$session" window-size latest
 
   # Las tablas root/copy-mode son GLOBALES del servidor tmux, no de esta sesión: estos bindings
-  # también afectan las sesiones propias del operador. Opción/Shift fuerza copy-mode incluso si la
-  # app tomó el ratón; con rueda entra al historial de tmux.
-  tmux bind-key -T root M-MouseDrag1Pane copy-mode -M
-  tmux bind-key -T root S-MouseDrag1Pane copy-mode -M
-  tmux bind-key -T root M-WheelUpPane copy-mode -e
-  tmux bind-key -T root S-WheelUpPane copy-mode -e
+  # también afectan las sesiones propias del operador. El bind por defecto reenvía el arrastre a la
+  # app en cuanto ésta pide el ratón (Claude/Codex lo hacen) y copiar deja de ser posible; sin el
+  # término mouse_any_flag el arrastre siempre selecciona. Un modificador no sirve de escape:
+  # xterm.js/ttyd entrega el evento a tmux SIN el modificador.
+  tmux bind-key -T root MouseDrag1Pane if-shell -F '#{pane_in_mode}' 'send-keys -M' 'copy-mode -M'
   clipboard_cmd=""
   if [ "$(uname -s)" = "Darwin" ]; then
     clipboard_cmd="pbcopy"
