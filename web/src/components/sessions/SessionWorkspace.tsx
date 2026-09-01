@@ -8,9 +8,23 @@ const PaneViewer = typeof window === "undefined"
   ? ({ className = "" }: { session: string; paneId: string; kind: "managed" | "foreign"; className?: string }) => <div className={className} data-testid="pane-view-fallback" />
   : lazy(async () => ({ default: (await import("../PaneViewer")).PaneViewer }));
 
+/**
+ * Pane que debe quedar seleccionado tras una actualización del inventario: el vigente si sigue
+ * existiendo, y si no el primero. Los ids de pane de tmux (%N) son únicos por servidor, así que
+ * un id que no aparece en la lista nueva es un pane que se fue (o una sesión distinta).
+ */
+export function nextSelectedPane(current: string | null, panes: readonly { id: string }[]): string | null {
+  return current && panes.some((pane) => pane.id === current) ? current : panes[0]?.id ?? null;
+}
+
 export function SessionWorkspace({ session, diagnostic, terminalGrid = false, terminalUrl: initialTerminalUrl, onRefresh, onNew, inspectorVisible, onToggleInspector }: { session: TmuxSessionInfo | null; diagnostic: TmuxDiagnostic | null; terminalGrid?: boolean; terminalUrl?: string | null; onRefresh: () => Promise<void>; onNew: () => void; inspectorVisible?: boolean; onToggleInspector?: () => void }) {
   const [pane, setPane] = useState<string | null>(null); const [adopting, setAdopting] = useState(false); const [terminalUrl, setTerminalUrl] = useState<string | null>(initialTerminalUrl ?? null); const [terminalError, setTerminalError] = useState<string | null>(null); const [terminalLoading, setTerminalLoading] = useState(Boolean(session) && initialTerminalUrl === undefined); const [terminalSession, setTerminalSession] = useState<string | null>(initialTerminalUrl === undefined ? null : session?.name ?? null); const [attachError, setAttachError] = useState<string | null>(null); const [closing, setClosing] = useState(false);
-  useEffect(() => setPane(session?.panes[0]?.id ?? null), [session?.name, session?.panes]);
+  // El inventario se resondea cada 5s y `session.panes` llega como un array NUEVO aunque nada
+  // haya cambiado. Resetear a `panes[0]` en cada llegada le quitaba al operador el pane que
+  // acababa de elegir: por eso la decisión es una función pura sobre el pane vigente, y la
+  // dependencia es la LISTA de ids (string estable), no la identidad del array.
+  const paneIds = session?.panes.map((item) => item.id).join(",") ?? "";
+  useEffect(() => setPane((current) => nextSelectedPane(current, session?.panes ?? [])), [session?.name, paneIds]);
   useEffect(() => { if (initialTerminalUrl !== undefined) { setTerminalUrl(initialTerminalUrl); setTerminalLoading(false); setTerminalSession(session?.name ?? null); return; } let alive = true; setTerminalUrl(null); setTerminalError(null); setTerminalLoading(Boolean(session)); setTerminalSession(null); setAttachError(null); setClosing(false); if (!session) return () => { alive = false; }; void getSessionTerminalUrl(session.name).then((result) => { if (alive) { setTerminalUrl(result.url); setTerminalError(result.error); setTerminalLoading(false); setTerminalSession(session.name); } }).catch((error) => { if (alive) { setTerminalError((error as Error).message); setTerminalLoading(false); setTerminalSession(session.name); } }); return () => { alive = false; }; }, [session?.name, initialTerminalUrl]);
   if (diagnostic) return <div className="ronin-empty-workspace"><span>tmux inaccesible</span><h1>{diagnostic.code}</h1><p>{diagnostic.detail}</p><button className="n-btn n-btn-secondary" onClick={() => void onRefresh()}>Reintentar</button></div>;
   if (!session) return <div className="ronin-empty-workspace"><span>tmux</span><h1>Sin sesión seleccionada</h1><p>Crea una sesión gestionada o selecciona una sesión activa de tmux.</p><button className="n-btn n-btn-primary" onClick={onNew}>Nueva sesión</button></div>;
