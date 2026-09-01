@@ -18,8 +18,15 @@ export function StageModal({
 }) {
   const labelRef = useRef<HTMLInputElement>(null);
 
+  // Dos efectos separados a propósito. `onClose` llega como flecha inline desde
+  // WorkflowWorkspace, así que cambia de identidad en cada render: si el enfoque inicial cuelga de
+  // esa dependencia, cada tecla en la instrucción re-ejecuta el efecto y devuelve el foco al campo
+  // Nombre. El listener de Escape sí necesita el `onClose` vigente; el enfoque, sólo el montaje.
   useEffect(() => {
     labelRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
