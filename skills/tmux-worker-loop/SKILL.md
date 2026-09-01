@@ -114,16 +114,21 @@ cwd=$(tmux display-message -p '#{pane_current_path}')
 win=$(tmux display-message -p '#{session_name}:#{window_index}')
 main=$(tmux display-message -p '#{pane_id}')          # driver = you
 
+tmux set-option -g history-limit 50000
 brain=$(tmux    split-window -h -c "$cwd" -t "$win" -P -F '#{pane_id}')
 reviewer=$(tmux split-window -v -c "$cwd" -t "$win" -P -F '#{pane_id}')
 impl=$(tmux     split-window -v -c "$cwd" -t "$brain" -P -F '#{pane_id}')
 tmux select-layout -t "$win" tiled
 tmux set-option -t "$win" mouse on
 tmux set-option -t "$win" window-size latest
-tmux set-option -t "$win" history-limit 50000
 
-# Las tablas copy-mode son GLOBALES del servidor tmux, no de esta sesión: estos bindings también
-# afectan las sesiones propias del operador. Se acepta para que arrastrar en ttyd copie al sistema.
+# Las tablas root/copy-mode son GLOBALES del servidor tmux, no de esta sesión: estos bindings
+# también afectan las sesiones propias del operador. Opción/Shift fuerza copy-mode incluso si la
+# app tomó el ratón; con rueda entra al historial de tmux.
+tmux bind-key -T root M-MouseDrag1Pane copy-mode -M
+tmux bind-key -T root S-MouseDrag1Pane copy-mode -M
+tmux bind-key -T root M-WheelUpPane copy-mode -e
+tmux bind-key -T root S-WheelUpPane copy-mode -e
 clipboard_cmd=""
 if [ "$(uname -s)" = "Darwin" ]; then
   clipboard_cmd="pbcopy"

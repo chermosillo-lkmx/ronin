@@ -138,7 +138,12 @@ export async function hasSession(name: string): Promise<boolean> {
  */
 export async function createSession(name: string, cwd: string, startCmd: string = CLAUDE_CMD): Promise<void> {
   const command = `${startCmd}; exec $SHELL -l`;
-  await pexec("tmux", tmuxArgs("new-session", "-d", "-s", name, "-c", cwd, command));
+  const cleanupServerDefaults = await applyServerDefaults();
+  try {
+    await pexec("tmux", tmuxArgs("new-session", "-d", "-s", name, "-c", cwd, command));
+  } finally {
+    await cleanupServerDefaults();
+  }
   await applyBaseSessionOptions(name);
 }
 
@@ -414,6 +419,12 @@ export function baseSessionOptionCommands(session: string, copyCommand: string |
     ["set-option", "-t", session, "mouse", "on"],
     ["set-option", "-t", session, "window-size", "latest"],
     ["set-option", "-t", session, "history-limit", "50000"],
+    // La aplicación puede tomar el reporte del ratón. Estos modificadores siempre entran a
+    // copy-mode en tmux y preservan selección/copiar y scroll aunque la app lo haya tomado.
+    ["bind-key", "-T", "root", "M-MouseDrag1Pane", "copy-mode", "-M"],
+    ["bind-key", "-T", "root", "S-MouseDrag1Pane", "copy-mode", "-M"],
+    ["bind-key", "-T", "root", "M-WheelUpPane", "copy-mode", "-e"],
+    ["bind-key", "-T", "root", "S-WheelUpPane", "copy-mode", "-e"],
   ];
   if (!copyCommand) return commands;
 
@@ -424,6 +435,34 @@ export function baseSessionOptionCommands(session: string, copyCommand: string |
     ["bind-key", "-T", "copy-mode-vi", "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel", copyCommand],
   );
   return commands;
+}
+
+export function serverDefaultOptionCommands(): string[][] {
+  return [["set-option", "-g", "history-limit", "50000"]];
+}
+
+/** Defaults globales que deben existir ANTES de crear un pane inicial. */
+async function applyServerDefaults(): Promise<() => Promise<void>> {
+  const apply = async () => {
+    for (const args of serverDefaultOptionCommands()) await pexec("tmux", tmuxArgs(...args));
+  };
+
+  try {
+    await apply();
+    return async () => {};
+  } catch {
+    // Un socket nuevo no conserva un servidor vacío. Un pane temporal permite fijar el default
+    // antes del pane real; el llamador lo elimina inmediatamente después de crear éste.
+    const bootstrap = `cowork-bootstrap-${process.pid}-${Math.random().toString(36).slice(2)}`;
+    try {
+      await pexec("tmux", tmuxArgs("new-session", "-d", "-s", bootstrap));
+      await apply();
+      return async () => tmuxOptional(["kill-session", "-t", bootstrap]);
+    } catch {
+      await tmuxOptional(["kill-session", "-t", bootstrap]);
+      return async () => {};
+    }
+  }
 }
 
 /** Base compartida para toda sesión creada por Ronin; fallar aquí nunca cancela su creación. */
@@ -453,10 +492,15 @@ export async function createDriverWindow(
   startCmd: string = CLAUDE_CMD
 ): Promise<Record<PaneRole, string>> {
   const command = `${startCmd}; exec $SHELL -l`;
-  await pexec("tmux", tmuxArgs(
-    "new-session", "-d", "-s", session, "-n", "driver",
-    "-c", cwd, "-x", DRIVER_COLS, "-y", DRIVER_ROWS, command,
-  ));
+  const cleanupServerDefaults = await applyServerDefaults();
+  try {
+    await pexec("tmux", tmuxArgs(
+      "new-session", "-d", "-s", session, "-n", "driver",
+      "-c", cwd, "-x", DRIVER_COLS, "-y", DRIVER_ROWS, command,
+    ));
+  } finally {
+    await cleanupServerDefaults();
+  }
   await applyBaseSessionOptions(session);
 
   // El pane inicial de una sesión recién creada es determinístico; se lee su %N para no

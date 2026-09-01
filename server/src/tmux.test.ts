@@ -175,6 +175,8 @@ test("createSession aplica las opciones base de scroll e historial", async () =>
       await pexec("tmux", ["-L", socket, "show-options", "-t", "cowork-base-session-test", option], { env: envWithoutTmux() })).stdout.trim()
     ));
     assert.deepEqual(options, ["mouse on", "window-size latest", "history-limit 50000"]);
+    const { stdout: initialPaneHistory } = await pexec("tmux", ["-L", socket, "list-panes", "-t", "cowork-base-session-test", "-F", "#{history_limit}"], { env: envWithoutTmux() });
+    assert.equal(initialPaneHistory.trim(), "50000");
   });
 });
 
@@ -183,6 +185,10 @@ test("las opciones base en darwin emiten los dos bind-key con pbcopy", () => {
     ["set-option", "-t", "cowork-clipboard-darwin-test", "mouse", "on"],
     ["set-option", "-t", "cowork-clipboard-darwin-test", "window-size", "latest"],
     ["set-option", "-t", "cowork-clipboard-darwin-test", "history-limit", "50000"],
+    ["bind-key", "-T", "root", "M-MouseDrag1Pane", "copy-mode", "-M"],
+    ["bind-key", "-T", "root", "S-MouseDrag1Pane", "copy-mode", "-M"],
+    ["bind-key", "-T", "root", "M-WheelUpPane", "copy-mode", "-e"],
+    ["bind-key", "-T", "root", "S-WheelUpPane", "copy-mode", "-e"],
     ["bind-key", "-T", "copy-mode", "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel", "pbcopy"],
     ["bind-key", "-T", "copy-mode-vi", "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel", "pbcopy"],
   ]);
@@ -193,16 +199,22 @@ test("las opciones base sin comando de portapapeles no emiten bind-key", () => {
     ["set-option", "-t", "cowork-clipboard-none-test", "mouse", "on"],
     ["set-option", "-t", "cowork-clipboard-none-test", "window-size", "latest"],
     ["set-option", "-t", "cowork-clipboard-none-test", "history-limit", "50000"],
+    ["bind-key", "-T", "root", "M-MouseDrag1Pane", "copy-mode", "-M"],
+    ["bind-key", "-T", "root", "S-MouseDrag1Pane", "copy-mode", "-M"],
+    ["bind-key", "-T", "root", "M-WheelUpPane", "copy-mode", "-e"],
+    ["bind-key", "-T", "root", "S-WheelUpPane", "copy-mode", "-e"],
   ]);
 });
 
-test("createDriverWindow recibe las mismas opciones base una sola vez", async () => {
+test("createDriverWindow deja sus cuatro panes con historial completo", async () => {
   await withIsolatedSocket(async (socket) => {
     await createDriverWindow("cowork-base-driver-test", "/tmp", "true");
     const options = await Promise.all(["mouse", "window-size", "history-limit"].map(async (option) => (
       await pexec("tmux", ["-L", socket, "show-options", "-t", "cowork-base-driver-test", option], { env: envWithoutTmux() })).stdout.trim()
     ));
     assert.deepEqual(options, ["mouse on", "window-size latest", "history-limit 50000"]);
+    const { stdout: paneHistories } = await pexec("tmux", ["-L", socket, "list-panes", "-t", "cowork-base-driver-test", "-F", "#{history_limit}"], { env: envWithoutTmux() });
+    assert.deepEqual(paneHistories.trim().split("\n"), ["50000", "50000", "50000", "50000"]);
   });
 });
 

@@ -43,13 +43,21 @@ else
     visible in the new window.
 EOF
   session="liebre-worker-$(date +%s)"
+  bootstrap="liebre-bootstrap-$$"
+  tmux new-session -d -s "$bootstrap" -c "$cwd"
+  tmux set-option -g history-limit 50000
   tmux new-session -d -s "$session" -c "$cwd" -x 220 -y 50
+  tmux kill-session -t "$bootstrap"
   tmux set-option -t "$session" mouse on
   tmux set-option -t "$session" window-size latest
-  tmux set-option -t "$session" history-limit 50000
 
-  # Las tablas copy-mode son GLOBALES del servidor tmux, no de esta sesión: estos bindings también
-  # afectan las sesiones propias del operador. Se acepta para que arrastrar en ttyd copie al sistema.
+  # Las tablas root/copy-mode son GLOBALES del servidor tmux, no de esta sesión: estos bindings
+  # también afectan las sesiones propias del operador. Opción/Shift fuerza copy-mode incluso si la
+  # app tomó el ratón; con rueda entra al historial de tmux.
+  tmux bind-key -T root M-MouseDrag1Pane copy-mode -M
+  tmux bind-key -T root S-MouseDrag1Pane copy-mode -M
+  tmux bind-key -T root M-WheelUpPane copy-mode -e
+  tmux bind-key -T root S-WheelUpPane copy-mode -e
   clipboard_cmd=""
   if [ "$(uname -s)" = "Darwin" ]; then
     clipboard_cmd="pbcopy"
