@@ -5,7 +5,7 @@ import { test } from "node:test";
 // data/repo-config.json, using a throwaway repo key so real overrides are never touched.
 // test.after() removes the scratch key so the file is left clean.
 
-const { getRepoPlannerModel, getRepoWorkerModel, saveRepoOverrides, readRepoConfigFull, sanitizeEntry } =
+const { getRepoPlannerModel, getRepoSetupCommand, getRepoWorkerModel, saveRepoOverrides, readRepoConfigFull, sanitizeEntry } =
   await import("./repo-config.js");
 const { PLANNER_MODEL, WORKER_MODEL } = await import("./config.js");
 
@@ -90,4 +90,32 @@ test("saveRepoOverrides: persists unique qualified SkillRef values without chang
   });
   assert.deepEqual(full.skills, [{ root: "global", name: "api-review" }]);
   assert.equal(full.workflow, null);
+});
+
+// ---- setupCommand: cómo se arma el entorno de dependencias de un worktree recién creado.
+// Vive en el override por-repo (gitignorado) por el mismo motivo que startCommand y verifyCmd: es shell.
+const SETUP_KEY = "ronin-scratch-setup";
+
+test.after(() => {
+  try {
+    saveRepoOverrides(SETUP_KEY, { inheritWorkflow: true, vars: {}, startCommand: "", setupCommand: "", skills: [] });
+  } catch {}
+});
+
+test("setupCommand se guarda recortado, se lee crudo y ausente hereda vacío", () => {
+  const full = saveRepoOverrides(SETUP_KEY, { setupCommand: "  python3 -m venv .venv  " });
+  assert.equal(full.setupCommand, "python3 -m venv .venv");
+  assert.equal(readRepoConfigFull(SETUP_KEY).setupCommand, "python3 -m venv .venv");
+  assert.equal(getRepoSetupCommand(SETUP_KEY), "python3 -m venv .venv");
+});
+
+test("un override que SÓLO trae setupCommand no se descarta al guardar", () => {
+  saveRepoOverrides(SETUP_KEY, { inheritWorkflow: true, vars: {}, startCommand: "", setupCommand: "npm ci", skills: [] });
+  assert.equal(getRepoSetupCommand(SETUP_KEY), "npm ci");
+});
+
+test("un setupCommand en blanco no se persiste y el repo queda sin provisión", () => {
+  saveRepoOverrides(SETUP_KEY, { inheritWorkflow: true, vars: {}, startCommand: "", setupCommand: "   ", skills: [] });
+  assert.equal(getRepoSetupCommand(SETUP_KEY), null);
+  assert.equal(readRepoConfigFull(SETUP_KEY).setupCommand, "");
 });

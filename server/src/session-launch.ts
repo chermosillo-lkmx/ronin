@@ -2,6 +2,8 @@ import { writeJsonAtomic } from "./atomic.js";
 import { recordEvent } from "./history.js";
 import { CLAUDE_TERMINAL_CMD, CODEX_CMD } from "./config.js";
 import { sendWhenReady } from "./engine.js";
+import { getRepoSetupCommand } from "./repo-config.js";
+import { provisionWorktree } from "./provision.js";
 import { listRepos, resolveCwd } from "./repos.js";
 import { isSafeSessionName } from "./session-name.js";
 import { cycleDirForSession, ensureCycleDir, removeCycleDir, writeFlow } from "./stages.js";
@@ -74,6 +76,9 @@ export interface ManagedSessionLaunchDeps {
   writeFlow: typeof writeFlow;
   writeJsonAtomic: typeof writeJsonAtomic;
   deliverPrompt?: (session: string, prompt: string) => Promise<void>;
+  /** Comando que arma el entorno del worktree; null → este repo no provisiona. */
+  setupCommandFor?: (repo: string) => string | null;
+  provision?: (cycle: string, cwd: string, cmd: string) => Promise<unknown>;
   logError?: (error: unknown) => void;
   /** Sólo para inspeccionar la escritura desde pruebas unitarias. */
   readWrite?: (file: string) => unknown;
@@ -83,6 +88,7 @@ const launchDeps: ManagedSessionLaunchDeps = {
   listRepos, resolveCwd, hasSession, findWorkflowCatalogItem, worktreePathForSession,
   addWorktree, removeWorktree, createSession, killSession, cycleDirForSession,
   ensureCycleDir, removeCycleDir, writeFlow, writeJsonAtomic, deliverPrompt: sendWhenReady,
+  setupCommandFor: getRepoSetupCommand, provision: provisionWorktree,
   logError: (error) => console.error("[claude-cowork] no se pudo entregar la petición inicial", error),
 };
 
@@ -152,6 +158,14 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
     cycleCreated = true;
     deps.writeFlow(cycle, workflow.config);
     deps.writeJsonAtomic(`${cycle}/launch.json`, launchRecord(input, workflow, resolved.cwd, worktree, branch));
+    // El worktree nace pelado (.venv y node_modules están gitignorados): sin esto, la copia de la
+    // sesión no puede correr sus propias pruebas. Va en SEGUNDO PLANO —instalar dependencias son
+    // minutos— y su fallo se reporta sin tumbar el lanzamiento, igual que la entrega del prompt.
+    const setup = deps.setupCommandFor?.(input.repo);
+    if (setup && deps.provision) {
+      void deps.provision(cycle, worktree, setup).catch((error) => deps.logError?.(error));
+    }
+
     const request = input.request?.trim();
     if (request && deps.deliverPrompt) {
       const title = request.split(/\r?\n/, 1)[0].slice(0, 70);

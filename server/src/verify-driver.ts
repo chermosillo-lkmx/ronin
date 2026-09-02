@@ -1,3 +1,4 @@
+import { readProvisionState, type ProvisionState } from "./provision.js";
 import { readVerifyState, writeVerifyState, type VerifyState } from "./stages.js";
 import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "./verify.js";
 
@@ -82,6 +83,8 @@ export interface DriverDeps {
   flowFor(repo: string): GateStage[];
   cycleFor(session: string): string;
   detect(cycle: string, order: string[]): string | null;
+  /** Estado del entorno del worktree; null = este repo no provisiona nada. */
+  provisionOf(cycle: string): ProvisionState | null;
   readState(cycle: string, stageKey: string): VerifyState | null;
   writeState(cycle: string, stageKey: string, state: VerifyState): void;
   run(cmd: string, cwd: string): Promise<VerifyResult>;
@@ -112,6 +115,12 @@ export async function tickOnce(deps: DriverDeps, armed: Map<string, boolean>): P
 
       const stages = deps.flowFor(launch.repo);
       const cycle = deps.cycleFor(sesion.name);
+
+      // Sin entorno no hay nada que probar. `running`: la instalación sigue en marcha. `failed`:
+      // el entorno no se pudo armar — se salta SIN tocar el estado del gate, porque un venv que
+      // no existe no es un veredicto sobre el código y un rojo aquí sería una señal falsa.
+      const provision = deps.provisionOf(cycle);
+      if (provision?.status === "running" || provision?.status === "failed") continue;
       const gate = selectGate(stages, deps.detect(cycle, stages.map((s) => s.key)), (key) => deps.readState(cycle, key));
       if (!gate) continue;
 
@@ -160,6 +169,7 @@ export function startVerifyDriver(deps: DriverDeps, intervalMs = 20_000): Driver
 
 /** Dependencias reales: el estado y el ejecutor que ya existían, sin envoltorio nuevo. */
 export const realGateDeps = {
+  provisionOf: readProvisionState,
   readState: readVerifyState,
   writeState: writeVerifyState,
   run: (cmd: string, cwd: string) => runVerify(cmd, cwd, GATE_TIMEOUT_MS),

@@ -73,6 +73,7 @@ function deps(over: Partial<DriverDeps> & { cycle: string }): DriverDeps {
     readState: () => null,
     writeState: (_c, _k, state) => void escrito.push(state),
     run: async () => ({ ok: true, code: 0, output: "verde" }),
+    provisionOf: () => null,
     ...over,
   };
 }
@@ -214,6 +215,58 @@ test("tickOnce: un fallo del propio driver no tumba el resto de las sesiones", a
     });
     const informes = await tickOnce(d, new Map());
     assert.deepEqual(informes.map((i) => i.session), ["cowork-x"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+/**
+ * Provisión del entorno: mientras se instala, el worktree no tiene con qué correr las pruebas.
+ * Y si la instalación falló, el gate NO debe inventar un rojo — un entorno roto es un problema de
+ * setup, no un veredicto sobre el código.
+ */
+test("tickOnce: no corre el gate mientras el entorno se está provisionando", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let corridas = 0;
+    const d = deps({
+      cycle: dir,
+      provisionOf: () => ({ status: "running", startedAt: 1 }),
+      run: async () => { corridas++; return { ok: true, code: 0, output: "" }; },
+    });
+    assert.deepEqual(await tickOnce(d, new Map()), []);
+    assert.equal(corridas, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: con la provisión fallida se salta el gate y no se le toca el estado", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let corridas = 0;
+    const escrito: unknown[] = [];
+    const d = deps({
+      cycle: dir,
+      provisionOf: () => ({ status: "failed", startedAt: 1, finishedAt: 2, output: "pip falló" }),
+      run: async () => { corridas++; return { ok: false, code: 1, output: "" }; },
+      writeState: (_c, _k, state) => void escrito.push(state),
+    });
+    assert.deepEqual(await tickOnce(d, new Map()), []);
+    assert.equal(corridas, 0);
+    assert.deepEqual(escrito, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: con la provisión lista el gate corre normal", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const d = deps({ cycle: dir, provisionOf: () => ({ status: "ok", startedAt: 1, finishedAt: 2 }) });
+    const informes = await tickOnce(d, new Map());
+    assert.deepEqual(informes.map((i) => i.status), ["passed"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

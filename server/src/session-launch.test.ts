@@ -117,3 +117,48 @@ test("un error al entregar la petición se registra sin deshacer el lanzamiento"
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(errors.length, 1);
 });
+
+/**
+ * Provisión del entorno: un worktree recién creado no trae `.venv` ni `node_modules`, así que la
+ * copia de la sesión no podría correr sus propias pruebas. Se arranca en SEGUNDO PLANO: instalar
+ * dependencias tarda minutos y el lanzamiento no puede quedarse esperando ni caerse por ello.
+ */
+test("una sesión de workflow provisiona el worktree cuando el repo declara setupCommand", async () => {
+  const llamadas: { cycle: string; cwd: string; cmd: string }[] = [];
+  const deps = launchDeps({
+    setupCommandFor: () => "python3 -m venv .venv",
+    provision: async (cycle, cwd, cmd) => { llamadas.push({ cycle, cwd, cmd }); },
+  });
+
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-prov" }, deps);
+  assert.deepEqual(llamadas, [{ cycle: "/cycles/cowork-prov", cwd: "/worktrees/cowork-prov", cmd: "python3 -m venv .venv" }]);
+});
+
+test("sin setupCommand no se provisiona nada", async () => {
+  let veces = 0;
+  const deps = launchDeps({ setupCommandFor: () => null, provision: async () => { veces++; } });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-prov" }, deps);
+  assert.equal(veces, 0);
+});
+
+test("una terminal normal nunca provisiona: no tiene worktree", async () => {
+  let veces = 0;
+  const deps = launchDeps({ setupCommandFor: () => "npm ci", provision: async () => { veces++; } });
+  await launchManagedSession({ repo: "monorepo", name: "cowork-term", mode: "terminal", agent: "claude" }, deps);
+  assert.equal(veces, 0);
+});
+
+test("el lanzamiento no espera a la provisión ni se cae si revienta", async () => {
+  const errores: unknown[] = [];
+  const deps = launchDeps({
+    setupCommandFor: () => "instalar",
+    provision: () => new Promise((_resolve, reject) => setTimeout(() => reject(new Error("pip falló")), 20)),
+    logError: (error) => errores.push(error),
+  });
+
+  const resultado = await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-lenta" }, deps);
+  assert.equal(resultado.name, "cowork-lenta"); // resolvió sin esperar los 20ms de la provisión
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(errores.length, 1); // el fallo se reporta, no se traga ni se propaga
+});
