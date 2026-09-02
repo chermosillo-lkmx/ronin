@@ -28,6 +28,8 @@ import { readHistory, recordEvent } from "./history.js";
 import { generateReport, listReports, readReport, BadRequest } from "./reports.js";
 import { startReportSchedule } from "./report-schedule.js";
 import { cycleDirForSession } from "./stages.js";
+import { realVerifyDriverDeps } from "./verify-driver-deps.js";
+import { startVerifyDriver } from "./verify-driver.js";
 import { startTtyd } from "./ttyd.js";
 import { getWorkflow, saveWorkflow, validateStages, WorkflowValidationError, type WorkflowConfig } from "./workflow.js";
 import { createWorkflowCatalogItem, deleteWorkflowCatalogItem, importWorkflowCatalogItem, loadWorkflowCatalog, updateWorkflowCatalogItem } from "./workflow-catalog.js";
@@ -860,6 +862,8 @@ async function startDefaultBackground(): Promise<Cleanup> {
   const cleanups: Cleanup[] = [];
   try {
     if (REPORT_SCHEDULE) cleanups.push(startReportSchedule());
+    const verifyDriver = startVerifyDriver(realVerifyDriverDeps);
+    cleanups.push(() => verifyDriver.stop());
   } catch (error) {
     await Promise.allSettled(cleanups.reverse().map((cleanup) => cleanup()));
     throw error;

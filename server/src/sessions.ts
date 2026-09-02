@@ -192,13 +192,19 @@ export function attachUsageLimit(sessions: TmuxSessionInfo[], captures: Map<stri
   });
 }
 
-function requestFromLaunch(name: string): string | undefined {
+/** Lee una vez el registro de lanzamiento persistido; null si falta o no es JSON legible. */
+export function readLaunchRecord(name: string): unknown | null {
   try {
-    const raw = JSON.parse(readFileSync(join(cycleDirForSession(name), "launch.json"), "utf8"));
-    return typeof raw?.request === "string" && raw.request.trim() ? raw.request : undefined;
+    return JSON.parse(readFileSync(join(cycleDirForSession(name), "launch.json"), "utf8"));
   } catch {
-    return undefined;
+    return null;
   }
+}
+
+function requestFromLaunch(name: string): string | undefined {
+  const raw = readLaunchRecord(name);
+  const request = raw && typeof raw === "object" ? (raw as { request?: unknown }).request : undefined;
+  return typeof request === "string" && request.trim() ? request : undefined;
 }
 
 /** Result returned by the tmux inventory endpoint.
