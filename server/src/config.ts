@@ -50,5 +50,11 @@ export const PORT = resolvePort(process.env.PORT);
 
 // ---- Reportes de resumen (scheduler opt-in) ----
 export const REPORT_SCHEDULE = process.env.COWORK_REPORT_SCHEDULE === "1";
+/**
+ * P2: el bucle que ejecuta los `verifyCmd` de las etapas. Opt-in como el de reportes, y por la
+ * misma razón multiplicada: corre comandos declarados en el override por-repo. Apagado, el
+ * servidor no abre el lazo; encendido, sigue inerte hasta que un repo declare un verifyCmd.
+ */
+export const VERIFY_GATE = process.env.COWORK_VERIFY_GATE === "1";
 export const REPORT_DAILY_AT = process.env.COWORK_REPORT_DAILY_AT ?? "19:00";
 export const REPORT_WEEKLY_DAY = Number(process.env.COWORK_REPORT_WEEKLY_DAY ?? 5); // 0=Dom..6=Sáb, default vie

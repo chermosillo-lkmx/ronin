@@ -3,7 +3,7 @@ import express from "express";
 import { existsSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { PORT, REPORT_SCHEDULE } from "./config.js";
+import { PORT, REPORT_SCHEDULE, VERIFY_GATE } from "./config.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
 import { AdoptCommitError, AdoptValidationError, type AdoptErrorCode } from "./adopt.js";
 import {
@@ -862,8 +862,10 @@ async function startDefaultBackground(): Promise<Cleanup> {
   const cleanups: Cleanup[] = [];
   try {
     if (REPORT_SCHEDULE) cleanups.push(startReportSchedule());
-    const verifyDriver = startVerifyDriver(realVerifyDriverDeps);
-    cleanups.push(() => verifyDriver.stop());
+    if (VERIFY_GATE) {
+      const verifyDriver = startVerifyDriver(realVerifyDriverDeps);
+      cleanups.push(() => verifyDriver.stop());
+    }
   } catch (error) {
     await Promise.allSettled(cleanups.reverse().map((cleanup) => cleanup()));
     throw error;
