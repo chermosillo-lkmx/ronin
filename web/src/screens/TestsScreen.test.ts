@@ -43,6 +43,17 @@ test("TestsScreen differentiates all four suites and renders every repo from the
   for (const repo of ["api", "ms-i18n", "nuevo", "qa-only"]) assert.match(html, new RegExp(repo));
 });
 
+test("TestsScreen renders an activity heatmap for every repository, including empty repositories", () => {
+  const html = renderToString(createElement(TestsScreen, { initial: FIXTURE }));
+
+  assert.match(html, /Actividad por repositorio/);
+  assert.ok((html.match(/class="ron-tests-heat-row"/g) ?? []).length === FIXTURE.matrix.length);
+  for (const repo of FIXTURE.matrix.map((row) => row.repo)) assert.match(html, new RegExp(`data-repo="${repo}"`));
+  const emptyRow = html.match(/<div class="ron-tests-heat-row" data-repo="nuevo" data-empty-cells="90">([\s\S]*?)<\/div>/)?.[1];
+  assert.equal((emptyRow?.match(/class="ron-tests-heat-cell none"/g) ?? []).length, 90);
+  assert.ok(html.indexOf("Actividad por repositorio") < html.indexOf("<th>Repo<\/th>"));
+});
+
 test("TestsScreen renders coverage as no reportada rather than zero and shows a real percentage when reported", () => {
   const html = renderToString(createElement(TestsScreen, { initial: FIXTURE }));
   assert.match(html, /no reportada/);

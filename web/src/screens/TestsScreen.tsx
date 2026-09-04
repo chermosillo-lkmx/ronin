@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { cancelTestRun, getTestsConfig, getTestsMatrix, getTestsRuns, retryTestRun, saveTestsConfig, startTests } from "../api";
+import { ActivityHeatmap } from "../components/tests/ActivityHeatmap";
+import { buildHeatmap, monthSpans } from "../components/tests/heatmap";
 import type { TestCoverage, TestMatrixCell, TestMatrixRow, TestRepoConfig, TestRun, TestSuite, TestSuiteConfig, TestTotals } from "../types";
 
 /**
@@ -129,6 +131,9 @@ export function TestsScreen({ initial, selectedRepo: initialRepo, selectedRunId:
   const selectedRun = selectedRunId ? runs.find((r) => r.runId === selectedRunId) ?? null : null;
   const repoConfig = selectedRepo ? config.find((c) => c.repo === selectedRepo) ?? { repo: selectedRepo, configured: false, profiles: [], suites: {} } : null;
   const visibleRuns = selectedRepo ? runs.filter((r) => r.repo === selectedRepo) : runs;
+  const heatmapToday = new Date();
+  const heatmapRows = buildHeatmap(runs, matrix.map(({ repo, configured }) => ({ repo, configured })), { days: 90, today: heatmapToday });
+  const heatmapMonths = monthSpans(90, heatmapToday);
 
   return (
     <div className="nocturne ron-tests">
@@ -150,6 +155,8 @@ export function TestsScreen({ initial, selectedRepo: initialRepo, selectedRunId:
 
       {down && <p className="ron-msg err">No se pudo consultar el test harness. ¿Está el server arriba?</p>}
       {msg && <p className={`ron-msg ${msg.kind}`}>{msg.text}</p>}
+
+      <ActivityHeatmap rows={heatmapRows} months={heatmapMonths} />
 
       <div className="card elev-sm ron-tests-matrix-card">
         <table className="table ron-tests-matrix">
