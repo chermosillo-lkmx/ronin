@@ -70,6 +70,12 @@ function fmtDuration(ms?: number): string {
   return ms < 1000 ? `${ms} ms` : `${Math.round(ms / 100) / 10} s`;
 }
 
+// El calendario cubre 90 días: con un tope de 100 corridas, en cuanto se acumule historia los
+// días viejos se quedarían vacíos sin avisar — el calendario mentiría por recorte de la consulta,
+// no por falta de corridas. El server no topa este valor por arriba.
+const HEATMAP_DAYS = 90;
+const HEATMAP_RUN_LIMIT = 1000;
+
 export function TestsScreen({ initial, selectedRepo: initialRepo, selectedRunId: initialRunId }: TestsScreenProps) {
   const [matrix, setMatrix] = useState<TestMatrixRow[]>(initial?.matrix ?? []);
   const [config, setConfig] = useState<TestRepoConfig[]>(initial?.config ?? []);
@@ -83,7 +89,7 @@ export function TestsScreen({ initial, selectedRepo: initialRepo, selectedRunId:
   const timer = useRef<number | undefined>(undefined);
 
   const load = async () => {
-    const [m, c, r] = await Promise.all([getTestsMatrix(), getTestsConfig(), getTestsRuns({ limit: 100 })]);
+    const [m, c, r] = await Promise.all([getTestsMatrix(), getTestsConfig(), getTestsRuns({ limit: HEATMAP_RUN_LIMIT })]);
     if (m === null || c === null) {
       setDown(true);
       return;
@@ -132,8 +138,8 @@ export function TestsScreen({ initial, selectedRepo: initialRepo, selectedRunId:
   const repoConfig = selectedRepo ? config.find((c) => c.repo === selectedRepo) ?? { repo: selectedRepo, configured: false, profiles: [], suites: {} } : null;
   const visibleRuns = selectedRepo ? runs.filter((r) => r.repo === selectedRepo) : runs;
   const heatmapToday = new Date();
-  const heatmapRows = buildHeatmap(runs, matrix.map(({ repo, configured }) => ({ repo, configured })), { days: 90, today: heatmapToday });
-  const heatmapMonths = monthSpans(90, heatmapToday);
+  const heatmapRows = buildHeatmap(runs, matrix.map(({ repo, configured }) => ({ repo, configured })), { days: HEATMAP_DAYS, today: heatmapToday });
+  const heatmapMonths = monthSpans(HEATMAP_DAYS, heatmapToday);
 
   return (
     <div className="nocturne ron-tests">
