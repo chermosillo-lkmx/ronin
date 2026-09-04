@@ -14,6 +14,8 @@ import {
   readAdoptedMark,
   readPaneGeometry,
   parseCaptureBatch,
+  pasteBufferName,
+  pastePrompt,
   sendText,
   setAdoptedMark,
   tmuxCommand,
@@ -306,5 +308,43 @@ test("P1/P11 (prueba de mayor valor del ciclo): capturePaneAnsi + sendText sobre
 
     const after = await activeIdentity(socket);
     assert.equal(after, before, "operar sobre el pane de la ventana 0 (no activa) no debe mover el foco de tmux a la ventana 1");
+  });
+});
+
+/**
+ * El nombre del buffer de pegado era una CONSTANTE global compartida por las tres rutas que
+ * entregan texto (lanzamiento, envío a un pane y broadcast). Dos entregas concurrentes se pisaban:
+ * reproducido en vivo, el pane A recibió el texto de B y el pane B se quedó sin nada, con tmux
+ * devolviendo `no buffer cowork-prompt` porque el `-d` de la primera borra el buffer de la segunda.
+ * De ahí los prompts truncados y cruzados que confunden al agente sobre qué trabajo queda.
+ */
+test("pasteBufferName: cada entrega usa un buffer propio", () => {
+  const nombres = new Set(Array.from({ length: 50 }, () => pasteBufferName()));
+  assert.equal(nombres.size, 50);
+  for (const nombre of nombres) assert.match(nombre, /^cowork-prompt-[a-z0-9-]+$/);
+});
+
+test("dos entregas concurrentes NO se pisan: cada pane recibe su propio texto", async () => {
+  await withIsolatedSocket(async (socket) => {
+    await createSession("cowork-paste-a", "/tmp", "cat");
+    await createSession("cowork-paste-b", "/tmp", "cat");
+    const textoA = `IZQUIERDA-${"A".repeat(400)}`;
+    const textoB = `DERECHA-${"B".repeat(400)}`;
+
+    await Promise.all([
+      pastePrompt("cowork-paste-a", textoA, false),
+      pastePrompt("cowork-paste-b", textoB, false),
+    ]);
+
+    const leer = async (name: string) => (
+      await pexec("tmux", ["-L", socket, "capture-pane", "-p", "-t", name], { env: envWithoutTmux() })
+    ).stdout.replace(/\s+/g, "");
+
+    const a = await leer("cowork-paste-a");
+    const b = await leer("cowork-paste-b");
+    assert.ok(a.includes("IZQUIERDA"), "el pane A debe recibir SU texto");
+    assert.ok(b.includes("DERECHA"), "el pane B debe recibir SU texto");
+    assert.ok(!a.includes("DERECHA"), "el pane A no puede recibir el texto de B");
+    assert.ok(!b.includes("IZQUIERDA"), "el pane B no puede recibir el texto de A");
   });
 });

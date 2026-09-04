@@ -159,7 +159,15 @@ export async function sendText(name: string, text: string, submit: boolean): Pro
 // en vivo 2/2 con el prompt del driver (~7KB). El mecanismo de abajo es el que documenta el propio
 // SKILL.md (`load-buffer` + `paste-buffer -p` + sleep + Enter) — bracketed paste entrega el texto
 // de una pieza y la pausa deja que la caja termine de renderizar antes del Enter.
-const PASTE_BUFFER = "cowork-prompt";
+// Un nombre de buffer POR ENTREGA, no una constante global. Con un nombre compartido, dos
+// entregas concurrentes —lanzamiento, envío a un pane y broadcast usan esta misma función— se
+// pisaban el buffer: reproducido en vivo, un pane recibía el texto de otro y el segundo se
+// quedaba sin nada, porque el `-d` del primero borra el buffer antes de que el segundo pegue.
+let pasteSeq = 0;
+export function pasteBufferName(): string {
+  pasteSeq += 1;
+  return `cowork-prompt-${process.pid}-${pasteSeq}-${Math.random().toString(36).slice(2, 8)}`;
+}
 const PASTE_SETTLE_MS = 1200;
 // Límite compartido por envío pane-scoped, broadcast y lanzamiento: tres números iguales se
 // desincronizan sin ruido y reabren el mismo corte de prompt según la ruta que se use.
@@ -169,12 +177,13 @@ export const PASTE_THRESHOLD_BYTES = 200;
 export async function pastePrompt(target: string, text: string, submit: boolean): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "cowork-paste-"));
   const file = join(dir, "prompt.txt");
+  const buffer = pasteBufferName();
   try {
     writeFileSync(file, text);
     // Por archivo y no por argv: el prompt puede pasar de los límites de tamaño de argumentos.
-    await pexec("tmux", tmuxArgs("load-buffer", "-b", PASTE_BUFFER, file));
+    await pexec("tmux", tmuxArgs("load-buffer", "-b", buffer, file));
     // -p = bracketed paste (preserva el multilínea); -d = borra el buffer tras pegar.
-    await pexec("tmux", tmuxArgs("paste-buffer", "-b", PASTE_BUFFER, "-p", "-d", "-t", target));
+    await pexec("tmux", tmuxArgs("paste-buffer", "-b", buffer, "-p", "-d", "-t", target));
     if (submit) {
       await new Promise((r) => setTimeout(r, PASTE_SETTLE_MS));
       await pexec("tmux", tmuxArgs("send-keys", "-t", target, "Enter"));
