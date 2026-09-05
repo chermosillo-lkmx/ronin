@@ -1,6 +1,6 @@
 import { writeJsonAtomic } from "./atomic.js";
 import { recordEvent } from "./history.js";
-import { CLAUDE_TERMINAL_CMD, CODEX_CMD } from "./config.js";
+import { CLAUDE_CMD, CLAUDE_TERMINAL_CMD, CODEX_CMD } from "./config.js";
 import { sendWhenReady } from "./engine.js";
 import { getRepoSetupCommand } from "./repo-config.js";
 import { provisionWorktree } from "./provision.js";
@@ -79,6 +79,8 @@ export interface ManagedSessionLaunchDeps {
   /** Comando que arma el entorno del worktree; null → este repo no provisiona. */
   setupCommandFor?: (repo: string) => string | null;
   provision?: (cycle: string, cwd: string, cmd: string) => Promise<unknown>;
+  /** Decora un comando del agente; producción añade MCP si el servidor lo pudo configurar. */
+  startCommandFor?: (startCommand: string) => string;
   logError?: (error: unknown) => void;
   /** Sólo para inspeccionar la escritura desde pruebas unitarias. */
   readWrite?: (file: string) => unknown;
@@ -152,7 +154,7 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
   try {
     await deps.addWorktree(resolved.cwd, worktree, branch, "main");
     worktreeCreated = true;
-    await deps.createSession(input.name, worktree);
+    await deps.createSession(input.name, worktree, deps.startCommandFor?.(CLAUDE_CMD) ?? CLAUDE_CMD);
     tmuxCreated = true;
     deps.ensureCycleDir(cycle);
     cycleCreated = true;
@@ -193,7 +195,8 @@ async function launchNormalTerminalSession(
   let tmuxCreated = false;
   let cycleCreated = false;
   try {
-    await deps.createSession(input.name, cwd, normalTerminalCommand(agent));
+    const startCommand = normalTerminalCommand(agent);
+    await deps.createSession(input.name, cwd, deps.startCommandFor?.(startCommand) ?? startCommand);
     tmuxCreated = true;
     // The cycle dir marks the terminal as managed, enabling the same Attach/pane controls.
     deps.ensureCycleDir(cycle);

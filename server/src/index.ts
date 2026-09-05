@@ -45,11 +45,12 @@ import { listAllSessions, readTmuxInventory } from "./sessions.js";
 import { launchManagedSession, SessionLaunchError } from "./session-launch.js";
 import { createSessionPresentationStore, SessionPresentationError } from "./session-presentation.js";
 import { archiveSkill, createSkill, listSkills, readSkill, SkillError, updateSkill } from "./skills.js";
-import { dataPath } from "./data-dir.js";
+import { DATA_DIR, dataPath } from "./data-dir.js";
 import { createHarnessStore } from "./test-harness/config.js";
 import { HarnessValidationError, parseSelection } from "./test-harness/model.js";
 import { createTestHarnessService, HarnessError, type TestHarnessService } from "./test-harness/service.js";
 import { handleMcp } from "./mcp.js";
+import { withMcpConfig, writeAgentMcpConfig } from "./agent-mcp.js";
 import { runClaudeP } from "./claude-p.js";
 import { createAnalyzer, type Analyzer } from "./workflow-insights/analyzer.js";
 import { InsightsError, parseRange, type ProposalStatus } from "./workflow-insights/model.js";
@@ -837,7 +838,7 @@ export interface ServerHandle {
 }
 
 export interface ServerDependencies {
-  createApp: () => express.Express;
+  createApp: typeof createApp;
   ensureCapability: () => string;
   startBackground: () => Promise<Cleanup>;
   listen: (app: express.Express, port: number) => Promise<Server>;
@@ -897,15 +898,23 @@ const defaultDependencies: ServerDependencies = {
  */
 export async function startServer(options: StartServerOptions = {}): Promise<ServerHandle> {
   const deps = { ...defaultDependencies, ...options.deps };
-  const app = deps.createApp();
+  let mcpConfigPath = "";
+  const app = deps.createApp({
+    launchManagedSession: (input) => launchManagedSession(input, {
+      startCommandFor: (startCommand) => withMcpConfig(startCommand, mcpConfigPath),
+    }),
+  });
   const requestedPort = options.port ?? PORT;
   let background: Cleanup | undefined;
   let server: Server | undefined;
 
   try {
-    deps.ensureCapability();
+    const capabilityToken = deps.ensureCapability();
     background = await deps.startBackground();
     server = await deps.listen(app, requestedPort);
+    const address = server.address();
+    const port = typeof address === "object" && address ? (address as AddressInfo).port : requestedPort;
+    mcpConfigPath = writeAgentMcpConfig(DATA_DIR, port, capabilityToken) ?? "";
   } catch (error) {
     if (background) await background();
     throw error;

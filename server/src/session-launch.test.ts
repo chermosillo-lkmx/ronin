@@ -75,6 +75,27 @@ test("normal Claude sessions use the interactive terminal command", () => {
   assert.equal(normalTerminalCommand("codex", { claude: "claude", codex: "codex" }), "codex");
 });
 
+test("una sesión de workflow recibe el comando MCP inyectado", async () => {
+  const commands: string[] = [];
+  const deps = launchDeps({
+    createSession: async (_name, _cwd, command) => { commands.push(command); },
+    startCommandFor: (command) => `${command} --mcp-config \"/tmp/Application Support/agent-mcp.json\"`,
+  });
+
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-mcp-workflow" }, deps);
+
+  assert.deepEqual(commands, ["claude --permission-mode bypassPermissions --mcp-config \"/tmp/Application Support/agent-mcp.json\""]);
+});
+
+test("sin ruta MCP el workflow conserva el comando de siempre", async () => {
+  const commands: string[] = [];
+  const deps = launchDeps({ createSession: async (_name, _cwd, command) => { commands.push(command); } });
+
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-mcp" }, deps);
+
+  assert.deepEqual(commands, ["claude --permission-mode bypassPermissions"]);
+});
+
 test("workflow con petición persiste launch.json y entrega el prompt completo sin esperar", async () => {
   const delivered: Array<[string, string]> = [];
   const deps = launchDeps({ deliverPrompt: async (session, prompt) => { delivered.push([session, prompt]); } });
