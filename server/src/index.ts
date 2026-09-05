@@ -49,6 +49,7 @@ import { dataPath } from "./data-dir.js";
 import { createHarnessStore } from "./test-harness/config.js";
 import { HarnessValidationError, parseSelection } from "./test-harness/model.js";
 import { createTestHarnessService, HarnessError, type TestHarnessService } from "./test-harness/service.js";
+import { handleMcp } from "./mcp.js";
 import { runClaudeP } from "./claude-p.js";
 import { createAnalyzer, type Analyzer } from "./workflow-insights/analyzer.js";
 import { InsightsError, parseRange, type ProposalStatus } from "./workflow-insights/model.js";
@@ -148,7 +149,15 @@ app.use("/api", requireLocalOrigin);
 // Puerta general: por MÉTODO, no enumerando rutas — GET/HEAD/OPTIONS pasan sin mirar nada
 // (requireCapability.ts), todo lo demás exige `X-Ronin-Capability` en tiempo constante.
 app.use("/api", requireCapability);
+// El endpoint MCP también muta el journal; comparte exactamente la misma capability que /api.
+app.use("/mcp", requireLocalOrigin);
+app.use("/mcp", requireCapability);
 app.use(express.json());
+app.post("/mcp", async (req, res) => {
+  const response = await handleMcp(req.body, { harness });
+  if (response === null) return void res.status(202).end();
+  res.json(response);
+});
 // P12: /api/health publicaba el boot token en el cuerpo (el supervisor lo comparaba
 // contra el suyo), así que cualquier proceso local podía leerlo sin credencial.
 // El supervisor YA conoce el token (lo generó él y lo inyectó por env, backend-supervisor.ts:229):

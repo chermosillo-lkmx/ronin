@@ -32,6 +32,7 @@ function setup(): { dir: string; repoRoot: string; service: TestHarnessService; 
   const service = createTestHarnessService({
     store,
     resolveCwd: (repo) => (repo === "fixture" ? { cwd: repoRoot, real: true } : { cwd: process.cwd(), real: false }),
+    trustedRoots: () => [realpathSync(dir)],
   });
   return { dir, repoRoot, service, store, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
@@ -56,6 +57,7 @@ test("declared argv creates a run with parsed JUnit and coverage, copies artifac
     await service.waitFor(result.runIds[0]);
     const run = service.getRun(result.runIds[0])!;
     assert.equal(run.status, "passed");
+    assert.equal(run.source, "harness");
     assert.equal(run.exitCode, 0);
     assert.deepEqual(run.totals, { total: 2, passed: 2, failed: 0, skipped: 0, errors: 0 });
     assert.deepEqual(run.coverage, { status: "reported", lines: 80, branches: 50 });
@@ -69,6 +71,61 @@ test("declared argv creates a run with parsed JUnit and coverage, copies artifac
     assert.equal(run.cwd, realpathSync(join(repoRoot, "svc")));
   } finally {
     delete process.env.RONIN_SVC_LEAK;
+    cleanup();
+  }
+});
+
+test("recordAgentRun deriva el resultado del artefacto y lo marca como auto-declarado", () => {
+  const { repoRoot, service, store, cleanup } = setup();
+  try {
+    mkdirSync(repoRoot, { recursive: true });
+    const junitPath = join(repoRoot, "agent-junit.xml");
+    const coberturaPath = join(repoRoot, "agent-cobertura.xml");
+    writeFileSync(junitPath, `<testsuite tests="2" failures="1"><testcase name="ok"/><testcase name="bad"><failure message="boom"/></testcase></testsuite>`);
+    writeFileSync(coberturaPath, `<coverage line-rate="0.8" branch-rate="0.5"/>`);
+    store.saveRepo("fixture", { profiles: [], suites: {} });
+
+    const run = service.recordAgentRun({ repo: "fixture", suite: "unit", profile: "ci", junitPath, coberturaPath });
+
+    assert.equal(run.source, "agent");
+    assert.equal(run.status, "failed");
+    assert.equal(run.profile, "ci");
+    assert.deepEqual(run.totals, { total: 2, passed: 1, failed: 1, skipped: 0, errors: 0 });
+    assert.deepEqual(run.coverage, { status: "reported", lines: 80, branches: 50 });
+    assert.deepEqual(run.failures, [{ name: "bad", message: "boom" }]);
+    assert.equal(run.createdAt, run.finishedAt);
+    assert.equal(store.getRun(run.runId)?.source, "agent");
+  } finally {
+    cleanup();
+  }
+});
+
+test("recordAgentRun no persiste si el JUnit es ilegible o si un artefacto queda fuera de una raíz confiable", () => {
+  const { dir, repoRoot, service, store, cleanup } = setup();
+  const outside = mkdtempSync(join(tmpdir(), "ronin-agent-outside-"));
+  try {
+    mkdirSync(repoRoot, { recursive: true });
+    store.saveRepo("fixture", { profiles: [], suites: {} });
+    const unreadable = join(repoRoot, "bad.xml");
+    writeFileSync(unreadable, "<html/>");
+    assert.throws(() => service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: unreadable }), /JUnit/i);
+    assert.equal(store.listRuns().length, 0);
+    assert.throws(() => service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: repoRoot }), /archivo regular/i);
+    assert.equal(store.listRuns().length, 0);
+
+    const tooSmall = createTestHarnessService({ store, trustedRoots: () => [realpathSync(dir)], maxAgentArtifactBytes: 64 });
+    const largeButValid = join(repoRoot, "large.xml");
+    writeFileSync(largeButValid, `<testsuite tests="1"><testcase name="ok"/></testsuite>${" ".repeat(128)}`);
+    assert.throws(() => tooSmall.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: largeButValid }), /demasiado grande/i);
+    assert.equal(store.listRuns().length, 0);
+
+    const outsideJUnit = join(outside, "junit.xml");
+    writeFileSync(outsideJUnit, `<testsuite tests="1"><testcase name="ok"/></testsuite>`);
+    assert.throws(() => service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: outsideJUnit }), /raíz confiable/i);
+    assert.equal(store.listRuns().length, 0);
+    assert.ok(realpathSync(dir));
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
     cleanup();
   }
 });

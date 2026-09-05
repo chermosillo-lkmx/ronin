@@ -1,6 +1,6 @@
 import { randomBytes, createHash } from "node:crypto";
-import { copyFileSync, existsSync, realpathSync, rmSync } from "node:fs";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { copyFileSync, existsSync, realpathSync, rmSync, statSync } from "node:fs";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolveCwd as defaultResolveCwd } from "../repos.js";
 import { isWithinTrustedRoot, trustedRoots as defaultTrustedRoots } from "../repo-roots.js";
 import { boundOutput, readCoverageFile, readJUnitFile, redactEvidence } from "./artifacts.js";
@@ -8,6 +8,7 @@ import type { HarnessStore } from "./config.js";
 import {
   COMMAND_SUITES,
   clone,
+  isSuite,
   isTerminal,
   SUITES,
   type Batch,
@@ -40,6 +41,10 @@ export interface ServiceOptions {
   store: HarnessStore;
   resolveCwd?: (repo: string) => { cwd: string; real: boolean };
   now?: () => Date;
+  /** Política independiente e inyectable: los artefactos del agente nunca la definen. */
+  trustedRoots?: () => string[];
+  /** Límite de lectura para un reporte externo; inyectable para probar el rechazo temprano. */
+  maxAgentArtifactBytes?: number;
   /** Variables del entorno padre que SÍ se heredan (PATH y locale; nada más). */
   inheritEnv?: readonly string[];
 }
@@ -83,6 +88,7 @@ export interface StartResult {
 }
 
 const INHERIT_ENV_DEFAULT = ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SHELL", "USER"] as const;
+const MAX_AGENT_ARTIFACT_BYTES = 16 * 1024 * 1024;
 
 function newId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
@@ -96,6 +102,8 @@ export function createTestHarnessService(options: ServiceOptions) {
   const { store } = options;
   const resolveCwd = options.resolveCwd ?? defaultResolveCwd;
   const now = options.now ?? (() => new Date());
+  const trustedRoots = options.trustedRoots ?? defaultTrustedRoots;
+  const maxAgentArtifactBytes = options.maxAgentArtifactBytes ?? MAX_AGENT_ARTIFACT_BYTES;
   const inherit = options.inheritEnv ?? INHERIT_ENV_DEFAULT;
 
   const queues = new Map<string, Promise<void>>();
@@ -240,14 +248,14 @@ export function createTestHarnessService(options: ServiceOptions) {
     } catch {
       return { reason: `la raíz indicada no existe: ${options.root}` };
     }
-    const roots = options.trustedRoots ?? defaultTrustedRoots();
+    const roots = options.trustedRoots ?? trustedRoots();
     if (!isWithinTrustedRoot(real, roots)) return { reason: `la raíz indicada queda fuera de las raíces confiables: ${options.root}` };
     return { cwd: real };
   }
 
   function startSuite(repo: string, suiteKey: TestSuite, profileName: string, batchId?: string, options: StartOptions = {}): Run {
     const harness = store.readRepo(repo);
-    const base: Omit<Run, "runId" | "status" | "createdAt"> = { repo: harness.repo, suite: suiteKey, profile: profileName, ...(batchId ? { batchId } : {}) };
+    const base: Omit<Run, "runId" | "status" | "createdAt"> = { repo: harness.repo, suite: suiteKey, profile: profileName, source: "harness", ...(batchId ? { batchId } : {}) };
     const profile = harness.config.profiles.find((p) => p.name === profileName);
     if (!profile) return blockedRun(base, `perfil "${profileName}" no configurado en ${harness.repo}`);
     if (!(COMMAND_SUITES as readonly string[]).includes(suiteKey)) return blockedRun(base, `suite ${suiteKey} no ejecutable en este corte (sólo ${COMMAND_SUITES.join("/")})`);
@@ -267,6 +275,65 @@ export function createTestHarnessService(options: ServiceOptions) {
     persist(run);
     enqueue(run, suite, profile, cwdReal);
     return run;
+  }
+
+  /** Registra evidencia ya producida por el agente; aquí no se ejecuta ningún comando. */
+  function recordAgentRun(input: { repo: string; suite: TestSuite; profile?: string; junitPath: string; coberturaPath?: string }): Run {
+    if (!store.listHarnessRepos().includes(input.repo)) {
+      throw new HarnessError(`repo desconocido: ${input.repo}`, "REPO_NOT_FOUND", 404);
+    }
+    if (!isSuite(input.suite)) {
+      throw new HarnessError(`suite desconocida: ${String(input.suite)} (válidas: ${SUITES.join(", ")})`, "SUITE_INVALID", 400);
+    }
+
+    function trustedArtifact(path: string, label: string): string {
+      if (typeof path !== "string" || !isAbsolute(path)) {
+        throw new HarnessError(`${label} debe ser una ruta absoluta`, "ARTIFACT_PATH_INVALID", 400);
+      }
+      let real: string;
+      try {
+        real = realpathSync(path);
+      } catch {
+        throw new HarnessError(`${label} no se puede leer`, "ARTIFACT_UNREADABLE", 400);
+      }
+      if (!isWithinTrustedRoot(real, trustedRoots())) {
+        throw new HarnessError(`${label} queda fuera de una raíz confiable`, "ARTIFACT_OUTSIDE_TRUSTED_ROOT", 403);
+      }
+      let stats: ReturnType<typeof statSync>;
+      try {
+        stats = statSync(real);
+      } catch {
+        throw new HarnessError(`${label} no se puede inspeccionar`, "ARTIFACT_UNREADABLE", 400);
+      }
+      if (!stats.isFile()) throw new HarnessError(`${label} debe apuntar a un archivo regular`, "ARTIFACT_NOT_REGULAR", 400);
+      if (stats.size > maxAgentArtifactBytes) throw new HarnessError(`${label} es demasiado grande para registrar`, "ARTIFACT_TOO_LARGE", 400);
+      return real;
+    }
+
+    // Validar TODO antes de persistir: cobertura fuera de raíz tampoco deja una corrida parcial.
+    const junit = trustedArtifact(input.junitPath, "junitPath");
+    const cobertura = input.coberturaPath === undefined ? undefined : trustedArtifact(input.coberturaPath, "coberturaPath");
+    const parsed = readJUnitFile(junit);
+    if (!parsed.summary) {
+      throw new HarnessError(parsed.reason ?? "JUnit ilegible", "JUNIT_INVALID", 400);
+    }
+    const coverage = readCoverageFile(cobertura, "cobertura");
+    const at = now().toISOString();
+    const totals = parsed.summary.totals;
+    return persist({
+      runId: newId("run"),
+      source: "agent",
+      repo: input.repo,
+      suite: input.suite,
+      profile: input.profile ?? "agent",
+      status: totals.failed + totals.errors > 0 ? "failed" : "passed",
+      createdAt: at,
+      finishedAt: at,
+      totals,
+      coverage,
+      failures: parsed.summary.failures,
+      fingerprint: fingerprintOf({ failures: parsed.summary.failures } as Run),
+    });
   }
 
   function latestTerminal(repo: string, suite: TestSuite): Run | undefined {
@@ -367,6 +434,7 @@ export function createTestHarnessService(options: ServiceOptions) {
 
   return {
     start,
+    recordAgentRun,
     cancel,
     waitFor,
     waitForAll,

@@ -73,6 +73,8 @@ export interface FailedCase {
 
 export interface Run {
   runId: string;
+  /** Ausente equivale a harness para que el journal histórico conserve su procedencia. */
+  source?: "harness" | "agent";
   batchId?: string;
   repo: string;
   suite: TestSuite;
