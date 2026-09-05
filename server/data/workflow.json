@@ -18,7 +18,7 @@
       "key": "tests",
       "label": "Pruebas",
       "icon": "✅",
-      "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit), o vía Ronin: npm run tests:suite -- {repo} unit --profile dev. Guarda el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
+      "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
     },
     {
       "key": "curl",

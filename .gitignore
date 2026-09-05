@@ -23,3 +23,7 @@ server/data/workflow-proposals.json
 
 # artefactos incrementales de tsc: se regeneran en cada build
 *.tsbuildinfo
+
+# Lleva el token de capability: en dev el DATA_DIR es server/data y este archivo
+# aparecería sin rastrear. Nunca debe entrar a git.
+server/data/agent-mcp.json

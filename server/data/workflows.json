@@ -70,7 +70,7 @@
             "key": "tests",
             "label": "Tests",
             "icon": "✅",
-            "instruction": "Corre las suites del servicio afectado tú mismo (pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml / vitest run --reporter=junit) o vía Ronin: npm run tests:suite -- {repo} unit --profile dev. Exige el resumen exacto (N passed / failed) y confirma que los KB mencionan el flujo nuevo leyéndolos."
+            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
           },
           {
             "key": "curl",
@@ -111,7 +111,7 @@
             "key": "tests",
             "label": "Pruebas",
             "icon": "✅",
-            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit), o vía Ronin: npm run tests:suite -- {repo} unit --profile dev. Guarda el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
+            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
           },
           {
             "key": "curl",
@@ -146,7 +146,7 @@
             "key": "tests",
             "label": "Pruebas",
             "icon": "✅",
-            "instruction": "Corre la suite del servicio afectado (pytest -q --junitxml=reports/junit.xml / vitest run --reporter=junit) y guarda el resumen exacto en {ev}/tests.md."
+            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
           },
           {
             "key": "curl",
