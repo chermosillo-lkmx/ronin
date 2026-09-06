@@ -21,6 +21,13 @@ function countLabel(count: number): string {
   return `${count} ${count === 1 ? "corrida" : "corridas"}`;
 }
 
+function cellTitle(cell: HeatCell): string {
+  const agentLabel = cell.agentCount > 0
+    ? ` · ${cell.agentCount} reportada${cell.agentCount === 1 ? "" : "s"} por el agente`
+    : "";
+  return `${cell.date} · ${countLabel(cell.count)} · ${statusLabel[cell.status]}${agentLabel}`;
+}
+
 export function ActivityHeatmap({ rows, months }: ActivityHeatmapProps) {
   const days = rows[0]?.cells.length ?? months.reduce((total, month) => total + month.days, 0);
   const gridStyle = { gridTemplateColumns: `repeat(${days}, 9px)` };
@@ -55,7 +62,7 @@ export function ActivityHeatmap({ rows, months }: ActivityHeatmapProps) {
               <span className={`ron-tests-heat-repo${row.configured ? "" : " unconfigured"}`} title={row.repo}>{row.repo}</span>
               <span className="ron-tests-heat-cells" style={gridStyle}>
                 {row.cells.map((cell) => (
-                  <i className={cellClass(cell)} key={cell.date} title={`${cell.date} · ${countLabel(cell.count)} · ${statusLabel[cell.status]}`} />
+                  <i className={cellClass(cell)} key={cell.date} title={cellTitle(cell)} />
                 ))}
               </span>
               <span className="ron-tests-heat-total">{countLabel(row.total)}</span>

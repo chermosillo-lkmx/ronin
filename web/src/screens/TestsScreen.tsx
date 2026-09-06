@@ -243,6 +243,7 @@ function MatrixCellView({ cell, canRun, busy, onOpen, onRun }: { cell: TestMatri
       <button className="ron-tests-cell-main" onClick={onOpen} title={cell.reason ?? ""}>
         <span className={`ron-dot ${tone}`} />
         <span className={`ron-tests-cell-state ${tone}`}>{STATE_LABEL[cell.state] ?? cell.state}</span>
+        {cell.source === "agent" && <span className="ron-tests-cell-source" title="Esta corrida la reportó el agente; los conteos provienen del JUnit que entregó."> · agente</span>}
         {cell.totals && <span className="ron-tests-cell-meta">{fmtTotals(cell.totals)}</span>}
         {cell.coverage && cell.coverage.status !== "not_applicable" && <span className="ron-tests-cell-meta">{fmtCoverage(cell.coverage)}</span>}
         {cell.durationMs !== undefined && <span className="ron-tests-cell-meta">{fmtDuration(cell.durationMs)}</span>}
@@ -270,6 +271,7 @@ function RunDetail({ run, busy, onCancel, onRetry }: { run: TestRun; busy: boole
       <dl className="ron-tests-meta">
         <dt>run</dt><dd className="ron-mono">{run.runId}{run.batchId ? ` · lote ${run.batchId}` : ""}</dd>
         <dt>perfil</dt><dd>{run.profile}</dd>
+        <dt>procedencia</dt><dd>{run.source === "agent" ? "La corrió el agente; Ronin no la ejecutó y leyó su JUnit." : "Ronin ejecutó esta suite."}</dd>
         {run.command && <><dt>comando</dt><dd className="ron-mono">{[run.command.program, ...run.command.args].join(" ")}</dd></>}
         {run.cwd && <><dt>cwd</dt><dd className="ron-mono">{run.cwd}</dd></>}
         <dt>resultado</dt>

@@ -27,7 +27,7 @@ test("buildHeatmap preserves repository order and renders empty days for reposit
   for (const row of rows) {
     assert.equal(row.cells.length, 3);
     assert.deepEqual(row.cells.map((cell) => cell.date), ["2026-09-02", "2026-09-03", "2026-09-04"]);
-    assert.deepEqual(row.cells.map((cell) => [cell.count, cell.status]), [[0, "none"], [0, "none"], [0, "none"]]);
+    assert.deepEqual(row.cells.map((cell) => [cell.count, cell.status, cell.agentCount]), [[0, "none", 0], [0, "none", 0], [0, "none", 0]]);
   }
 });
 
@@ -44,7 +44,7 @@ test("buildHeatmap groups runs by the local createdAt date and takes the worst v
     run({ runId: "cancelled", createdAt: instant.toISOString(), status: "cancelled" }),
   ], [{ repo: "api", configured: true }], { days: 1, today });
 
-  assert.deepEqual(rows[0].cells, [{ date: localDate(instant), count: 3, status: "error" }]);
+  assert.deepEqual(rows[0].cells, [{ date: localDate(instant), count: 3, status: "error", agentCount: 0 }]);
   assert.equal(rows[0].total, 3);
 });
 
@@ -53,8 +53,29 @@ test("buildHeatmap treats a timeout as a failed terminal run", () => {
     run({ status: "timeout" }),
   ], [{ repo: "api", configured: true }], { days: 1, today: new Date(2026, 8, 4, 12) });
 
-  assert.deepEqual(rows[0].cells[0], { date: "2026-09-04", count: 1, status: "failed" });
+  assert.deepEqual(rows[0].cells[0], { date: "2026-09-04", count: 1, status: "failed", agentCount: 0 });
   assert.equal(rows[0].total, 1);
+});
+
+test("buildHeatmap counts agent-reported runs independently for agent, harness, mixed and empty days", () => {
+  const rows = buildHeatmap([
+    run({ repo: "agent", source: "agent" }),
+    run({ repo: "harness", source: "harness" }),
+    run({ repo: "mixed", source: "agent" }),
+    run({ runId: "mixed-harness", repo: "mixed", source: "harness" }),
+  ], [
+    { repo: "agent", configured: true },
+    { repo: "harness", configured: true },
+    { repo: "mixed", configured: true },
+    { repo: "empty", configured: true },
+  ], { days: 1, today: new Date(2026, 8, 4, 12) });
+
+  assert.deepEqual(rows.map((row) => [row.repo, row.cells[0].count, row.cells[0].agentCount]), [
+    ["agent", 1, 1],
+    ["harness", 1, 0],
+    ["mixed", 2, 1],
+    ["empty", 0, 0],
+  ]);
 });
 
 test("buildHeatmap ignores verdicts outside the date window", () => {

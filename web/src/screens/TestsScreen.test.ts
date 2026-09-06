@@ -14,6 +14,7 @@ const cells = (unit: TestMatrixRow["cells"]["unit"]): TestMatrixRow["cells"] => 
 
 const RUN: TestRun = {
   runId: "run-1", repo: "api", suite: "unit", profile: "dev", status: "failed", createdAt: "2026-08-24T10:00:00.000Z",
+  source: "agent",
   startedAt: "2026-08-24T10:00:00.000Z", finishedAt: "2026-08-24T10:00:05.000Z", exitCode: 1,
   totals: { total: 10, passed: 8, failed: 2, skipped: 0, errors: 0 },
   coverage: { status: "reported", lines: 54.3 },
@@ -23,8 +24,8 @@ const RUN: TestRun = {
 
 const FIXTURE: TestsScreenData = {
   matrix: [
-    { repo: "api", configured: true, profiles: ["dev"], cells: cells({ suite: "unit", state: "failed", runId: "run-1", totals: RUN.totals, coverage: RUN.coverage }) },
-    { repo: "ms-i18n", configured: true, profiles: ["dev"], cells: cells({ suite: "unit", state: "passed", runId: "run-2", totals: { total: 3, passed: 3, failed: 0, skipped: 0, errors: 0 }, coverage: { status: "not_reported", reason: "sin ruta de cobertura declarada" } }) },
+    { repo: "api", configured: true, profiles: ["dev"], cells: cells({ suite: "unit", state: "failed", runId: "run-1", source: "agent", totals: RUN.totals, coverage: RUN.coverage }) },
+    { repo: "ms-i18n", configured: true, profiles: ["dev"], cells: cells({ suite: "unit", state: "passed", runId: "run-2", source: "harness", totals: { total: 3, passed: 3, failed: 0, skipped: 0, errors: 0 }, coverage: { status: "not_reported", reason: "sin ruta de cobertura declarada" } }) },
     { repo: "nuevo", configured: false, profiles: [], cells: cells({ suite: "unit", state: "unconfigured" }) },
     { repo: "qa-only", configured: true, profiles: ["qa"], cells: cells({ suite: "unit", state: "blocked", reason: "perfil \"dev\" no configurado en qa-only" }) },
   ],
@@ -68,6 +69,18 @@ test("TestsScreen distinguishes unconfigured, blocked and failed cells", () => {
   assert.match(html, /8\/10/);
 });
 
+test("TestsScreen marks an agent matrix cell but leaves a harness cell unmarked", () => {
+  const agentHtml = renderToString(createElement(TestsScreen, { initial: FIXTURE }));
+  const harnessFixture: TestsScreenData = {
+    ...FIXTURE,
+    matrix: [{ repo: "harness", configured: true, profiles: ["dev"], cells: cells({ suite: "unit", state: "passed", source: "harness" }) }],
+  };
+  const harnessHtml = renderToString(createElement(TestsScreen, { initial: harnessFixture }));
+
+  assert.match(agentHtml, /· agente/);
+  assert.doesNotMatch(harnessHtml, /· agente/);
+});
+
 test("TestsScreen offers the configuration form for an unconfigured repo and never renders variable values", () => {
   const html = renderToString(createElement(TestsScreen, { initial: FIXTURE, selectedRepo: "nuevo" }));
   assert.match(html, /Configurar pruebas/);
@@ -81,4 +94,5 @@ test("TestsScreen run detail lists failures and redacted output without the toke
   assert.match(html, /boom/);
   assert.match(html, /TOKEN=\*\*\*/);
   assert.match(html, /Reintentar/);
+  assert.match(html, /La corrió el agente; Ronin no la ejecutó y leyó su JUnit/);
 });

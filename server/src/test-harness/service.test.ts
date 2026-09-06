@@ -258,12 +258,29 @@ test("matrix shows unconfigured, blocked and latest terminal state per suite wit
     m = service.matrix();
     assert.equal(m[0].cells.unit.state, "passed");
     assert.equal(m[0].cells.unit.runId, runIds[0]);
+    assert.equal(m[0].cells.unit.source, "harness");
     assert.equal(m[0].cells.unit.coverage?.lines, 80);
     assert.equal(m[0].cells.unit.totals?.total, 2);
     // el journal es la fuente: una instancia nueva ve lo mismo
     const again = createTestHarnessService({ store: createHarnessStore({ directory: store.directory, repos: () => ["fixture", "other"] }), resolveCwd: () => ({ cwd: repoRoot, real: true }) });
     assert.equal(again.matrix()[0].cells.unit.state, "passed");
     assert.equal(readdirSync(store.artifactsDir(runIds[0])).length, 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("matrix transports the source of an agent-reported latest run", () => {
+  const { repoRoot, service, store, cleanup } = setup();
+  try {
+    mkdirSync(repoRoot, { recursive: true });
+    const junitPath = join(repoRoot, "agent-junit.xml");
+    writeFileSync(junitPath, `<testsuite tests="1"><testcase name="ok"/></testsuite>`);
+    store.saveRepo("fixture", { profiles: [{ name: "dev" }], suites: { unit: UNIT } });
+
+    service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath });
+
+    assert.equal(service.matrix()[0].cells.unit.source, "agent");
   } finally {
     cleanup();
   }

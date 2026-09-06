@@ -3,6 +3,7 @@ import type { TestRun } from "../../types";
 export interface HeatCell {
   date: string;
   count: number;
+  agentCount: number;
   status: "none" | "passed" | "failed" | "error";
 }
 
@@ -45,7 +46,7 @@ export function buildHeatmap(
   const cells = Array.from({ length: opts.days }, (_, index) => {
     const day = new Date(firstDay);
     day.setDate(day.getDate() + index);
-    return { date: localDate(day), count: 0, status: "none" as const };
+    return { date: localDate(day), count: 0, agentCount: 0, status: "none" as const };
   });
   const dayIndex = new Map(cells.map((cell, index) => [cell.date, index]));
   const rows: HeatRow[] = repos.map(({ repo, configured }) => ({
@@ -65,6 +66,7 @@ export function buildHeatmap(
 
     const cell = rows[row].cells[cellIndex];
     cell.count += 1;
+    if (run.source === "agent") cell.agentCount += 1;
     rows[row].total += 1;
     if (cell.status === "none" || verdictRank[verdict] > verdictRank[cell.status]) cell.status = verdict;
   }

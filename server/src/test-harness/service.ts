@@ -54,6 +54,7 @@ export type CellState = "unconfigured" | "never_run" | RunStatus;
 export interface MatrixCell {
   suite: TestSuite;
   state: CellState;
+  source?: "harness" | "agent";
   runId?: string;
   finishedAt?: string;
   durationMs?: number;
@@ -403,7 +404,7 @@ export function createTestHarnessService(options: ServiceOptions) {
           cells[suite] = { suite, state: "never_run" };
           continue;
         }
-        const cell: MatrixCell = { suite, state: last.status, runId: last.runId, finishedAt: last.finishedAt };
+        const cell: MatrixCell = { suite, state: last.status, source: last.source, runId: last.runId, finishedAt: last.finishedAt };
         if (last.startedAt && last.finishedAt) cell.durationMs = Date.parse(last.finishedAt) - Date.parse(last.startedAt);
         if (last.totals) cell.totals = last.totals;
         if (last.coverage) cell.coverage = last.coverage;

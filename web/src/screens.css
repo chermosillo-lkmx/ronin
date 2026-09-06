@@ -205,6 +205,7 @@
 .ron-tests-cell-main { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; background: none; border: 0; color: inherit; cursor: pointer; padding: 0; text-align: left; }
 .ron-tests-cell-state { font-weight: 500; }
 .ron-tests-cell-state.muted { color: var(--color-neutral-500); font-weight: 400; }
+.ron-tests-cell-source { color: var(--color-neutral-500); font-size: 11px; }
 .ron-tests-cell-meta, .ron-tests-run-meta, .ron-tests-run-time {
   font-size: 11px; color: var(--color-neutral-500);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

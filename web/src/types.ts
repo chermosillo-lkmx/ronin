@@ -221,6 +221,7 @@ export interface TestTotals {
 
 export interface TestRun {
   runId: string;
+  source?: "harness" | "agent";
   batchId?: string;
   repo: string;
   suite: TestSuite;
@@ -245,6 +246,7 @@ export interface TestRun {
 export interface TestMatrixCell {
   suite: TestSuite;
   state: TestCellState;
+  source?: "harness" | "agent";
   runId?: string;
   finishedAt?: string;
   durationMs?: number;
