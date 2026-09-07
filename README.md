@@ -15,8 +15,11 @@
 ## Características
 
 - Inventario de sesiones tmux gestionadas y externas, con adopción y liberación seguras.
-- Workflows versionados, overrides por repositorio, Skills y propuestas asistidas por Claude.
+- Workflows versionados con **ejecutor y modelo por etapa**, overrides por repositorio, Skills y
+  propuestas asistidas por Claude.
 - Terminales ttyd y xterm, captura por pane, foco y Attach a Terminal.app.
+- **Servidor MCP propio**: el agente reporta sus pruebas a Ronin en vez de que Ronin las ejecute.
+- Aplicación de escritorio (Electron) empaquetable para macOS, Windows y Linux.
 
 ### Nueva sesión con petición
 
@@ -33,6 +36,14 @@ Un workflow puede abrir una ventana Driver de cuatro panes (`driver | worker` ar
 Los reportes diario/semanal se construyen a partir de sesiones, evidencia y commits locales.
 
 ### Pruebas (⚗ test harness)
+- **Calendario de actividad por repositorio**, al estilo del grafo de contribuciones: una fila por
+  repo y una celda por día de los últimos 90. El tono de la celda es el peor resultado del día
+  (pasó / falló / error) y la intensidad, el número de corridas. Un día se decide por la fecha
+  **local**, no UTC. Los estados `blocked`, `cancelled`, `queued` y `running` no son veredicto: no
+  pintan la celda ni cuentan.
+- **Procedencia**: cada corrida guarda si la midió Ronin (`harness`) o la reportó el agente
+  (`agent`), y la UI lo distingue. Una corrida auto-declarada no se mezcla en silencio con una
+  medida — la matriz la marca con `· agente` y el detalle lo dice con todas sus letras.
 - Matriz **repo × suite** (`Unit · E2E · API/OpenAPI · Browser`) con una fila por repo de `repos.json`.
   Una celda sin configurar dice *sin configurar*; nunca cuenta como verde. La cobertura sólo se
   muestra si se leyó un **Cobertura XML** o **LCOV** real; si no, *no reportada* (jamás un 0%).
@@ -51,7 +62,13 @@ Los reportes diario/semanal se construyen a partir de sesiones, evidencia y comm
   npm run tests:suite -- ant-liebre-api unit --profile dev
   npm run tests:failed -- --profile dev          # reintenta sólo lo que falló con ese perfil
   npm run tests:all -- --profile dev --json      # resumen JSON (sin stdout/stderr)
+  npm run tests:suite -- ant-liebre-api unit --profile dev --root "$PWD"   # otra raíz
   ```
+
+  `--root <ruta>` corre la suite contra otra copia del repo (por ejemplo el worktree de una
+  sesión) en vez de la que mapea `repos.json`. La ruta se valida contra las raíces de confianza;
+  fuera de ellas la corrida queda `blocked` con su motivo en vez de ejecutarse. **Sólo existe en
+  el CLI**: la API HTTP nunca acepta rutas, porque el renderer manda identificadores.
 
   Espera a que todas las corridas terminen y sale con `0` (todo ok), `1` (failed/error/timeout/
   cancelled), `2` (bloqueada: perfil o suite sin configurar) o `64` (argumentos inválidos).
@@ -104,6 +121,67 @@ Los reportes diario/semanal se construyen a partir de sesiones, evidencia y comm
     variables de entorno** — y toda la salida del modelo se trata como **no confiable** hasta pasar
     la validación de `validateStages`.
 
+### Pruebas reportadas por el agente (MCP)
+
+Ronin expone un **servidor MCP** propio en `POST /mcp` (JSON-RPC 2.0 sobre HTTP) con dos
+herramientas para el worker:
+
+- `reportar_pruebas(repo, suite, junitPath, coberturaPath?, profile?)`
+- `estado_pruebas(repo?)`
+
+La idea es invertir la dirección: el agente ya corre la suite en un checkout que tiene su entorno
+montado, así que **Ronin deja de ejecutar pruebas y pasa a ser libro de registro**. Dos reglas lo
+sostienen:
+
+- **Los números salen del artefacto, no del resumen.** La herramienta recibe la *ruta* del
+  `junit.xml` y es Ronin quien lo parsea. Si el artefacto no se puede leer, la corrida **no se
+  registra**: antes un hueco en el calendario que un número inventado.
+- **Las rutas se validan** contra las raíces de confianza, deben ser absolutas y apuntar a un
+  archivo regular por debajo de un tope de tamaño.
+
+El worker lo recibe cableado sin tocar su repo: Ronin escribe `agent-mcp.json` en su data dir
+(permisos `0600`, lleva el token de capability) y lanza cada sesión con `--mcp-config <ruta>`. Eso
+acota el servidor **a las sesiones que Ronin crea** — no toca la configuración global de Claude
+Code ni deja un `.mcp.json` en el worktree que el agente pudiera commitear. La bandera es aditiva:
+los demás servidores MCP del operador siguen disponibles.
+
+El endpoint pasa por la misma puerta de capability y de origen local que el resto de la API; el
+token viaja en la cabecera que Ronin escribe en esa configuración.
+
+### Ejecutor y modelo por etapa
+
+Cada etapa declara **quién la ejecuta** y **con qué modelo**, y el prompt se genera desde ahí:
+
+```json
+{ "key": "implementing", "label": "Impl", "executor": "codex", "model": "gpt-5.3-codex" }
+```
+
+- `executor` es `claude`, `codex` o `agy`. **Ausente = hereda del flujo**, y esa herencia se ve
+  escrita en el nodo: nunca queda en blanco.
+- El grafo, el stepper y el modal muestran la herramienta con una chapa de monograma. A propósito
+  **no** se usan los colores de estado: en esta app el verde, el rojo y el ámbar significan
+  resultado de pruebas, y reusarlos aquí haría que el grafo pareciera hablar del estado del flujo.
+- Cada herramienta recibe el modelo a su manera: Claude lo cambia dentro de la sesión con
+  `/model`, Codex lo toma con `--model`. **La bandera de modelo de `agy` es un hueco conocido**:
+  hasta que su CLI documente una, el comando sale sin bandera y el modelo se menciona en prosa.
+- Esto sustituye a escribir el ejecutor a mano en la instrucción. Las instrucciones dicen ahora
+  **qué** hacer; **quién** lo hace lo redacta Ronin.
+
+### Gate de etapa por `verifyCmd` (opcional)
+
+Una etapa del override por-repo puede declarar `verifyCmd` y `maxRetries`: cuando el worker marca
+esa etapa, un bucle en el servidor lo ejecuta en su worktree mientras el worker está ocioso, con
+reintentos y sin falsos verdes (agotados los intentos, el gate queda `failed` para siempre). Está
+**apagado por defecto**; se enciende con `COWORK_VERIFY_GATE=1`, igual que el planificador de
+reportes vive tras su propia variable.
+
+Si el repo declara `setupCommand`, Ronin lo corre en segundo plano al crear el worktree para armar
+su entorno (`.venv`, `node_modules`), y el gate espera a que termine; si la provisión falla, se
+salta **sin tocar el estado del gate** — un entorno roto no es un veredicto sobre el código.
+
+> **Límite conocido:** esto sólo sirve en repos de una pieza. Un worktree de un repo paraguas que
+> contiene otros repos independientes (ignorados por él) no trae el código de los sub-repos, así
+> que no hay nada que probar ahí. Para esos casos, el camino es el MCP: que reporte el agente.
 
 ## Arquitectura
 
@@ -112,9 +190,9 @@ server/   Express + TypeScript  → API local, sesiones tmux, workflows y servic
 web/      Vite + React + TS     → interfaz de sesiones, workflows, Skills y pruebas
 ```
 
-**Server (`server/src/`):** `index.ts`, `engine.ts` (adopción), `tmux.ts` / `ttyd.ts`, `sessions.ts`, `session-launch.ts`, `workflow.ts`, `workflow-catalog.ts`, `workflow-insights/`, `repos.ts`, `repo-config.ts`, `repo-roots.ts`, `skills.ts`, `reports.ts`, `history.ts`, `preflight.ts` y `test-harness/`.
+**Server (`server/src/`):** `index.ts`, `engine.ts` (adopción), `tmux.ts` / `ttyd.ts`, `sessions.ts`, `session-launch.ts`, `workflow.ts`, `workflow-catalog.ts`, `workflow-insights/`, `repos.ts`, `repo-config.ts`, `repo-roots.ts`, `skills.ts`, `reports.ts`, `history.ts`, `preflight.ts`, `mcp.ts` + `agent-mcp.ts` (servidor MCP y su configuración para el worker), `verify.ts` + `verify-driver.ts` (gate de etapa), `provision.ts` (entorno del worktree) y `test-harness/`.
 
-**Web (`web/src/`):** `App.tsx`, `screens/SessionsScreen.tsx`, `components/sessions/`, `components/PaneViewer.tsx`, `components/pane-terminal.ts` y las pantallas de workflows, Skills y pruebas.
+**Web (`web/src/`):** `App.tsx` y `DesktopApp.tsx` (el shell de escritorio), `screens/SessionsScreen.tsx`, `components/sessions/`, `components/PaneViewer.tsx`, `components/pane-terminal.ts`, `components/tests/` (calendario de actividad) y las pantallas de workflows, Skills y pruebas.
 
 ## Correr
 
@@ -127,12 +205,34 @@ Abre **http://localhost:5180**. Requiere Node, `tmux` y `claude` en el PATH. `br
 
 ### Desktop Electron
 
+Ronin se usa normalmente como **aplicación de escritorio**: la misma interfaz web dentro de una
+ventana Electron que además levanta el backend por su cuenta, así que no hay que arrancar nada a
+mano ni dejar una pestaña abierta.
+
 ```bash
 npm run dev:electron  # Vite + Electron; espera Vite hasta 30 s antes de navegar
 npm run test:electron # build web/server/desktop y smoke de producción local
 npm run package:desktop:dir # paquete sin instalador, útil para validar recursos/nativos
 npm run package:desktop # DMG/ZIP en macOS; NSIS/portable en Windows; AppImage/deb en Linux
 ```
+
+**Uso día a día.** `npm run package:desktop` deja el instalador y la app en `release/`
+(`release/mac-arm64/Ronin.app` en macOS). Se abre como cualquier aplicación; el backend arranca
+con ella y muere con ella. Al cerrarla **no se pierde nada**: las sesiones viven en tmux y siguen
+corriendo, y al reabrir la app vuelven a aparecer en el inventario.
+
+Los datos editables (workflows, overrides por repo, ajustes, journal de pruebas y artefactos) no
+viven en el repo sino bajo `userData` — en macOS,
+`~/Library/Application Support/claude-cowork/data`. Sólo los defaults no sensibles se empaquetan.
+
+**Variables de entorno.** Una app abierta desde el Finder no hereda tu shell, así que las
+variables opcionales hay que pasarlas lanzando el binario:
+
+```bash
+COWORK_VERIFY_GATE=1 release/mac-arm64/Ronin.app/Contents/MacOS/Ronin
+```
+
+Sin firma ni notarización todavía: la primera vez, macOS pide abrirla con clic derecho → Abrir.
 
 El Main sirve el renderer desde `app://ronin` con CSP estricta, `contextIsolation`,
 `nodeIntegration:false` y un bridge allowlisted `window.roninDesktop.terminal`. La pantalla de
