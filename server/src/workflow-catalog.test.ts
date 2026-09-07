@@ -36,6 +36,19 @@ test("workflow catalog rename preserves its identity", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("workflow catalog conserva inputs declarados al volver a leer", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cowork-workflows-"));
+  try {
+    const created = createWorkflowCatalogItem("review-pr", {
+      ...valid,
+      inputs: [{ key: "ticket", label: "Ticket", required: true }],
+    }, dir);
+    assert.deepEqual(loadWorkflowCatalog(dir).items.find((item) => item.id === created.id)?.config.inputs, [
+      { key: "ticket", label: "Ticket", required: true },
+    ]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("workflow catalog deletes a named item while preserving the other workflows", () => {
   const dir = mkdtempSync(join(tmpdir(), "cowork-workflows-"));
   try {

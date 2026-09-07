@@ -11,6 +11,7 @@ import {
   DRIVER_FLOW,
   DRIVER_STAGES,
   RESERVED_KEYS,
+  WORKFLOW_PROMPT_RESERVED_KEYS,
   shouldSwitchModel,
   stepperFor,
   stripVerifyFields,
@@ -130,6 +131,31 @@ test("validateStages: conserva executor válido, descarta uno inválido y sanea 
   assert.equal(out.stages[1].executor, undefined);
   assert.equal(out.stages[1].model, undefined);
   assert.deepEqual(out.stages[2], { key: "done", label: "Done", icon: "✓", instruction: "" });
+});
+
+test("validateStages: conserva entradas declarativas válidas y recorta sus etiquetas", () => {
+  const out = validateStages({
+    stages: [{ key: "planning", label: "Plan", icon: "📋" }],
+    verifyAfter: null,
+    inputs: [{ key: "ticket", label: "  Ticket  ", placeholder: "CU-42", required: true }],
+  });
+  assert.deepEqual(out.inputs, [{ key: "ticket", label: "Ticket", placeholder: "CU-42", required: true }]);
+});
+
+test("validateStages: descarta entradas sin label, con key inválida, reservada o duplicada", () => {
+  const out = validateStages({
+    stages: [{ key: "planning", label: "Plan", icon: "📋" }],
+    verifyAfter: null,
+    inputs: [
+      { key: "sin-label" },
+      { key: "Ticket ID", label: "Inválida" },
+      { key: "steps", label: "Reservada" },
+      { key: "ticket", label: "Primera" },
+      { key: "ticket", label: "Segunda" },
+    ],
+  });
+  assert.deepEqual(out.inputs, [{ key: "ticket", label: "Primera" }]);
+  assert.ok(WORKFLOW_PROMPT_RESERVED_KEYS.includes("steps"));
 });
 
 const GATED: WfStage[] = [

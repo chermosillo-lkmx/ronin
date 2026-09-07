@@ -90,6 +90,14 @@ function isProposalStatus(value: unknown): value is ProposalStatus {
   return value === "proposed" || value === "accepted" || value === "dismissed";
 }
 
+/** Boundary parser for declared workflow values: only a plain string-to-string map is forwarded. */
+function sessionInputsFromBody(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return undefined;
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+}
+
 export interface CreateAppOptions {
   adoptSession?: typeof adoptSession;
   /** Seams de tests HTTP; producción usa settings.json + la política efectiva. */
@@ -421,7 +429,7 @@ app.get("/api/workflow", (_req, res) => {
 });
 app.put("/api/workflow", (req, res) => {
   try {
-    const input = { stages: req.body?.stages, verifyAfter: req.body?.verifyAfter ?? null };
+    const input = { stages: req.body?.stages, verifyAfter: req.body?.verifyAfter ?? null, inputs: req.body?.inputs };
     res.json(saveWorkflow(input));
   } catch (e) {
     res.status(400).json(workflowErrorBody(e));
@@ -430,7 +438,7 @@ app.put("/api/workflow", (req, res) => {
 // T12: trial-validate the GLOBAL workflow (strict, verifyCmd NOT allowed — git-tracked, same
 // rule as a real save) WITHOUT writing workflow.json or emitting a snapshot change.
 app.post("/api/workflow/validate", (req, res) => {
-  respondValidate(res, () => validateStages({ stages: req.body?.stages, verifyAfter: req.body?.verifyAfter ?? null }, { strict: true }));
+  respondValidate(res, () => validateStages({ stages: req.body?.stages, verifyAfter: req.body?.verifyAfter ?? null, inputs: req.body?.inputs }, { strict: true }));
 });
 
 // Named workflows back the Electron shell. The legacy singular route above remains available
@@ -587,6 +595,7 @@ app.post("/api/sessions", async (req, res) => {
   try {
     const rawRequest = req.body?.request;
     const request = typeof rawRequest === "string" ? rawRequest.replace(/\0/g, "").trim() : undefined;
+    const inputs = sessionInputsFromBody(req.body?.inputs);
     if (request && Buffer.byteLength(request, "utf8") > 8 * 1024) {
       return res.status(400).json({ error: "la petición no puede superar 8 KB", code: "REQUEST_TOO_LONG" });
     }
@@ -597,6 +606,7 @@ app.post("/api/sessions", async (req, res) => {
       mode: req.body?.mode,
       agent: req.body?.agent,
       request,
+      ...(inputs !== undefined ? { inputs } : {}),
     });
     const inventory = await readInventory();
     const session = inventory.sessions.find((item) => item.name === launched.name) ?? null;

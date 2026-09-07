@@ -38,9 +38,19 @@ export interface WfStage {
   maxRetries?: number;  // P2: max verify attempts before the stage is marked failed (default 2).
 }
 
+/** Entrada declarada de un workflow; habilita lanzamientos estructurados sin petición libre. */
+export interface WfInput {
+  key: string;
+  label: string;
+  placeholder?: string;
+  required?: boolean;
+}
+
 export interface WorkflowConfig {
   stages: WfStage[];
   verifyAfter: string | null; // spawn the independent verifier after this stage (null = none)
+  /** Ausente conserva el lanzamiento histórico con una única petición libre. */
+  inputs?: WfInput[];
 }
 
 const WORKFLOW_PATH = dataPath("workflow.json");
@@ -99,7 +109,7 @@ export function normalizeLoadedWorkflow(raw: any): WorkflowConfig {
   // Strip verifyCmd/maxRetries: the global workflow.json is git-tracked, so a committed
   // verifyCmd must NOT execute (B3). allowVerifyCmd defaults false, so validateStages already
   // strips it — no separate stripVerifyFields pass needed here.
-  const validated = validateStages({ stages: rawStages, verifyAfter: raw?.verifyAfter }, { strict: false });
+  const validated = validateStages({ stages: rawStages, verifyAfter: raw?.verifyAfter, inputs: raw?.inputs }, { strict: false });
   // Coordinated fallback: if nothing survived, use DEFAULT wholesale (stages AND verifyAfter
   // together) rather than DEFAULT.stages paired with a verifyAfter re-validated against an
   // empty stage list (which would always come back null).
@@ -128,8 +138,8 @@ export function getVerifyAfter(): string | null {
 
 /** Full config (deep copy) — for the editor UI. */
 export function getWorkflow(): WorkflowConfig {
-  const { stages, verifyAfter } = load();
-  return { stages: stages.map((s) => ({ ...s })), verifyAfter };
+  const { stages, verifyAfter, inputs } = load();
+  return { stages: stages.map((s) => ({ ...s })), verifyAfter, ...(inputs ? { inputs: inputs.map((input) => ({ ...input })) } : {}) };
 }
 
 function slug(s: string): string {
@@ -140,6 +150,12 @@ function slug(s: string): string {
 // as a stage sentinel: "verify" (synthetic verifier step) and "evidence" (the
 // evidence/ subdirectory). curl.env is a file but "curl" !== "curl.env", so ok.
 export const RESERVED_KEYS = ["verify", "evidence"];
+
+// These names are replaced by renderPrompt in the workflow prompt. An input called "steps"
+// would overwrite the entire workflow prompt flow, so declared inputs must never use them.
+export const WORKFLOW_PROMPT_RESERVED_KEYS = [
+  "kind", "reqline", "title", "ref", "desc", "steps", "verifier", "cycle", "ev", "repo", "key", "body", "url",
+];
 
 /**
  * Stepper fijo del modo Driver (como RESEARCH_STAGES: desacoplado del workflow.json componible).
@@ -280,7 +296,24 @@ export function validateStages(input: Partial<WorkflowConfig>, options: Validate
   }
   const va = input.verifyAfter ? slug(input.verifyAfter) : null;
   const verifyAfter = va && stages.some((s) => s.key === va) ? va : null;
-  return { stages, verifyAfter };
+  const seenInputs = new Set<string>();
+  const inputs: WfInput[] = (Array.isArray(input.inputs) ? input.inputs : [])
+    .map((raw: any) => {
+      const rawKey = typeof raw?.key === "string" ? raw.key.trim() : "";
+      const key = slug(rawKey);
+      const label = typeof raw?.label === "string" ? raw.label.trim() : "";
+      if (!key || key !== rawKey || !label || WORKFLOW_PROMPT_RESERVED_KEYS.includes(key) || seenInputs.has(key)) return null;
+      seenInputs.add(key);
+      const placeholder = typeof raw?.placeholder === "string" ? raw.placeholder.trim() : undefined;
+      return {
+        key,
+        label,
+        ...(placeholder ? { placeholder } : {}),
+        ...(raw?.required === true ? { required: true } : {}),
+      };
+    })
+    .filter((entry): entry is WfInput => entry !== null);
+  return { stages, verifyAfter, ...(inputs.length ? { inputs } : {}) };
 }
 
 /** Validate + persist the workflow to disk, invalidating the cache. */
@@ -407,6 +440,7 @@ export interface SpliceFlowOk {
   ok: true;
   stages: WfStage[];
   verifyAfter: string | null;
+  inputs?: WfInput[];
 }
 export interface SpliceFlowRejected {
   ok: false;
@@ -426,7 +460,7 @@ export type SpliceFlowResult = SpliceFlowOk | SpliceFlowRejected;
  * (engine.ts's applyHot) surfaces this as a 409 BEFORE persisting the edit at all.
  */
 export function spliceFlow(oldFlow: WorkflowConfig, nextFlow: WorkflowConfig, currentKey: string | null): SpliceFlowResult {
-  if (!currentKey) return { ok: true, stages: nextFlow.stages, verifyAfter: nextFlow.verifyAfter };
+  if (!currentKey) return { ok: true, stages: nextFlow.stages, verifyAfter: nextFlow.verifyAfter, ...(nextFlow.inputs ? { inputs: nextFlow.inputs } : {}) };
   // D5 (bug real, hallado en review): el "verify" sintético (stepperFor lo inserta justo tras
   // verifyAfter) no vive en oldFlow.stages — un worker parado ahí ya alcanzó (o pasó) la etapa
   // verifyAfter, así que el límite protegido se ancla AHÍ, nunca se trata como "nada que
@@ -455,7 +489,7 @@ export function spliceFlow(oldFlow: WorkflowConfig, nextFlow: WorkflowConfig, cu
   }
   const stages = [...prefix, ...nextFlow.stages.slice(prefix.length)];
   const verifyAfter = nextFlow.verifyAfter && stages.some((s) => s.key === nextFlow.verifyAfter) ? nextFlow.verifyAfter : null;
-  return { ok: true, stages, verifyAfter };
+  return { ok: true, stages, verifyAfter, ...(nextFlow.inputs ? { inputs: nextFlow.inputs } : {}) };
 }
 
 export interface GraphNode {

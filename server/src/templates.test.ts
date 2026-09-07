@@ -1,7 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { assembleSteps, buildDriverPrompt, makeFill } from "./templates.js";
+import { assembleSteps, buildDriverPrompt, buildWorkflowPromptValues, buildWorkflowRequestPrompt, makeFill } from "./templates.js";
 import { DRIVER_STAGES, type WfStage } from "./workflow.js";
+import { renderPrompt } from "./prompts.js";
 import type { Task } from "./types.js";
 
 const PANES = { driver: "%1", worker: "%2", review: "%3", verify: "%4" };
@@ -66,6 +67,69 @@ test("assembleSteps: fill sólo procesa la instrucción del usuario", () => {
   );
   assert.match(steps, /Implementa en mi-repo\./);
   assert.equal(steps.includes("{repo}"), false);
+});
+
+test("buildWorkflowRequestPrompt: sustituye una entrada declarada en plantilla e instrucción", () => {
+  const workflow = {
+    stages: [{ key: "review", label: "Review", icon: "🔎", instruction: "Revisa el ticket {ticket}." }],
+    verifyAfter: null as null,
+    inputs: [{ key: "ticket", label: "Ticket" }],
+  };
+  const prompt = buildWorkflowRequestPrompt({
+    workflow,
+    cycle: "/tmp/cycle",
+    repo: "mi-repo",
+    request: "Trabaja este ticket",
+    title: "",
+    key: "cowork-ticket",
+    inputs: { ticket: "CU-42" },
+  });
+  assert.equal(renderPrompt("Ticket: {ticket}", buildWorkflowPromptValues({
+    workflow, cycle: "/tmp/cycle", repo: "mi-repo", kind: "petición", reqline: "", title: "", key: "cowork-ticket", inputs: { ticket: "CU-42" },
+  })), "Ticket: CU-42");
+  assert.match(prompt, /Revisa el ticket CU-42\./);
+});
+
+test("buildWorkflowRequestPrompt: una entrada declarada sin valor queda vacía", () => {
+  const workflow = {
+    stages: [{ key: "review", label: "Review", icon: "🔎", instruction: "Revisa {ticket}." }],
+    verifyAfter: null as null,
+    inputs: [{ key: "ticket", label: "Ticket" }],
+  };
+  const prompt = buildWorkflowRequestPrompt({
+    workflow,
+    cycle: "/tmp/cycle",
+    repo: "mi-repo",
+    request: "Ticket:",
+    title: "",
+    key: "cowork-ticket",
+  });
+  assert.equal(renderPrompt("Ticket: {ticket}", buildWorkflowPromptValues({
+    workflow, cycle: "/tmp/cycle", repo: "mi-repo", kind: "petición", reqline: "", title: "", key: "cowork-ticket",
+  })), "Ticket: ");
+  assert.match(prompt, /Ticket:/);
+  assert.match(prompt, /Revisa \./);
+});
+
+test("buildWorkflowRequestPrompt: el valor de una entrada no se re-sustituye", () => {
+  const workflow = {
+    stages: [{ key: "review", label: "Review", icon: "🔎", instruction: "Revisa {ticket}." }],
+    verifyAfter: null as null,
+    inputs: [{ key: "ticket", label: "Ticket" }],
+  };
+  const prompt = buildWorkflowRequestPrompt({
+    workflow,
+    cycle: "/tmp/cycle",
+    repo: "mi-repo",
+    request: "Ticket:",
+    title: "",
+    key: "cowork-ticket",
+    inputs: { ticket: "CU-42 {repo}" },
+  });
+  assert.equal(renderPrompt("Ticket: {ticket}", buildWorkflowPromptValues({
+    workflow, cycle: "/tmp/cycle", repo: "mi-repo", kind: "petición", reqline: "", title: "", key: "cowork-ticket", inputs: { ticket: "CU-42 {repo}" },
+  })), "Ticket: CU-42 {repo}");
+  assert.match(prompt, /Revisa CU-42 \{repo\}\./);
 });
 
 test("buildDriverPrompt: incluye los 4 pane ids (targets fijos, no índices)", () => {

@@ -16,11 +16,11 @@ export interface DriverModels {
 const DEFAULT_DRIVER_MODELS = { planner: PLANNER_MODEL, worker: WORKER_MODEL } as const;
 
 /**
- * {cycle}/{ev}/{repo}/{var:KEY} → valor, en un solo paso. El retorno del callback se inserta
- * literal (no re-escanea), así que un valor con {var:X}/{cycle} no se re-expande. Key desconocida
- * → deja el literal {var:KEY} (no destructivo). Compartido por buildWorkerPrompt y buildActionPrompt.
+ * {cycle}/{ev}/{repo}/{var:KEY}/{input} → valor, en un solo paso. El retorno del callback se inserta
+ * literal (no re-escanea), así que un valor con {repo} no se re-expande. Key desconocida → deja su
+ * literal (no destructivo). Compartido por buildWorkerPrompt y buildActionPrompt.
  */
-export function makeFill(cycleDir: string, repo: string, vars: Record<string, string>) {
+export function makeFill(cycleDir: string, repo: string, vars: Record<string, string>, inputs: Record<string, string> = {}) {
   const ev = `${cycleDir}/evidence`;
   return (s: string) =>
     s
@@ -28,8 +28,9 @@ export function makeFill(cycleDir: string, repo: string, vars: Record<string, st
       .replace(/\{ev\}/g, ev)
       .replace(/\{repo\}/g, repo)
       .replace(/\{var:([A-Za-z0-9_]+)\}/g, (m, k) =>
-        Object.prototype.hasOwnProperty.call(vars, k) ? vars[k] : m
-      );
+        Object.prototype.hasOwnProperty.call(vars, k) ? vars[k] : m)
+      .replace(/\{([a-z][a-z0-9-]*)\}/g, (m, key) =>
+        Object.prototype.hasOwnProperty.call(inputs, key) ? inputs[key] : m);
 }
 
 /** {steps} desde el flow: cada etapa → paso numerado + sentinel (touch). fill() aplicado a la instrucción. */
@@ -59,7 +60,7 @@ function executorDirective(stage: WfStage): string {
 }
 
 export interface WorkflowPromptValuesInput {
-  workflow: { stages: WfStage[]; verifyAfter: string | null };
+  workflow: { stages: WfStage[]; verifyAfter: string | null; inputs?: Array<{ key: string }> };
   cycle: string;
   repo: string;
   kind: string;
@@ -71,13 +72,16 @@ export interface WorkflowPromptValuesInput {
   body?: string;
   url?: string;
   vars?: Record<string, string>;
+  inputs?: Record<string, string>;
 }
 
 /** Valores puros compartidos por tareas del tablero y sesiones iniciadas con una petición. */
 export function buildWorkflowPromptValues(input: WorkflowPromptValuesInput): Record<string, string> {
   const ev = `${input.cycle}/evidence`;
-  const fill = makeFill(input.cycle, input.repo, input.vars ?? {});
+  const declaredInputs = Object.fromEntries((input.workflow.inputs ?? []).map(({ key }) => [key, input.inputs?.[key] ?? ""]));
+  const fill = makeFill(input.cycle, input.repo, input.vars ?? {}, declaredInputs);
   return {
+    ...declaredInputs,
     kind: input.kind,
     reqline: input.reqline,
     title: input.title ? `\n${input.title}` : "",
@@ -98,12 +102,13 @@ export function buildWorkflowPromptValues(input: WorkflowPromptValuesInput): Rec
 
 /** Renderiza el workflow congelado para una petición creada desde Nueva sesión. */
 export function buildWorkflowRequestPrompt(input: {
-  workflow: { stages: WfStage[]; verifyAfter: string | null };
+  workflow: { stages: WfStage[]; verifyAfter: string | null; inputs?: Array<{ key: string }> };
   cycle: string;
   repo: string;
   request: string;
   title: string;
   key: string;
+  inputs?: Record<string, string>;
 }): string {
   return renderPrompt(getPromptTemplate("workflow"), buildWorkflowPromptValues({
     workflow: input.workflow,
@@ -114,6 +119,7 @@ export function buildWorkflowRequestPrompt(input: {
     title: input.title,
     key: input.key,
     body: input.request,
+    inputs: input.inputs,
   }));
 }
 

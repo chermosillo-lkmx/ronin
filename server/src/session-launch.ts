@@ -10,6 +10,7 @@ import { cycleDirForSession, ensureCycleDir, removeCycleDir, writeFlow } from ".
 import { buildWorkflowRequestPrompt } from "./templates.js";
 import { createSession, hasSession, killSession } from "./tmux.js";
 import { findWorkflowCatalogItem, type WorkflowCatalogItem } from "./workflow-catalog.js";
+import type { WorkflowConfig } from "./workflow.js";
 import { addWorktree, removeWorktree, worktreePathForSession } from "./worktree.js";
 
 export type SessionLaunchErrorCode =
@@ -36,7 +37,11 @@ export interface ManagedSessionLaunchInput {
   mode?: string;
   agent?: string;
   request?: string;
+  inputs?: Record<string, string>;
 }
+
+/** Cada valor se limita a 4 KiB UTF-8 para acotar launch.json y el prompt entregado al worker. */
+export const MAX_WORKFLOW_INPUT_VALUE_BYTES = 4 * 1024;
 
 export type SessionLaunchMode = "workflow" | "terminal";
 export type TerminalAgent = "claude" | "codex";
@@ -123,6 +128,20 @@ function launchRecord(input: ManagedSessionLaunchInput, workflow: WorkflowCatalo
   return { version: 1, ...input, mode: "workflow" as const, workflowName: workflow.name, cwd, worktree, branch, createdAt: Date.now() };
 }
 
+/** Conserva sólo strings de claves declaradas; un valor mayor de 4 KiB UTF-8 se descarta. */
+export function sanitizeWorkflowInputs(workflow: WorkflowConfig, raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const declared = new Set((workflow.inputs ?? []).map((input) => input.key));
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!declared.has(key) || typeof value !== "string") continue;
+    const cleaned = value.trim();
+    if (Buffer.byteLength(cleaned, "utf8") > MAX_WORKFLOW_INPUT_VALUE_BYTES) continue;
+    out[key] = cleaned;
+  }
+  return out;
+}
+
 function terminalLaunchRecord(input: ManagedSessionLaunchInput, cwd: string, agent: TerminalAgent) {
   return { version: 1, repo: input.repo, name: input.name, mode: "terminal" as const, agent, cwd, createdAt: Date.now() };
 }
@@ -144,6 +163,7 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
 
   const workflow = deps.findWorkflowCatalogItem(input.workflowId!);
   if (!workflow) throw new SessionLaunchError("WORKFLOW_NOT_FOUND", "el workflow seleccionado ya no existe");
+  const inputs = sanitizeWorkflowInputs(workflow.config, input.inputs);
 
   const branch = `ronin/${input.name}`;
   const worktree = deps.worktreePathForSession(resolved.cwd, input.name);
@@ -159,7 +179,7 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
     deps.ensureCycleDir(cycle);
     cycleCreated = true;
     deps.writeFlow(cycle, workflow.config);
-    deps.writeJsonAtomic(`${cycle}/launch.json`, launchRecord(input, workflow, resolved.cwd, worktree, branch));
+    deps.writeJsonAtomic(`${cycle}/launch.json`, launchRecord({ ...input, inputs }, workflow, resolved.cwd, worktree, branch));
     // El worktree nace pelado (.venv y node_modules están gitignorados): sin esto, la copia de la
     // sesión no puede correr sus propias pruebas. Va en SEGUNDO PLANO —instalar dependencias son
     // minutos— y su fallo se reporta sin tumbar el lanzamiento, igual que la entrega del prompt.
@@ -169,9 +189,9 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
     }
 
     const request = input.request?.trim();
-    if (request && deps.deliverPrompt) {
-      const title = request.split(/\r?\n/, 1)[0].slice(0, 70);
-      void deps.deliverPrompt(input.name, buildWorkflowRequestPrompt({ workflow: workflow.config, cycle, repo: input.repo, request, title, key: input.name }))
+    if ((request || workflow.config.inputs?.length) && deps.deliverPrompt) {
+      const title = (request ?? "").split(/\r?\n/, 1)[0].slice(0, 70);
+      void deps.deliverPrompt(input.name, buildWorkflowRequestPrompt({ workflow: workflow.config, cycle, repo: input.repo, request: request ?? "", title, key: input.name, inputs }))
         .catch((error) => deps.logError?.(error));
     }
     recordEvent({ type: "launch", key: input.name, title: input.request?.split(/\r?\n/, 1)[0] || input.name, repo: input.repo, source: "session", request: input.request });

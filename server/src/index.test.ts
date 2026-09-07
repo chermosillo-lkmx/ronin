@@ -646,6 +646,24 @@ test("POST /api/sessions limpia NUL y espacios antes de medir y lanzar una petic
   assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", mode: undefined, agent: undefined, request: "arregla CU-86e2" }]);
 });
 
+test("POST /api/sessions sólo reenvía inputs que sean un objeto plano de strings", async () => {
+  const token = ensureCapabilityToken();
+  const received: unknown[] = [];
+  const app = createApp({
+    launchManagedSession: async (input) => {
+      received.push(input);
+      return { name: "cowork-inputs-http", repo: "monorepo", mode: "workflow", workflowId: "wf-test", cwd: "/repo" };
+    },
+    readTmuxInventory: async () => ({ sessions: [], diagnostic: null }),
+  });
+  const response = await invokeRequest(app, "POST", "/api/sessions", {
+    headers: { "x-ronin-capability": token },
+    body: { repo: "monorepo", workflowId: "wf-test", name: "cowork-inputs-http", inputs: { ticket: "CU-42", numero: 42 } },
+  });
+  assert.equal(response.status, 201);
+  assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-inputs-http", mode: undefined, agent: undefined, request: undefined, inputs: { ticket: "CU-42" } }]);
+});
+
 test("POST /api/sessions/:name/{term,attach} valida la sesión y traduce los fallos discriminados de ttyd", async () => {
   const token = ensureCapabilityToken();
   const calls: string[] = [];

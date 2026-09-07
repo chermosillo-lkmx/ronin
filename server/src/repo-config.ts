@@ -138,7 +138,9 @@ function slugKey(s: string): string {
 // ---- getters (per-call; null/{}/CLAUDE_CMD fallbacks = inherit default) ----
 export function getRepoWorkflow(repo: string): WorkflowConfig | null {
   const wf = S()[slugKey(repo)]?.workflow;
-  return wf ? { stages: wf.stages.map((s) => ({ ...s })), verifyAfter: wf.verifyAfter } : null;
+  return wf
+    ? { stages: wf.stages.map((s) => ({ ...s })), verifyAfter: wf.verifyAfter, ...(wf.inputs ? { inputs: wf.inputs.map((input) => ({ ...input })) } : {}) }
+    : null;
 }
 export function getRepoVars(repo: string): Record<string, string> {
   return { ...(S()[slugKey(repo)]?.vars ?? {}) };

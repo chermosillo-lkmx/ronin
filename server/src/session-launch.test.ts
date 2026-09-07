@@ -11,9 +11,10 @@ function launchDeps(overrides: Partial<ManagedSessionLaunchDeps> = {}): ManagedS
     config: {
       stages: [
         { key: "plan", label: "Plan", icon: "P", instruction: "planifica en {cycle}" },
-        { key: "implement", label: "Implementa", icon: "I", instruction: "implementa en {repo}" },
+        { key: "implement", label: "Implementa", icon: "I", instruction: "implementa {ticket} en {repo}" },
       ],
       verifyAfter: "implement",
+      inputs: [{ key: "ticket", label: "Ticket" }],
     },
   };
   return {
@@ -105,7 +106,7 @@ test("workflow con petición persiste launch.json y entrega el prompt completo s
   const launch = deps.readWrite?.("/cycles/cowork-cu-86e2/launch.json") as Record<string, unknown>;
   assert.deepEqual({ ...launch, createdAt: typeof launch.createdAt }, {
     version: 1, repo: "monorepo", workflowId: "wf-test", name: "cowork-cu-86e2",
-    request: "Necesito que trabajes CU-86e2\ncon detalle.", mode: "workflow", workflowName: "test",
+    request: "Necesito que trabajes CU-86e2\ncon detalle.", inputs: {}, mode: "workflow", workflowName: "test",
     cwd: "/repo", worktree: "/worktrees/cowork-cu-86e2", branch: "ronin/cowork-cu-86e2", createdAt: "number",
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -119,9 +120,32 @@ test("workflow con petición persiste launch.json y entrega el prompt completo s
   assert.match(prompt, /VERIFICADOR independiente/);
 });
 
-test("sin petición o en terminal no entrega un prompt", async () => {
+test("el lanzamiento sanea inputs declarados, los persiste y los inserta en el prompt", async () => {
+  const delivered: Array<[string, string]> = [];
+  const deps = launchDeps({ deliverPrompt: async (session, prompt) => { delivered.push([session, prompt]); } });
+
+  await launchManagedSession({
+    repo: "monorepo", workflowId: "wf-test", name: "cowork-inputs",
+    inputs: { ticket: "  CU-42  ", noDeclarada: "no debe llegar" },
+  }, deps);
+
+  const launch = deps.readWrite?.("/cycles/cowork-inputs/launch.json") as Record<string, unknown>;
+  assert.deepEqual(launch.inputs, { ticket: "CU-42" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.length, 1);
+  assert.match(delivered[0][1], /CU-42/);
+  assert.equal(delivered[0][1].includes("no debe llegar"), false);
+});
+
+test("sin petición y sin entradas declaradas, o en terminal, no entrega un prompt", async () => {
   let calls = 0;
-  const deps = launchDeps({ deliverPrompt: async () => { calls++; } });
+  const deps = launchDeps({
+    deliverPrompt: async () => { calls++; },
+    findWorkflowCatalogItem: () => ({
+      id: "wf-test", name: "sin-inputs", updatedAt: 1,
+      config: { stages: [{ key: "plan", label: "Plan", icon: "P" }], verifyAfter: null },
+    }),
+  });
   await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-peticion" }, deps);
   await launchManagedSession({ repo: "monorepo", name: "cowork-terminal", mode: "terminal", agent: "claude", request: "ignorada" }, deps);
   await new Promise((resolve) => setImmediate(resolve));
