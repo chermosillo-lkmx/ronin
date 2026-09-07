@@ -98,7 +98,7 @@
             "key": "planning",
             "label": "Plan",
             "icon": "📋",
-            "instruction": "Escribes {cycle}/plan.md: contexto del ticket, causa raíz si es bug (cita archivo:línea), pasos concretos, archivos a tocar, tests a agregar/reparar y criterios de aceptación con el curl exacto que los probará en DEV. Si una premisa del ticket no se sostiene (logs/DB), dilo en el plan antes de tocar código. No implementes.",
+            "instruction": "Si hay ticket ({ticket}), ponlo en progreso antes de empezar. Escribes {cycle}/plan.md: contexto, causa raíz si es bug (cita archivo:línea), pasos concretos, archivos a tocar, tests a agregar/reparar y criterios de aceptación con la prueba exacta que los verificará en DEV. Si una premisa no se sostiene, dilo en el plan antes de tocar código. No implementes.",
             "executor": "claude"
           },
           {
@@ -116,21 +116,37 @@
             "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
           },
           {
+            "key": "pr",
+            "label": "PR y merge",
+            "icon": "⤵️",
+            "executor": "claude",
+            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge."
+          },
+          {
             "key": "curl",
-            "label": "Curl DEV",
+            "label": "Pruebas en DEV",
             "icon": "🌐",
-            "instruction": "`source {cycle}/curl.env` ($DEV_URL, $TOKEN, $ACCOUNTING_FIRM; no los pidas). Un curl por cada criterio de aceptación del plan, sólo lectura salvo que el criterio exija escribir; guarda comando + request + response en {ev}/curl.md con veredicto por criterio. Ingesta al backup-tester: curl -X POST $BACKUP_TESTER_URL/api/test-coverage/ingest -H \"Authorization: Bearer $BACKUP_TESTER_INGEST_TOKEN\" -F project={repo} -F suite=curl -F junit=@<junit.xml>."
+            "instruction": "Prueba en DEV cada criterio de aceptación del plan con el comando exacto. Guarda comando, request y response con veredicto por criterio en {ev}/curl.md. Sólo lectura salvo que el criterio exija escribir; si escribes, anota qué dejaste creado.",
+            "executor": "claude"
           },
           {
             "key": "done",
             "label": "Evidencia",
             "icon": "✓",
-            "instruction": "Genera EVIDENCIA-<ticket>-dev.md en la raíz del repo: Veredicto, Causa/Cadena (archivo:línea), Cambios (archivos, tests), Resultado de suites y cobertura, Curl en DEV por criterio (de {ev}/curl.md), Limpieza pendiente en dev, Pendientes/PRs. Deja {ev}/summary.md con el comentario listo para pegar en el ticket."
+            "instruction": "Escribe EVIDENCIA-{ticket}-dev.md en la raíz: veredicto, causa y cadena con archivo:línea, cambios y tests, resultado de las suites, pruebas en DEV por criterio, limpieza pendiente y pendientes. Después pasa el ticket a «ready for testing» y pega en {ev}/ticket.md la confirmación del cambio; si no pudiste moverlo, dilo ahí."
           }
         ],
-        "verifyAfter": "curl"
+        "verifyAfter": "curl",
+        "inputs": [
+          {
+            "key": "ticket",
+            "label": "Ticket (opcional)",
+            "placeholder": "86e30zdgd",
+            "required": false
+          }
+        ]
       },
-      "updatedAt": 1787769457455
+      "updatedAt": 1788817354229
     },
     {
       "id": "wf-b41400b6f3714d13bb",
@@ -166,6 +182,72 @@
         "verifyAfter": "curl"
       },
       "updatedAt": 1787769457456
+    },
+    {
+      "id": "wf-467d460882c663d6d3",
+      "name": "pr-review-merge-dev",
+      "updatedAt": 1788817331476,
+      "config": {
+        "inputs": [
+          {
+            "key": "pr",
+            "label": "URL del PR",
+            "placeholder": "https://github.com/org/repo/pull/2014",
+            "required": true
+          },
+          {
+            "key": "ticket",
+            "label": "Ticket",
+            "placeholder": "86e34yyck",
+            "required": true
+          }
+        ],
+        "stages": [
+          {
+            "key": "revisar",
+            "label": "Revisar",
+            "icon": "🔍",
+            "executor": "claude",
+            "instruction": "Pon el ticket {ticket} en progreso. Lee el ticket y el PR {pr} y verifica criterio por criterio si el PR cumple lo pedido: que el diff parezca razonable no es que cumpla. Escribe el veredicto por criterio en {ev}/revision.md citando archivo:línea del PR. Si una premisa del ticket no se sostiene, dilo aquí antes de tocar nada."
+          },
+          {
+            "key": "arreglar",
+            "label": "Arreglar",
+            "icon": "🤖",
+            "executor": "codex",
+            "instruction": "Sólo si la revisión encontró hallazgos. Arréglalos sobre la rama del PR con TDD (test que falla primero, fix mínimo) y commits Conventional Commits; no reescribas lo que ya estaba bien. Si la revisión no encontró nada, marca la etapa y sigue sin tocar código. Deja en {ev}/arreglos.md qué cambiaste y por qué."
+          },
+          {
+            "key": "merge",
+            "label": "Merge a dev",
+            "icon": "⤵️",
+            "executor": "claude",
+            "instruction": "Comprueba que el PR sea mergeable de verdad —checks en verde, sin conflictos, base correcta— y haz el merge a dev. Si NO es mergeable, para aquí y explica por qué en {ev}/merge.md: nunca fuerces un merge ni cambies la base para esquivar un conflicto."
+          },
+          {
+            "key": "deploy",
+            "label": "Deploy",
+            "icon": "🚀",
+            "executor": "claude",
+            "instruction": "Monitorea el despliegue a dev hasta que llegue a un estado final. Anota en {ev}/deploy.md el resultado y, si falló, el error exacto. Un deploy en curso no es un deploy exitoso."
+          },
+          {
+            "key": "pruebas-dev",
+            "label": "Pruebas en DEV",
+            "icon": "🌐",
+            "executor": "claude",
+            "instruction": "Prueba en DEV cada criterio de aceptación del ticket {ticket} con el comando exacto. Guarda comando, request y response con veredicto por criterio en {ev}/curl.md. Sólo lectura salvo que el criterio exija escribir; si escribes, anota qué dejaste creado."
+          },
+          {
+            "key": "done",
+            "label": "Cerrar ticket",
+            "icon": "✓",
+            "executor": "claude",
+            "instruction": "Escribe EVIDENCIA-{ticket}-dev.md en la raíz del repo: veredicto, qué se revisó del PR {pr}, qué se arregló, resultado del merge y del deploy, y las pruebas en DEV por criterio. Después pasa el ticket {ticket} a «ready for owner approval» y PEGA en {ev}/ticket.md la confirmación del cambio de estado; si no pudiste moverlo, dilo ahí en vez de darlo por hecho."
+          }
+        ],
+        "verifyAfter": "pruebas-dev"
+      }
     }
   ]
 }

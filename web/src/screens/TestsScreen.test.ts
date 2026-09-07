@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
@@ -95,4 +96,36 @@ test("TestsScreen run detail lists failures and redacted output without the toke
   assert.match(html, /TOKEN=\*\*\*/);
   assert.match(html, /Reintentar/);
   assert.match(html, /La corrió el agente; Ronin no la ejecutó y leyó su JUnit/);
+});
+
+/**
+ * T: al elegir una corrida, el detalle metía sus 191 fallos en una fila del grid sin acotar y las
+ * secciones de arriba (calendario y matriz) se comprimían hasta desaparecer, sin forma de
+ * recuperarlas salvo salir y volver a entrar. Dos defectos distintos: el panel no estaba acotado,
+ * y no había manera de cerrar la corrida sin perder también el repo seleccionado.
+ */
+const RUN_CON_FALLOS = {
+  runId: "run-x1", repo: "ant-liebre-api", suite: "api", profile: "dev", status: "failed",
+  createdAt: "2026-09-07T20:27:45.000Z", source: "agent",
+  totals: { total: 14229, passed: 13410, failed: 191, skipped: 628, errors: 0 },
+  failures: Array.from({ length: 191 }, (_, i) => ({ name: `t${i}`, message: "boom" })),
+} satisfies TestRun;
+
+test("el detalle de corrida se puede cerrar sin perder el repo seleccionado", () => {
+  const html = renderToString(createElement(TestsScreen, {
+    initial: { matrix: [], config: [], runs: [RUN_CON_FALLOS] },
+    selectedRepo: "ant-liebre-api",
+    selectedRunId: RUN_CON_FALLOS.runId,
+  }));
+  assert.match(html, /aria-label="Cerrar detalle de la corrida"/);
+});
+
+test("las listas largas del detalle van acotadas para no aplastar el resto de la pantalla", () => {
+  const css = readFileSync(new URL("../screens.css", import.meta.url), "utf8");
+  for (const clase of ["ron-tests-failures", "ron-tests-output", "ron-tests-stderr"]) {
+    const regla = css.match(new RegExp(`\\.${clase}\\s*\\{[^}]*\\}`));
+    assert.ok(regla, `falta la regla de .${clase}`);
+    assert.match(regla[0], /overflow-y:\s*auto/, `.${clase} debe poder desplazarse por dentro`);
+    assert.match(regla[0], /max-height/, `.${clase} debe estar acotada`);
+  }
 });

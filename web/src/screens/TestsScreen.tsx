@@ -224,7 +224,7 @@ export function TestsScreen({ initial, selectedRepo: initialRepo, selectedRunId:
 
         <section className="card elev-sm ron-tests-detail">
           {selectedRun ? (
-            <RunDetail run={selectedRun} busy={busy} onCancel={() => act(() => cancelTestRun(selectedRun.runId), "cancelación enviada")} onRetry={() => act(() => retryTestRun(selectedRun.runId), "reintento encolado")} />
+            <RunDetail run={selectedRun} busy={busy} onClose={() => setSelectedRunId(null)} onCancel={() => act(() => cancelTestRun(selectedRun.runId), "cancelación enviada")} onRetry={() => act(() => retryTestRun(selectedRun.runId), "reintento encolado")} />
           ) : repoConfig ? (
             <RepoConfigForm key={repoConfig.repo} config={repoConfig} busy={busy} onSave={(input) => act(() => saveTestsConfig(repoConfig.repo, input), `configuración de ${repoConfig.repo} guardada`)} />
           ) : (
@@ -254,13 +254,14 @@ function MatrixCellView({ cell, canRun, busy, onOpen, onRun }: { cell: TestMatri
   );
 }
 
-function RunDetail({ run, busy, onCancel, onRetry }: { run: TestRun; busy: boolean; onCancel: () => void; onRetry: () => void }) {
+function RunDetail({ run, busy, onCancel, onRetry, onClose }: { run: TestRun; busy: boolean; onCancel: () => void; onRetry: () => void; onClose: () => void }) {
   const live = run.status === "queued" || run.status === "running";
   return (
     <div className="ron-tests-run-detail">
       <div className="ron-tests-section-head">
         <span className={`ron-dot ${stateTone(run.status)}`} />
         <strong>{run.repo} · {run.suite} · {STATE_LABEL[run.status]}</strong>
+        <button className="n-btn n-btn-ghost n-btn-icon" aria-label="Cerrar detalle de la corrida" title="Cerrar; el repositorio sigue seleccionado" onClick={onClose}>×</button>
         <span className="ron-pf-spacer" />
         {live ? (
           <button className="n-btn n-btn-danger" disabled={busy} onClick={onCancel}>Cancelar</button>
