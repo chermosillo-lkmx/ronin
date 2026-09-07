@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { KB_CANDIDATES, resolveKbDir, scanKb, zipKb } from "./kb.js";
+import { KB_CANDIDATES, generateKb, readKbGenerationState, resolveKbDir, scanKb, zipKb } from "./kb.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "ronin-kb-"));
@@ -96,4 +96,61 @@ test("zipKb crea un ZIP no vacío y explica claramente si zip no está instalado
 
 test("KB_CANDIDATES conserva el orden de detección público", () => {
   assert.deepEqual(KB_CANDIDATES, ["knowledge-base", "kb", "docs/kb"]);
+});
+
+test("generateKb persiste running antes del motor y termina ok con el prompt y cwd correctos", async () => {
+  const { root, cleanup } = fixture();
+  const stateDirectory = mkdtempSync(join(tmpdir(), "ronin-kb-state-"));
+  const states: string[] = [];
+  let prompt = "";
+  let options: { cwd?: string } | undefined;
+  const statePath = (repo: string) => join(stateDirectory, `${repo}.json`);
+  try {
+    const result = await generateKb("api", {
+      resolveCwd: () => ({ cwd: root, real: true }),
+      readRepoConfigFull: () => ({ kbPath: "" }),
+      readEngine: () => ({ tool: "codex", model: "modelo-prueba" }),
+      statePath,
+      now: (() => { let now = 100; return () => ++now; })(),
+      runClaudeP: async (input, received) => {
+        states.push(readKbGenerationState("api", { statePath })!.status);
+        prompt = input;
+        options = received;
+        return "generación terminada";
+      },
+    });
+
+    assert.deepEqual(states, ["running"]);
+    assert.equal(result.status, "ok");
+    assert.equal(readKbGenerationState("api", { statePath })?.status, "ok");
+    const kbDir = realpathSync(join(root, "knowledge-base"));
+    assert.match(prompt, new RegExp(kbDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(options?.cwd, root);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("generateKb marca failed con la cola de salida y nunca propaga un fallo del motor", async () => {
+  const { root, cleanup } = fixture();
+  const stateDirectory = mkdtempSync(join(tmpdir(), "ronin-kb-state-"));
+  const statePath = (repo: string) => join(stateDirectory, `${repo}.json`);
+  try {
+    let result: Awaited<ReturnType<typeof generateKb>> | undefined;
+    await assert.doesNotReject(async () => {
+      result = await generateKb("api", {
+        resolveCwd: () => ({ cwd: root, real: true }),
+        readRepoConfigFull: () => ({ kbPath: "" }),
+        statePath,
+        runClaudeP: async () => { throw new Error("falló el motor\ncola de salida relevante"); },
+      });
+    });
+    assert.equal(result?.status, "failed");
+    assert.match(result?.output ?? "", /cola de salida relevante/);
+    assert.equal(readKbGenerationState("api", { statePath })?.status, "failed");
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+    cleanup();
+  }
 });

@@ -59,7 +59,7 @@ import { createAnalyzer, type Analyzer } from "./workflow-insights/analyzer.js";
 import { InsightsError, parseRange, type ProposalStatus } from "./workflow-insights/model.js";
 import { collectSignals, defaultSignalDeps } from "./workflow-insights/signals.js";
 import { createProposalStore, type ProposalStore } from "./workflow-insights/store.js";
-import { scanKb, zipKb } from "./kb.js";
+import { generateKb, readKbGenerationState, scanKb, zipKb } from "./kb.js";
 
 /** T11: an invalid workflow gets an actionable {path, code} alongside the message; any other
  *  thrown error keeps the plain {error} shape every other 400 in this file already uses. */
@@ -130,6 +130,8 @@ export interface CreateAppOptions {
     readRepoConfigFull?: (repo: string) => { kbPath: string };
     scanKb?: typeof scanKb;
     zipKb?: typeof zipKb;
+    generateKb?: typeof generateKb;
+    readGenerationState?: typeof readKbGenerationState;
     downloadsDirectory?: () => string;
     temporaryDirectory?: () => string;
     now?: () => Date;
@@ -181,6 +183,8 @@ const kbApi = {
   readRepoConfigFull: options.kb?.readRepoConfigFull ?? readRepoConfigFull,
   scanKb: options.kb?.scanKb ?? scanKb,
   zipKb: options.kb?.zipKb ?? zipKb,
+  generateKb: options.kb?.generateKb ?? generateKb,
+  readGenerationState: options.kb?.readGenerationState ?? readKbGenerationState,
   downloadsDirectory: options.kb?.downloadsDirectory ?? (() => join(homedir(), "Downloads")),
   temporaryDirectory: options.kb?.temporaryDirectory ?? tmpdir,
   now: options.kb?.now ?? (() => new Date()),
@@ -257,6 +261,27 @@ app.get("/api/repos/:repo/kb", requireKbCapability, (req, res) => {
   const root = kbRepoRoot(req.params.repo, res);
   if (!root) return;
   res.json(kbApi.scanKb(root, kbApi.readRepoConfigFull(req.params.repo).kbPath || null));
+});
+
+app.get("/api/repos/:repo/kb/generation", requireKbCapability, (req, res) => {
+  if (!kbRepoRoot(req.params.repo, res)) return;
+  res.json(kbApi.readGenerationState(req.params.repo));
+});
+
+app.post("/api/repos/:repo/kb/generate", requireKbCapability, (req, res) => {
+  if (!kbRepoRoot(req.params.repo, res)) return;
+  const current = kbApi.readGenerationState(req.params.repo);
+  if (current?.status === "running") {
+    res.status(409).json({ error: "ya hay una generación de knowledge base en curso", code: "KB_GENERATION_RUNNING" });
+    return;
+  }
+  void kbApi.generateKb(req.params.repo, {
+    resolveCwd: kbApi.resolveCwd,
+    readRepoConfigFull: kbApi.readRepoConfigFull,
+    readEngine: engineApi.read,
+    runClaudeP: options.runClaudeP ?? runClaudeP,
+  }).catch(() => {});
+  res.status(202).json(kbApi.readGenerationState(req.params.repo));
 });
 
 app.post("/api/repos/:repo/kb/zip", requireKbCapability, async (req, res) => {

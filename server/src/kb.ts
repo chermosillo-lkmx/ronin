@@ -1,7 +1,14 @@
 import { execFile } from "node:child_process";
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { runClaudeP } from "./claude-p.js";
+import { dataPath } from "./data-dir.js";
+import { engineInvocation } from "./engine-config.js";
+import { getPromptTemplate, renderPrompt } from "./prompts.js";
+import { readRepoConfigFull } from "./repo-config.js";
+import { resolveCwd } from "./repos.js";
+import { readEngine } from "./settings.js";
 
 export const KB_CANDIDATES = ["knowledge-base", "kb", "docs/kb"];
 
@@ -39,6 +46,32 @@ export function resolveKbDir(repoRoot: string, configured: string | null): strin
     if (directory) return directory;
   }
   return null;
+}
+
+/** Crea la KB configurada (o la primera convención) sin seguir enlaces que escapen del repo. */
+export function ensureKbDir(repoRoot: string, configured: string | null): string | null {
+  try {
+    const root = realpathSync(repoRoot);
+    if (!statSync(root).isDirectory()) return null;
+    const configuredPath = configured?.trim();
+    const existing = resolveKbDir(root, configured ?? null);
+    const requested = existing ?? configuredPath ?? KB_CANDIDATES[0];
+    const candidate = isAbsolute(requested) ? requested : resolve(root, requested);
+    if (!isInside(root, candidate)) return null;
+
+    let parent = candidate;
+    while (!existsSync(parent)) {
+      const next = dirname(parent);
+      if (next === parent) return null;
+      parent = next;
+    }
+    if (!isInside(root, realpathSync(parent))) return null;
+    mkdirSync(candidate, { recursive: true });
+    const actual = realpathSync(candidate);
+    return statSync(actual).isDirectory() && isInside(root, actual) ? actual : null;
+  } catch {
+    return null;
+  }
 }
 
 function existingCandidates(repoRoot: string): string[] {
@@ -126,4 +159,94 @@ export async function zipKb(kbDir: string, outDir: string, nombreBase: string, o
     throw error;
   }
   return destination;
+}
+
+export const KB_GENERATION_TIMEOUT_MS = 1_800_000;
+const OUTPUT_TAIL_CHARS = 16_384;
+
+export type KbGenerationStatus = "running" | "ok" | "failed";
+export interface KbGenerationState {
+  status: KbGenerationStatus;
+  startedAt: number;
+  finishedAt?: number;
+  output?: string;
+}
+
+export interface KbGenerationStateDeps {
+  statePath?: (repo: string) => string;
+}
+
+export function kbGenerationStatePath(repo: string): string {
+  return dataPath(`kb-generation-${repo}.json`);
+}
+
+function generationStatePath(repo: string, deps: KbGenerationStateDeps): string {
+  return (deps.statePath ?? kbGenerationStatePath)(repo);
+}
+
+export function readKbGenerationState(repo: string, deps: KbGenerationStateDeps = {}): KbGenerationState | null {
+  try {
+    const state = JSON.parse(readFileSync(generationStatePath(repo, deps), "utf8"));
+    if (
+      state &&
+      (state.status === "running" || state.status === "ok" || state.status === "failed") &&
+      typeof state.startedAt === "number"
+    ) return state as KbGenerationState;
+  } catch {
+    /* ausente o ilegible */
+  }
+  return null;
+}
+
+export function writeKbGenerationState(repo: string, state: KbGenerationState, deps: KbGenerationStateDeps = {}): void {
+  try {
+    writeFileSync(generationStatePath(repo, deps), JSON.stringify(state));
+  } catch {
+    /* best-effort: el estado no puede romper el proceso de generación */
+  }
+}
+
+function outputTail(value: unknown): string {
+  const output = String(value);
+  return output.length > OUTPUT_TAIL_CHARS ? output.slice(-OUTPUT_TAIL_CHARS) : output;
+}
+
+export interface GenerateKbDeps extends KbGenerationStateDeps {
+  resolveCwd?: typeof resolveCwd;
+  readRepoConfigFull?: (repo: string) => { kbPath: string };
+  ensureKbDir?: typeof ensureKbDir;
+  getPromptTemplate?: typeof getPromptTemplate;
+  renderPrompt?: typeof renderPrompt;
+  readEngine?: typeof readEngine;
+  runClaudeP?: typeof runClaudeP;
+  now?: () => number;
+}
+
+/** Genera o actualiza la KB. Persiste el estado y convierte todo fallo en estado terminal. */
+export async function generateKb(repo: string, deps: GenerateKbDeps = {}): Promise<KbGenerationState> {
+  const now = deps.now ?? (() => Date.now());
+  const startedAt = now();
+  writeKbGenerationState(repo, { status: "running", startedAt }, deps);
+
+  try {
+    const resolved = (deps.resolveCwd ?? resolveCwd)(repo);
+    if (!resolved.real) throw new Error("el repositorio configurado no existe en disco");
+    const configured = (deps.readRepoConfigFull ?? readRepoConfigFull)(repo).kbPath || null;
+    const kbDir = (deps.ensureKbDir ?? ensureKbDir)(resolved.cwd, configured);
+    if (!kbDir) throw new Error("no se pudo crear una base de conocimiento dentro del repositorio");
+    const prompt = (deps.renderPrompt ?? renderPrompt)((deps.getPromptTemplate ?? getPromptTemplate)("kb"), { repo, kbDir });
+    const engine = (deps.readEngine ?? readEngine)();
+    const output = await (deps.runClaudeP ?? runClaudeP)(prompt, {
+      timeoutMs: KB_GENERATION_TIMEOUT_MS,
+      cwd: resolved.cwd,
+      ...engineInvocation(engine),
+    });
+    const state: KbGenerationState = { status: "ok", startedAt, finishedAt: now(), output: outputTail(output) };
+    writeKbGenerationState(repo, state, deps);
+    return state;
+  } catch (error) {
+    const state: KbGenerationState = { status: "failed", startedAt, finishedAt: now(), output: outputTail(error) };
+    writeKbGenerationState(repo, state, deps);
+    return state;
+  }
 }

@@ -362,6 +362,38 @@ test("POST /api/repos/:repo/kb/zip devuelve 404 legible cuando el repo no tiene 
   }
 });
 
+test("POST /api/repos/:repo/kb/generate inicia en segundo plano y rechaza duplicados en curso", async () => {
+  const token = ensureCapabilityToken();
+  const root = mkdtempSync(join(tmpdir(), "ronin-api-kb-generate-"));
+  const pending = deferred<void>();
+  let state: any = null;
+  try {
+    const app = createApp({ kb: {
+      listRepos: () => ["api"],
+      resolveCwd: () => ({ cwd: root, real: true }),
+      readRepoConfigFull: () => ({ kbPath: "" }),
+      readGenerationState: () => state,
+      generateKb: async () => {
+        state = { status: "running", startedAt: 100 };
+        await pending.promise;
+        state = { status: "ok", startedAt: 100, finishedAt: 101, output: "listo" };
+        return state;
+      },
+    } });
+    const headers = { "x-ronin-capability": token };
+    const started = await invokeRequest(app, "POST", "/api/repos/api/kb/generate", { headers });
+    assert.deepEqual(started, { status: 202, body: { status: "running", startedAt: 100 } });
+    const current = await invokeRequest(app, "GET", "/api/repos/api/kb/generation", { headers });
+    assert.deepEqual(current, { status: 200, body: { status: "running", startedAt: 100 } });
+    const duplicate = await invokeRequest(app, "POST", "/api/repos/api/kb/generate", { headers });
+    assert.equal(duplicate.status, 409);
+    pending.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("requireCapability: si el token aún no existe en disco, una mutación responde 503 CAPABILITY_UNAVAILABLE — fail-closed, nunca 200", async () => {
   const backup = existsSync(CAPABILITY_FILE) ? `${CAPABILITY_FILE}.backup-test` : null;
   if (backup) renameSync(CAPABILITY_FILE, backup);

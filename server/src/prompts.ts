@@ -13,9 +13,9 @@ import { dataPath } from "./data-dir.js";
  * plantillas filtradas son DENSAS (sin líneas en blanco: hoy .filter() las borra);
  * sólo `adhoc` conserva blancos (su build* usa join sin filtro).
  */
-export type PromptKey = "adhoc" | "adhocComplex" | "workflow" | "research" | "pr" | "verifier" | "driver";
+export type PromptKey = "adhoc" | "adhocComplex" | "workflow" | "research" | "pr" | "verifier" | "driver" | "kb";
 
-export const PROMPT_KEYS: PromptKey[] = ["adhoc", "adhocComplex", "workflow", "research", "pr", "verifier", "driver"];
+export const PROMPT_KEYS: PromptKey[] = ["adhoc", "adhocComplex", "workflow", "research", "pr", "verifier", "driver", "kb"];
 
 const LABELS: Record<PromptKey, string> = {
   adhoc: "Ad-hoc simple",
@@ -25,6 +25,7 @@ const LABELS: Record<PromptKey, string> = {
   pr: "PR reviewer",
   verifier: "Verificador independiente",
   driver: "Driver multi-pane (4 panes)",
+  kb: "Generar knowledge base",
 };
 
 // Placeholders disponibles por plantilla (para el panel de ayuda del editor).
@@ -36,6 +37,7 @@ const PLACEHOLDERS: Record<PromptKey, string[]> = {
   pr: ["{body}", "{objetivo}", "{resumen}", "{repo}", "{cycle}", "{ev}", "{url}", "{title}"],
   verifier: ["{key}", "{title}", "{ref}", "{cycle}", "{ev}", "{repo}", "{url}"],
   driver: ["{key}", "{title}", "{ref}", "{desc}", "{repo}", "{cycle}", "{ev}", "{url}", "{body}", "{steps}", "{driverPane}", "{workerPane}", "{reviewPane}", "{verifyPane}", "{reviewTool}", "{reviewCmd}", "{brainModel}", "{reviewerModel}", "{implModel}"],
+  kb: ["{repo}", "{kbDir}"],
 };
 
 // DEFAULT_PROMPTS: texto ACTUAL de cada build*, con placeholders. IMPORTANTE: las
@@ -134,6 +136,25 @@ export const DEFAULT_PROMPTS: Record<PromptKey, string> = {
     "2. Compara los resultados contra el OBJETIVO de la tarea: ¿la implementación logra lo pedido?",
     "3. Escribe tu veredicto en {ev}/verdict.md: APROBADO o RECHAZADO + razones concretas + qué falta.",
     "4. touch {cycle}/verify al terminar.",
+  ].join("\n"),
+
+  kb: [
+    "Genera la knowledge base del proyecto en {kbDir}, para que un agente que llega nuevo entienda el sistema sin leerse todo el código.",
+    "",
+    "Explora el repositorio antes de escribir. No documentes de memoria ni por convención: si no está en el código, no va.",
+    "",
+    "Estructura, exactamente:",
+    "- README.md — índice. Una tabla con cada componente y una frase de qué hace, y en qué orden conviene leerlos. Encabézalo con la fecha y el commit desde el que se generó, y una línea diciendo que es una foto del momento y que hay que verificar contra el código antes de actuar.",
+    "- architecture.md — cómo encajan las piezas: topología, quién habla con quién, dónde vive el estado, cómo funciona la autenticación, y los riesgos o deudas que encuentres.",
+    "- Un archivo por componente relevante, nombrado como el componente.",
+    "",
+    "En cada archivo:",
+    "- Cita archivo:línea para todo lo que no sea evidente. Una afirmación sin cita es una afirmación que el lector no puede comprobar.",
+    "- Enlaza a los otros archivos de la knowledge base cuando menciones algo que vive en ellos.",
+    "- Lo que no hayas podido determinar va como pregunta abierta, no relleno. Un hueco señalado vale más que un dato inventado.",
+    "- Nada de listar archivos ni volcar el árbol de directorios: eso ya lo da el repositorio. Explica lo que el código no dice de sí mismo: por qué está así, qué depende de qué y qué se rompe si lo tocas.",
+    "",
+    "Si {kbDir} ya tiene contenido, ACTUALÍZALO en vez de empezar de cero: conserva lo que siga siendo cierto, corrige lo que cambió y anota lo que desapareció.",
   ].join("\n"),
 };
 

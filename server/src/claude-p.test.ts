@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { runClaudeP } from "./claude-p.js";
 
@@ -14,4 +17,19 @@ test("runClaudeP rechaza por timeout y por exit distinto de 0", async () => {
 
 test("runClaudeP rechaza cuando el comando no existe", async () => {
   await assert.rejects(runClaudeP("x", { command: "/no/existe" }), /ENOENT/);
+});
+
+test("runClaudeP pasa cwd al proceso cuando se configura", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "ronin-claude-p-"));
+  try {
+    const out = await runClaudeP("", { command: process.execPath, args: ["-e", "process.stdout.write(process.cwd())"], cwd });
+    assert.equal(out, realpathSync(cwd));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("runClaudeP conserva el cwd heredado cuando no se configura", async () => {
+  const out = await runClaudeP("", { command: process.execPath, args: ["-e", "process.stdout.write(process.cwd())"] });
+  assert.equal(out, process.cwd());
 });
