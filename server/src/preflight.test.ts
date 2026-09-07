@@ -98,5 +98,12 @@ test("runPreflight: versionOf recibe la ruta que which() resolvió, nunca el nom
   assert.equal(tmuxCheck.detail, "/fake/tmux · 9.9");
   // Si el código volviera a `versionOf(b.bin, flag)`, seenPaths traería "tmux", "claude", … (los
   // nombres desnudos de BINS), nunca las rutas fake — y esta aserción reventaría.
-  assert.deepEqual(seenPaths.sort(), ["/fake/claude", "/fake/codex", "/fake/tmux", "/fake/ttyd"]);
+  assert.deepEqual(seenPaths.sort(), ["/fake/claude", "/fake/claude", "/fake/codex", "/fake/tmux", "/fake/ttyd"]);
+});
+
+test("runPreflight comprueba el binario del motor configurado", async () => {
+  const checks = await runPreflight({ which: (bin) => `/fake/${bin}`, versionOf: async () => "1.0" }, { tool: "agy" });
+  const engine = checks.find((check) => check.key === "engine")!;
+  assert.equal(engine.label, "motor configurado (agy)");
+  assert.equal(engine.detail, "/fake/agy · 1.0");
 });

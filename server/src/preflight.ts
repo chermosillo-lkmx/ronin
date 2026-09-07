@@ -3,6 +3,8 @@ import { accessSync, constants, statSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { PreflightCheck } from "./types.js";
+import { engineInvocation, type EngineChoice } from "./engine-config.js";
+import { readEngine } from "./settings.js";
 
 const pexec = promisify(execFile);
 
@@ -142,7 +144,8 @@ const BINS: { key: string; label: string; bin: string; flag: string; note: strin
  * reporta.
  */
 export async function runPreflight(
-  resolve: { which: typeof which; versionOf: typeof versionOf } = { which, versionOf }
+  resolve: { which: typeof which; versionOf: typeof versionOf } = { which, versionOf },
+  engine: EngineChoice = readEngine(),
 ): Promise<PreflightCheck[]> {
   const bins = await Promise.all(
     BINS.map(async (b) => {
@@ -150,5 +153,8 @@ export async function runPreflight(
       return binCheck(b.key, b.label, path, await resolve.versionOf(path, b.flag), b.note);
     })
   );
-  return [...bins, await nodePtyCheck(), pathCheck((process.env.PATH ?? "").split(":").filter(Boolean))];
+  const configured = engineInvocation(engine);
+  const enginePath = resolve.which(configured.command);
+  const engineCheck = binCheck("engine", `motor configurado (${configured.command})`, enginePath, await resolve.versionOf(enginePath, "--version"), `Instalar ${configured.command} en el PATH`);
+  return [...bins, engineCheck, await nodePtyCheck(), pathCheck((process.env.PATH ?? "").split(":").filter(Boolean))];
 }

@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { existsSync, renameSync, rmSync } from "node:fs";
 import { promisify } from "node:util";
 import { CAPABILITY_FILE, ensureCapabilityToken, readCapabilityToken } from "./capability.js";
-import { createApp, startServer } from "./index.js";
+import { createApp, runConfiguredClaude, startServer } from "./index.js";
 import { createSession } from "./tmux.js";
 import { cycleDirForSession } from "./stages.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
@@ -415,6 +415,36 @@ test("GET/PUT /api/trusted-roots devuelve, valida y respeta la política del ent
     if (previous === undefined) delete process.env.COWORK_ALLOWED_ROOTS;
     else process.env.COWORK_ALLOWED_ROOTS = previous;
   }
+});
+
+test("GET/PUT /api/engine devuelve y guarda el motor con capability", async () => {
+  const token = ensureCapabilityToken();
+  let engine = { tool: "claude" as const };
+  const app = createApp({ engine: {
+    read: () => engine,
+    save: (input) => {
+      engine = input as typeof engine;
+      return engine;
+    },
+  } });
+  assert.deepEqual(await invokeGet(app, "/api/engine"), { status: 200, body: { engine: { tool: "claude" } } });
+  assert.deepEqual(
+    await invokeRequest(app, "PUT", "/api/engine", { headers: { "x-ronin-capability": token }, body: { engine: { tool: "codex", model: "gpt-5.3-codex" } } }),
+    { status: 200, body: { engine: { tool: "codex", model: "gpt-5.3-codex" } } },
+  );
+});
+
+test("runConfiguredClaude pasa el comando y args del motor al ejecutor inyectado", async () => {
+  let received: { timeoutMs?: number; maxBytes?: number; command?: string; args?: string[] } | undefined;
+  const runClaude = runConfiguredClaude(
+    () => ({ tool: "codex", model: "gpt-5.3-codex" }),
+    async (_prompt, options) => {
+      received = options;
+      return "<PROPOSALS>{\"proposals\":[]}</PROPOSALS>";
+    },
+  );
+  await runClaude("analiza");
+  assert.deepEqual(received, { timeoutMs: 300_000, maxBytes: 256 * 1024, command: "codex", args: ["exec", "--model", "gpt-5.3-codex"] });
 });
 
 test("POST /adopt devuelve el detalle explicativo de REPO_NOT_ALLOWED", async () => {

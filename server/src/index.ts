@@ -36,7 +36,8 @@ import { createWorkflowCatalogItem, deleteWorkflowCatalogItem, importWorkflowCat
 import { readPromptConfig, resetPromptTemplate, savePromptTemplate } from "./prompts.js";
 import { listRepos, readRepoConfig, saveRepoConfig } from "./repos.js";
 import { readRepoConfigFull, saveRepoOverrides } from "./repo-config.js";
-import { saveAllowedRoots } from "./settings.js";
+import { readEngine, saveAllowedRoots, saveEngine } from "./settings.js";
+import { engineInvocation, type EngineChoice } from "./engine-config.js";
 import { trustedRoots } from "./repo-roots.js";
 import { ensureCapabilityToken, requireCapability } from "./capability.js";
 import { constantTimeEqual, corsOptions, requireLocalOrigin } from "./security.js";
@@ -93,6 +94,13 @@ export interface CreateAppOptions {
     read: () => { roots: string[]; source: "env" | "settings" };
     save: (input: unknown) => { roots: string[]; source: "settings" };
   };
+  /** Costura de settings del motor para pruebas HTTP sin escribir settings.json. */
+  engine?: {
+    read: () => EngineChoice;
+    save: (input: unknown) => EngineChoice;
+  };
+  /** Ejecutable de fondo inyectable: evita arrancar un CLI real en pruebas. */
+  runClaudeP?: typeof runClaudeP;
   /** Inyección para tests: un harness con store aislado. Por defecto usa server/data. */
   harness?: TestHarnessService;
   /**
@@ -114,8 +122,18 @@ export interface CreateAppOptions {
   readTmuxInventory?: typeof readTmuxInventory;
 }
 
+/** Construye el ejecutor de análisis conservando sus límites y tomando el motor al invocarlo. */
+export function runConfiguredClaude(
+  read: () => EngineChoice,
+  run: typeof runClaudeP = runClaudeP,
+): (prompt: string) => Promise<string> {
+  return (prompt) => run(prompt, { timeoutMs: 300_000, maxBytes: 256 * 1024, ...engineInvocation(read()) });
+}
+
 export function createApp(options: CreateAppOptions = {}): express.Express {
 const app = express();
+const engineApi = options.engine ?? { read: readEngine, save: saveEngine };
+const runBackgroundClaude = runConfiguredClaude(engineApi.read, options.runClaudeP);
 const harness = options.harness ?? createTestHarnessService({ store: createHarnessStore() });
 const catalogDirectory = options.catalogDirectory ?? options.insights?.catalogDirectory;
 const insightsStore = options.insights?.store ?? createProposalStore();
@@ -125,7 +143,7 @@ const analyzer =
     store: insightsStore,
     signals: (range) => collectSignals(range, defaultSignalDeps),
     catalogNames: () => loadWorkflowCatalog(catalogDirectory).items.map((item) => item.name),
-    runClaude: (prompt) => runClaudeP(prompt, { timeoutMs: 300_000, maxBytes: 256 * 1024 }),
+    runClaude: runBackgroundClaude,
   });
 const sessionPresentations = createSessionPresentationStore(dataPath("session-presentations.json"), listRepos);
 const terminal = {
@@ -201,6 +219,13 @@ app.put("/api/trusted-roots", (req, res) => {
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
   }
+});
+
+app.get("/api/engine", (_req, res) => {
+  res.json({ engine: engineApi.read() });
+});
+app.put("/api/engine", (req, res) => {
+  res.json({ engine: engineApi.save(req.body?.engine) });
 });
 
 // Read / edit a repo's workflow override + vars + startCommand (data/repo-config.json)

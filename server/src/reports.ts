@@ -1,11 +1,13 @@
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runClaudeP } from "./claude-p.js";
+import { engineInvocation } from "./engine-config.js";
 import { dataPath } from "./data-dir.js";
 import { readHistory } from "./history.js";
 import { commitsFor, type Commit } from "./report-git.js";
 import { listRepos } from "./repos.js";
 import { cycleDirForSession, readEvidence } from "./stages.js";
+import { readEngine } from "./settings.js";
 
 export const REPORTS_DIR = dataPath("reports");
 export type ReportKind = "daily" | "weekly";
@@ -29,10 +31,21 @@ export function buildPrompt(period: string, sessions: ReturnType<typeof readHist
   const git = Object.entries(commits).map(([repo, rows]) => `### ${repo}\n${rows.map((c) => `- ${c.hash} ${c.subject}`).join("\n")}`).join("\n") || "(sin commits)";
   return `Redacta en español un reporte markdown del periodo ${period}.\n\n## Sesiones trabajadas\n${worked}\n\n## Commits por repo\n${git}\n\nDevuelve sólo <REPORT>markdown</REPORT>.`;
 }
-export async function generateReport(kind: ReportKind, ref?: string) {
+export interface ReportRunnerDeps {
+  readEngine?: typeof readEngine;
+  runClaudeP?: typeof runClaudeP;
+}
+
+/** Ejecuta el prompt de reportes con el motor de fondo seleccionado, inyectable para pruebas. */
+export function runReportPrompt(prompt: string, deps: ReportRunnerDeps = {}): Promise<string> {
+  const engine = (deps.readEngine ?? readEngine)();
+  return (deps.runClaudeP ?? runClaudeP)(prompt, engineInvocation(engine));
+}
+
+export async function generateReport(kind: ReportKind, ref?: string, deps: ReportRunnerDeps = {}) {
   const [from, to] = windowFor(kind, ref); const sessions = readHistory(from.getTime(), to.getTime());
   const prompt = buildPrompt(`${iso(from)} → ${iso(new Date(to.getTime() - 1))}`, sessions, await commitsFor(listRepos(), from, to));
-  const output = await runClaudeP(prompt); const markdown = output.match(/<REPORT>([\s\S]*?)<\/REPORT>/i)?.[1]?.trim() || `# Reporte ${iso(from)}\n\nSin sesiones trabajadas.\n`;
+  const output = await runReportPrompt(prompt, deps); const markdown = output.match(/<REPORT>([\s\S]*?)<\/REPORT>/i)?.[1]?.trim() || `# Reporte ${iso(from)}\n\nSin sesiones trabajadas.\n`;
   const name = reportName(kind, from); mkdirSync(REPORTS_DIR, { recursive: true }); const path = join(REPORTS_DIR, `${name}.md`); writeFileSync(path, markdown + "\n"); return { name, markdown, path };
 }
 export interface ReportMeta { name: string; kind: ReportKind; date: string; ts: number; size: number; }
