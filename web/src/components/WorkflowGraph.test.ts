@@ -35,3 +35,16 @@ test("WorkflowGraph con callbacks muestra inserciones y expone etapas interactiv
   assert.match(html, /data-stage-key="verify"/);
   assert.doesNotMatch(html, /data-stage-key="verify"[^>]*wf-graph-node-interactive/);
 });
+
+test("WorkflowGraph muestra el ejecutor y el modelo, y hace visible la herencia", () => {
+  const html = renderToString(createElement(WorkflowGraph, {
+    stages: [
+      { key: "impl", label: "Implementar", icon: "⌨️", executor: "codex", model: "gpt-5.3-codex" },
+      { key: "curl", label: "Curl", icon: "🌐" },
+    ],
+    verifyAfter: null,
+  }));
+
+  assert.match(html, /codex · gpt-5\.3-codex/);
+  assert.match(html, /hereda del flujo/);
+});

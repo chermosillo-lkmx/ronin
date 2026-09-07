@@ -35,3 +35,22 @@ test("StageEditor: allowVerifyCmd=true habilita el campo verifyCmd", () => {
   assert.match(html, /placeholder="verifyCmd \(exit 0 = pass; ⚠️ ejecuta shell\)"/);
   assert.doesNotMatch(html, /placeholder="verifyCmd \(exit 0 = pass; ⚠️ ejecuta shell\)"[^>]*disabled=""/);
 });
+
+test("StageEditor muestra ejecutor y modelo, o la herencia del flujo", () => {
+  const html = renderToString(
+    createElement(StageEditor, {
+      stages: [
+        { key: "impl", label: "Implementar", icon: "⌨️", executor: "claude", model: "sonnet" },
+        { key: "curl", label: "Curl", icon: "🌐" },
+      ],
+      verifyAfter: null,
+      onStages: () => {},
+      onVerifyAfter: () => {},
+    }),
+  );
+
+  assert.match(html, /claude/);
+  assert.match(html, /sonnet/);
+  assert.match(html, /hereda/);
+  assert.match(html, /— del flujo/);
+});

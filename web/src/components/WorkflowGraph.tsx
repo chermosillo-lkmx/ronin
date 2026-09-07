@@ -1,14 +1,27 @@
 import { deriveGraph, type DraftGraphNode } from "./workflow-draft";
 import type { WfStage } from "../types";
 
-const NODE_W = 150;
-const NODE_H = 48;
-const GAP_X = 60;
+const NODE_W = 182;
+const NODE_H = 64;
+const GAP_X = 68;
 const ROW_Y = 16;
 const VERIFY_ROW_Y = ROW_Y + NODE_H + 40;
 
 function nodeLabel(n: DraftGraphNode): string {
   return `${n.icon} ${n.label}`;
+}
+
+function executorText(n: DraftGraphNode): string {
+  return n.executor ? `${n.executor}${n.model ? ` · ${n.model}` : ""}` : "hereda del flujo";
+}
+
+function executorBadge(n: DraftGraphNode): { initial: string; tone: string } {
+  switch (n.executor) {
+    case "claude": return { initial: "C", tone: "claude" };
+    case "codex": return { initial: "X", tone: "codex" };
+    case "agy": return { initial: "A", tone: "agy" };
+    default: return { initial: "·", tone: "inherit" };
+  }
 }
 
 /**
@@ -82,8 +95,15 @@ export function WorkflowGraph({
         .map((n, index) => (
           <g key={`${n.key}-${index}`} data-stage-key={n.key} className={`wf-graph-node${n.role === "impl" ? " wf-graph-node-impl" : ""}${onStageClick ? " wf-graph-node-interactive" : ""}`} transform={`translate(${index * (NODE_W + GAP_X)}, ${ROW_Y})`} role={onStageClick ? "button" : undefined} tabIndex={onStageClick ? 0 : undefined} onClick={onStageClick ? () => onStageClick(index) : undefined} onKeyDown={onStageClick ? (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onStageClick(index); } } : undefined}>
             <rect width={NODE_W} height={NODE_H} rx={8} />
-            <text x={NODE_W / 2} y={NODE_H / 2 + 4} textAnchor="middle">
+            <text className="ron-exec-graph-title" x={14} y={25}>
               {nodeLabel(n)}
+            </text>
+            <g transform="translate(14, 38)">
+              <rect className={`ron-exec-badge ron-exec-badge-${executorBadge(n).tone}`} width={14} height={14} rx={3} />
+              <text className="ron-exec-badge-letter" x={7} y={10.5} textAnchor="middle">{executorBadge(n).initial}</text>
+            </g>
+            <text className={`ron-exec-graph-text${n.executor ? "" : " ron-exec-graph-text-inherit"}`} x={34} y={49}>
+              {executorText(n)}
             </text>
             {n.gate && (
               <title>etapa con verifyCmd (gate pass/fail)</title>
@@ -102,9 +122,14 @@ export function WorkflowGraph({
         .map((n) => (
           <g key={n.key} data-stage-key={n.key} className="wf-graph-node wf-graph-node-verify" transform={`translate(${verifyX}, ${VERIFY_ROW_Y})`}>
             <rect width={NODE_W} height={NODE_H} rx={8} />
-            <text x={NODE_W / 2} y={NODE_H / 2 + 4} textAnchor="middle">
+            <text className="ron-exec-graph-title" x={14} y={25}>
               {nodeLabel(n)}
             </text>
+            <g transform="translate(14, 38)">
+              <rect className={`ron-exec-badge ron-exec-badge-${executorBadge(n).tone}`} width={14} height={14} rx={3} />
+              <text className="ron-exec-badge-letter" x={7} y={10.5} textAnchor="middle">{executorBadge(n).initial}</text>
+            </g>
+            <text className="ron-exec-graph-text ron-exec-graph-text-inherit" x={34} y={49}>{executorText(n)}</text>
           </g>
         ))}
     </svg>

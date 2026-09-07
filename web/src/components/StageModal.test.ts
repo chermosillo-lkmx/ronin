@@ -42,3 +42,25 @@ test("el foco inicial del StageModal no depende de props que cambian en cada ren
   assert.ok(focusEffect, "debe existir un efecto que enfoque al montar");
   assert.equal(focusEffect[1], "[]");
 });
+
+test("StageModal marca el ejecutor elegido y refleja el criterio de comando del servidor", () => {
+  const codex = renderToString(createElement(StageModal, {
+    stage: { ...STAGE, executor: "codex", model: "gpt-5.3-codex" },
+    allowVerifyCmd: false,
+    onChange: () => {},
+    onClose: () => {},
+    onDelete: () => {},
+  }));
+  const agy = renderToString(createElement(StageModal, {
+    stage: { ...STAGE, executor: "agy", model: "gemini-3-pro" },
+    allowVerifyCmd: false,
+    onChange: () => {},
+    onClose: () => {},
+    onDelete: () => {},
+  }));
+
+  assert.match(codex, /aria-pressed="true"[^>]*>[^]*?codex/);
+  assert.match(codex, /codex --model gpt-5\.3-codex/);
+  assert.match(agy, /agy/);
+  assert.doesNotMatch(agy, /agy --model/);
+});

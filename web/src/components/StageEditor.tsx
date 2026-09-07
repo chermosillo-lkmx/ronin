@@ -2,6 +2,15 @@ import type { WfStage } from "../types.js";
 
 export const EMOJI_CHOICES = ["📋", "⌨️", "🌐", "🔎", "✓", "💬", "🔒", "🧪", "🧹", "📦", "🚀", "🛠️", "🔥", "📝", "⚙️", "⚡"];
 
+function executorDisplay(stage: WfStage): { name: string; initial: string; tone: string; model: string } {
+  switch (stage.executor) {
+    case "claude": return { name: "claude", initial: "C", tone: "claude", model: stage.model || "—" };
+    case "codex": return { name: "codex", initial: "X", tone: "codex", model: stage.model || "—" };
+    case "agy": return { name: "agy", initial: "A", tone: "agy", model: stage.model || "—" };
+    default: return { name: "hereda", initial: "·", tone: "inherit", model: "— del flujo" };
+  }
+}
+
 /** Controlled stage editor (etapas + verificador). Reused by the global workflow and per-repo overrides. */
 export function StageEditor({
   stages,
@@ -51,6 +60,19 @@ export function StageEditor({
                 <input className="wf-key" placeholder="key (ej. security)" value={s.key} onChange={(e) => patch(i, { key: e.target.value })} />
                 <input className="wf-label" placeholder="label" value={s.label} onChange={(e) => patch(i, { label: e.target.value })} />
                 <button className="btn stop" onClick={() => remove(i)} title="eliminar etapa">✕</button>
+              </div>
+              <div className="ron-exec-stepper-columns">
+                <div className="ron-exec-stepper-column">
+                  <span className="ron-exec-stepper-heading">Ejecutor</span>
+                  <span className={`ron-exec-stepper-executor${s.executor ? "" : " ron-exec-stepper-inherit"}`}>
+                    <span className={`ron-exec-badge ron-exec-badge-${executorDisplay(s).tone}`}>{executorDisplay(s).initial}</span>
+                    {executorDisplay(s).name}
+                  </span>
+                </div>
+                <div className="ron-exec-stepper-column">
+                  <span className="ron-exec-stepper-heading">Modelo</span>
+                  <span className={`ron-exec-stepper-model${s.executor ? "" : " ron-exec-stepper-inherit"}`}>{executorDisplay(s).model}</span>
+                </div>
               </div>
               <textarea
                 className="wf-instr"

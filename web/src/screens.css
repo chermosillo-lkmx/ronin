@@ -139,20 +139,52 @@
 .wf-view-tab-active { color: var(--color-accent); border-color: var(--color-accent); }
 
 .wf-graph { width: 100%; max-width: 100%; height: auto; overflow: visible; }
-.wf-graph-node rect { fill: var(--color-surface); stroke: var(--color-divider); stroke-width: 1.5; }
-.wf-graph-node text { fill: var(--color-text); font-size: 12px; }
-.wf-graph-node-impl rect { stroke: var(--color-accent); }
-.wf-graph-node-verify rect { stroke-dasharray: 4 3; }
+.wf-graph-node > rect { fill: var(--color-surface); stroke: var(--color-divider); stroke-width: 1.5; }
+.wf-graph-node-impl > rect { stroke: var(--color-accent); }
+.wf-graph-node-verify > rect { stroke-dasharray: 4 3; }
 .wf-graph-edge { stroke: var(--color-neutral-500); stroke-width: 1.5; fill: none; }
 .wf-graph-edge-verify { stroke-dasharray: 4 3; }
 .wf-graph-arrowhead { fill: var(--color-neutral-500); }
 .wf-graph-gate-dot { fill: var(--status-warn); }
 .wf-graph-node-interactive { cursor: pointer; }
-.wf-graph-node-interactive:hover rect,.wf-graph-node-interactive:focus rect { stroke: var(--color-accent); stroke-width: 2; }
+.wf-graph-node-interactive:hover > rect,.wf-graph-node-interactive:focus > rect { stroke: var(--color-accent); stroke-width: 2; }
 .wf-graph-add { cursor: pointer; }
 .wf-graph-add circle { fill: var(--color-accent-900); stroke: var(--color-accent); stroke-width: 1.5; }
 .wf-graph-add text { fill: var(--color-accent-200); font-size: 17px; font-weight: 700; pointer-events: none; }
 .wf-graph-add:hover circle,.wf-graph-add:focus circle { fill: var(--color-accent-800); }
+
+/* ── Ejecutores por etapa: la chapa comunica herramienta, nunca resultado ─ */
+.wf-graph-node .ron-exec-graph-title { fill: var(--color-text); font-size: 12px; }
+.wf-graph-node .ron-exec-graph-text { fill: var(--color-neutral-400); font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.wf-graph-node .ron-exec-graph-text-inherit { fill: var(--color-neutral-600); }
+.ron-exec-badge { width: 15px; height: 15px; flex: 0 0 15px; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; font: 600 8.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ron-exec-badge-claude { background: var(--color-accent-900); color: var(--color-accent-400); fill: var(--color-accent-900); }
+.ron-exec-badge-codex { background: var(--color-neutral-900); color: var(--color-neutral-300); fill: var(--color-neutral-900); }
+.ron-exec-badge-agy { background: var(--color-accent-2-900); color: var(--color-accent-2-400); fill: var(--color-accent-2-900); }
+.ron-exec-badge-inherit { background: var(--color-surface); color: var(--color-neutral-600); fill: var(--color-surface); }
+.wf-graph-node .ron-exec-badge-letter { fill: var(--color-neutral-300); font: 600 8.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.wf-graph-node .ron-exec-badge-claude + .ron-exec-badge-letter { fill: var(--color-accent-400); }
+.wf-graph-node .ron-exec-badge-agy + .ron-exec-badge-letter { fill: var(--color-accent-2-400); }
+.wf-graph-node .ron-exec-badge-inherit + .ron-exec-badge-letter { fill: var(--color-neutral-600); }
+.ron-exec-stage-picker { display: flex; flex-direction: column; gap: 7px; padding: 12px; border: 1px solid color-mix(in srgb, var(--color-accent) 28%, transparent); border-radius: var(--radius-md); background: color-mix(in srgb, var(--color-accent) 7%, var(--color-bg)); }
+.ron-exec-stage-picker-title { display: flex; align-items: baseline; gap: var(--space-3); color: var(--color-neutral-400); font-size: 11px; }
+.ron-exec-stage-picker-title small { margin-left: auto; color: var(--color-neutral-600); font-size: 10px; }
+.ron-exec-tool-options { display: flex; gap: 7px; }
+.ron-exec-tool-option { min-width: 0; flex: 1; display: flex; align-items: center; gap: 7px; padding: 8px; border: 1px solid var(--color-divider); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-neutral-400); text-align: left; cursor: pointer; }
+.ron-exec-tool-option > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ron-exec-tool-option b { color: inherit; font: 500 12px var(--font-heading); }
+.ron-exec-tool-option small { overflow: hidden; color: var(--color-neutral-600); font: 9.5px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.ron-exec-tool-option-selected { border-color: var(--color-accent); background: var(--color-accent-900); color: var(--color-accent-200); }
+.ron-exec-model-command { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-3); padding-top: 3px; }
+.ron-exec-model-command > label, .ron-exec-command { display: flex; flex-direction: column; gap: 5px; color: var(--color-neutral-400); font-size: 11px; }
+.ron-exec-model-command input, .ron-exec-command code { height: 31px; box-sizing: border-box; min-width: 0; border: 1px solid var(--color-divider); border-radius: var(--radius-sm); padding: 0 8px; color: var(--color-text); background: var(--color-bg); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ron-exec-command code { display: flex; align-items: center; color: var(--color-neutral-400); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ron-exec-stepper-columns { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: var(--space-3); }
+.ron-exec-stepper-column { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ron-exec-stepper-heading { color: var(--color-neutral-500); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.ron-exec-stepper-executor, .ron-exec-stepper-model { min-height: 28px; display: flex; align-items: center; gap: 7px; box-sizing: border-box; padding: 0 8px; border: 1px solid var(--color-divider); border-radius: var(--radius-sm); background: var(--color-bg); color: var(--color-text); font: 11.5px var(--font-heading); }
+.ron-exec-stepper-model { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ron-exec-stepper-inherit { color: var(--color-neutral-600); }
 
 .wf-json-editor { display: flex; flex-direction: column; gap: var(--space-2); }
 .wf-json-textarea {

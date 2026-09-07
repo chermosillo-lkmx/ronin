@@ -190,6 +190,8 @@ export interface DraftGraphNode {
   label: string;
   icon: string;
   role?: "impl";
+  executor?: "claude" | "codex" | "agy";
+  model?: string;
   gate?: boolean;
 }
 export type DraftGraphEdgeKind = "sequence" | "verify" | "retry";
@@ -218,6 +220,8 @@ export function deriveGraph(stages: WfStage[], verifyAfter: string | null): Draf
     label: s.label,
     icon: s.icon,
     ...(s.role === "impl" ? { role: "impl" as const } : {}),
+    executor: s.executor,
+    model: s.model,
     ...(s.verifyCmd ? { gate: true as const } : {}),
   }));
   const edges: DraftGraphEdge[] = [];

@@ -34,6 +34,8 @@ export interface WfStep {
 export interface WfStage extends WfStep {
   instruction?: string;
   role?: "impl";               // marca la etapa de implementación (dispara el switch de modelo)
+  executor?: "claude" | "codex" | "agy"; // espejo manual de server/src/workflow.ts
+  model?: string;               // modelo opcional del ejecutor de la etapa
   verifyCmd?: string;          // P2: gate pass/fail (solo override por-repo; ejecuta shell)
   maxRetries?: number;         // P2: reintentos antes de marcar la etapa como fallida
 }
