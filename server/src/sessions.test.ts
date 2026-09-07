@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { attachAttention, attachPaneEngines, attachPaneRoles, attachUsageLimit, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
+import { attachAttention, attachFlow, attachPaneEngines, attachPaneRoles, attachUsageLimit, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
 import { AttentionTracker } from "./attention-tracker.js";
 
 // Salidas de `tmux list-sessions -F` y `tmux list-panes -a -F` con los formatos de sessions.ts.
@@ -352,4 +352,28 @@ test("attachPaneRoles: una sesión ajena no recibe roles inventados", () => {
   const roles = attachPaneRoles(sessions);
   assert.equal(roles[0]!.panes[0]!.role, null);
   assert.equal(roles[0]!.panes[1]!.role, null);
+});
+
+test("attachFlow: sólo las sesiones gestionadas reciben el avance del flujo", () => {
+  const sessions = buildInventory([
+    "cowork-x\t1\t1753747200\t0",
+    "dev-scratch\t1\t1753747200\t0",
+  ].join("\n"), [
+    "cowork-x\t0\t%1\tzsh\t\t\t1",
+    "dev-scratch\t0\t%2\tzsh\t\t\t1",
+  ].join("\n"), (name) => name === "cowork-x");
+
+  const flujo = { done: 1, total: 2, stages: [
+    { key: "a", label: "A", status: "done" as const },
+    { key: "b", label: "B", status: "current" as const },
+  ] };
+  const conFlujo = attachFlow(sessions, () => flujo);
+
+  assert.equal(conFlujo.find((s) => s.name === "cowork-x")!.flow, flujo);
+  assert.equal("flow" in conFlujo.find((s) => s.name === "dev-scratch")!, false);
+});
+
+test("attachFlow: una gestionada sin workflow (terminal normal) no gana la clave", () => {
+  const sessions = buildInventory("cowork-x\t1\t1753747200\t0", "cowork-x\t0\t%1\tzsh\t\t\t1", () => true);
+  assert.equal("flow" in attachFlow(sessions, () => null)[0]!, false);
 });

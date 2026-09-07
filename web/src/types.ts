@@ -190,6 +190,26 @@ export interface TmuxSessionInfo {
   request?: string;
   attention?: SessionAttention;
   usageLimit?: SessionUsageLimit;
+  flow?: SessionFlow;
+}
+
+// Espejo de server/src/types.ts. Lo calcula flow-progress.ts leyendo el cycle dir.
+export interface FlowStageProgress {
+  key: string;
+  label: string;
+  icon?: string;
+  executor?: string;
+  status: "done" | "current" | "pending" | "failed";
+  /** Cumplida: cuándo se cerró. En curso: cuándo empezó. */
+  at?: number;
+  attempts?: number;
+}
+
+export interface SessionFlow {
+  workflow?: string;
+  done: number;
+  total: number;
+  stages: FlowStageProgress[];
 }
 
 export type CheckLevel = "ok" | "warn" | "fail";

@@ -13,7 +13,8 @@ import {
 import { rollupAttention } from "./attention.js";
 import { AttentionTracker } from "./attention-tracker.js";
 import { detectPaneEngine } from "./engine-detect.js";
-import type { SessionUsageLimit, TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
+import { readFlowProgress } from "./flow-progress.js";
+import type { SessionFlow, SessionUsageLimit, TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
 
 const attentionTracker = new AttentionTracker();
 
@@ -204,6 +205,22 @@ export function attachPaneRoles(sessions: TmuxSessionInfo[]): TmuxSessionInfo[] 
   });
 }
 
+/**
+ * Cuelga el avance del flujo de cada sesión GESTIONADA. `read` se inyecta para que la prueba no
+ * necesite un cycle dir de verdad; en producción es readFlowProgress sobre el dir de la sesión.
+ * Una gestionada sin workflow (una terminal normal) no gana la clave: no hay flujo que enseñar.
+ */
+export function attachFlow(
+  sessions: TmuxSessionInfo[],
+  read: (name: string) => SessionFlow | null,
+): TmuxSessionInfo[] {
+  return sessions.map((session) => {
+    if (session.kind !== "managed") return session;
+    const flow = read(session.name);
+    return flow ? { ...session, flow } : session;
+  });
+}
+
 /** `reached` wins; equal states preserve tmux pane order for a stable, explainable rollup. */
 export function rollupUsageLimit(panes: Map<string, string | null>): SessionUsageLimit | null {
   let winner: SessionUsageLimit | null = null;
@@ -237,6 +254,11 @@ function requestFromLaunch(name: string): string | undefined {
   const raw = readLaunchRecord(name);
   const request = raw && typeof raw === "object" ? (raw as { request?: unknown }).request : undefined;
   return typeof request === "string" && request.trim() ? request : undefined;
+}
+
+/** Avance del flujo de una sesión gestionada, leído de su cycle dir. Nunca lanza. */
+function flowOf(name: string): SessionFlow | null {
+  return readFlowProgress(cycleDirForSession(name));
 }
 
 /** Result returned by the tmux inventory endpoint.
@@ -287,6 +309,6 @@ export async function readTmuxInventory(): Promise<TmuxInventoryResult> {
   const inventory = inventoryFromRaw(sessionsResult, panesResult, (name) => existsSync(cycleDirForSession(name)));
   const sessions = withLaunchRequests(inventory.sessions, requestFromLaunch);
   const captures = await capturePanesTail(sessions.flatMap((session) => session.panes.map((pane) => pane.id)));
-  const enriched = attachPaneRoles(attachPaneEngines(sessions, captures));
+  const enriched = attachFlow(attachPaneRoles(attachPaneEngines(sessions, captures)), flowOf);
   return { ...inventory, sessions: attachUsageLimit(attachAttention(enriched, captures, Date.now(), attentionTracker), captures) };
 }

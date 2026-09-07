@@ -313,6 +313,9 @@ textarea.input { min-height: 90px; resize: vertical; }
 :root {
   --status-ok: oklch(0.74 0.125 152);
   --status-ok-dim: oklch(0.58 0.1 152);
+  /* En curso. Mismos lightness y chroma que --status-ok: sólo gira el tono, que es como
+     está construida esta rampa. Lo estrena el riel de etapas del inspector. */
+  --status-run: oklch(0.74 0.125 250);
   --status-warn: oklch(0.78 0.125 78);
   --status-warn-tint: oklch(0.27 0.05 78);
   --status-fail: oklch(0.69 0.15 25);

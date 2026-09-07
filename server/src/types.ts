@@ -182,6 +182,26 @@ export interface SessionUsageLimit {
   resetAt?: string;
 }
 
+/** Una etapa del flujo con su estado, tal como lo dice el cycle dir. Ver flow-progress.ts. */
+export interface FlowStageProgress {
+  key: string;
+  label: string;
+  icon?: string;
+  executor?: string;
+  status: "done" | "current" | "pending" | "failed";
+  /** Cumplida: cuándo se cerró. En curso: cuándo empezó (el cierre de la anterior). */
+  at?: number;
+  /** Intentos gastados de verifyCmd; sólo viaja con `failed`. */
+  attempts?: number;
+}
+
+export interface SessionFlow {
+  workflow?: string;
+  done: number;
+  total: number;
+  stages: FlowStageProgress[];
+}
+
 export interface TmuxSessionInfo {
   name: string;
   kind: "managed" | "foreign";
@@ -195,6 +215,8 @@ export interface TmuxSessionInfo {
   request?: string;
   attention?: SessionAttention;
   usageLimit?: SessionUsageLimit;
+  /** Avance del flujo; sólo en sesiones gestionadas con workflow. */
+  flow?: SessionFlow;
 }
 
 // ---- Preflight (F1). Espejo manual en web/src/types.ts ----
