@@ -205,7 +205,7 @@ test("attachPaneEngines: reutiliza las capturas disponibles sin inferir motores 
     ["%2", null],
   ]));
 
-  assert.deepEqual(enriched[0]!.panes[0]!.engine, { tool: "claude", model: "Opus 5 (1M context) with high effort · Claude API" });
+  assert.deepEqual(enriched[0]!.panes[0]!.engine, { tool: "claude", model: "Opus 5 (1M context) with high effort" });
   assert.equal("engine" in enriched[0]!.panes[1]!, false);
 });
 

@@ -11,7 +11,9 @@ test("detectPaneEngine: reconoce las tres capturas reales y extrae su modelo", (
   const agy = `    ▄▀▀▄        Antigravity CLI 1.1.27
   ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (High)`;
 
-  assert.deepEqual(detectPaneEngine(claude), { tool: "claude", model: "Opus 5 (1M context) with high effort · Claude API" });
+  // La captura real trae "· Claude API" detrás: es el proveedor, no el modelo, y en la
+  // lista de panes sólo roba ancho. Se recorta en el origen.
+  assert.deepEqual(detectPaneEngine(claude), { tool: "claude", model: "Opus 5 (1M context) with high effort" });
   assert.deepEqual(detectPaneEngine(codex), { tool: "codex", model: "gpt-5.6-terra high" });
   assert.deepEqual(detectPaneEngine(agy), { tool: "agy", model: "Gemini 3.8 Flash (High)" });
 });
