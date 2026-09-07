@@ -1,4 +1,4 @@
-import type { TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
+import type { EngineChoice, KnowledgeBaseGeneration, KnowledgeBaseInfo, TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
 
 /** Carries the server's {path, code} (T11/T13) so a save failure can be shown per-field, or as
  *  a clear "someone is mid-flight on this stage" message (STAGE_IN_FLIGHT, T13), not just text. */
@@ -207,6 +207,51 @@ export async function saveReposConfig(cfg: ReposConfig): Promise<ReposConfig> {
   return r.json();
 }
 
+export async function getEngine(): Promise<EngineChoice | null> {
+  const r = await fetch("/api/engine");
+  if (!r.ok) return null;
+  return ((await r.json()) as { engine?: EngineChoice }).engine ?? null;
+}
+
+export async function saveEngine(engine: EngineChoice): Promise<EngineChoice> {
+  const r = await fetch("/api/engine", {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ engine }),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.error || "no se pudo guardar el motor");
+  }
+  return ((await r.json()) as { engine: EngineChoice }).engine;
+}
+
+export async function getRepoKnowledgeBase(repo: string): Promise<KnowledgeBaseInfo | null> {
+  const r = await fetch(`/api/repos/${encodeURIComponent(repo)}/kb`);
+  return r.ok ? r.json() : null;
+}
+
+export async function zipRepoKnowledgeBase(repo: string): Promise<{ file: string; bytes: number }> {
+  const r = await fetch(`/api/repos/${encodeURIComponent(repo)}/kb/zip`, { method: "POST" });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.error || "no se pudo compartir la knowledge base");
+  }
+  return r.json();
+}
+
+export async function generateRepoKnowledgeBase(repo: string): Promise<KnowledgeBaseGeneration | null> {
+  const r = await fetch(`/api/repos/${encodeURIComponent(repo)}/kb/generate`, { method: "POST" });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.error || "no se pudo crear la knowledge base");
+  }
+  return r.json();
+}
+
+export async function getRepoKnowledgeBaseGeneration(repo: string): Promise<KnowledgeBaseGeneration | null> {
+  const r = await fetch(`/api/repos/${encodeURIComponent(repo)}/kb/generation`);
+  return r.ok ? r.json() : null;
+}
+
 export async function getTrustedRoots(): Promise<TrustedRoots> {
   const r = await fetch("/api/trusted-roots");
   if (!r.ok) throw new Error("no se pudieron leer las raíces de confianza");
@@ -233,9 +278,12 @@ export async function saveRepoConfig2(
     workflow: WorkflowConfig | null;
     vars: Record<string, string>;
     startCommand: string;
+    setupCommand?: string;
+    kbPath?: string;
     plannerModel: string;
     workerModel: string;
     inheritWorkflow: boolean;
+    skills?: SkillRef[];
   }
 ): Promise<RepoOverrideConfig> {
   const r = await fetch(`/api/repo-config/${encodeURIComponent(repo)}`, {
@@ -248,6 +296,21 @@ export async function saveRepoConfig2(
     throw new WorkflowSaveError(e.error || "no se pudo guardar la config del repo", e.path, e.code);
   }
   return r.json();
+}
+
+/** Guarda sólo la ruta KB, reenviando el resto del override para no borrar su configuración. */
+export async function saveRepoKnowledgeBasePath(repo: string, current: RepoOverrideConfig, kbPath: string): Promise<RepoOverrideConfig> {
+  return saveRepoConfig2(repo, {
+    workflow: current.workflow,
+    vars: current.vars,
+    startCommand: current.startCommand,
+    setupCommand: current.setupCommand,
+    kbPath,
+    plannerModel: current.plannerModel,
+    workerModel: current.workerModel,
+    inheritWorkflow: current.usesDefaultWorkflow,
+    skills: current.skills,
+  });
 }
 
 export async function generateReport(kind: "daily" | "weekly", date?: string): Promise<{ name: string; markdown: string }> {

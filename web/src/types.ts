@@ -87,10 +87,35 @@ export interface RepoOverrideConfig {
   workflow: WorkflowConfig | null;   // null = hereda el default global
   vars: Record<string, string>;
   startCommand: string;              // "" = usa CLAUDE_CMD
+  setupCommand: string;              // "" = no provisiona worktrees
+  kbPath: string;                    // "" = detecta convenciones conocidas
   plannerModel: string;              // "" = hereda COWORK_PLANNER_MODEL
   workerModel: string;               // "" = hereda COWORK_WORKER_MODEL
   usesDefaultWorkflow: boolean;
   skills: SkillRef[];
+}
+
+export type EngineTool = "claude" | "codex" | "agy";
+export interface EngineChoice {
+  tool: EngineTool;
+  model?: string;
+}
+
+export interface KnowledgeBaseInfo {
+  exists: boolean;
+  /** Ruta relativa elegida o detectada; vacía cuando no hay KB. */
+  relativePath: string;
+  files: number;
+  bytes: number;
+  candidates: string[];
+}
+
+export interface KnowledgeBaseGeneration {
+  status: "running" | "ok" | "failed";
+  startedAt?: number;
+  finishedAt?: number;
+  output?: string;
+  error?: string;
 }
 
 export type SkillRoot = "global" | "repo-claude" | "repo-skills";
