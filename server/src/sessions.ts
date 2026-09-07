@@ -185,6 +185,25 @@ export function attachPaneEngines(sessions: TmuxSessionInfo[], captures: Map<str
   }));
 }
 
+/**
+ * Deduce el rol de cada pane de una sesión GESTIONADA a partir de su estructura.
+ *
+ * `@cowork-role` sólo lo escribe el arreglo de 4 panes (driver/worker/review/verify) y manda
+ * cuando está; pero las sesiones de workflow no lo usan y en vivo llegaban todas sin rol. Lo
+ * que la estructura sí garantiza: la ventana 0 es el pane que Ronin creó y que conduce el
+ * flujo, y cualquier ventana posterior la abrió ese conductor para delegar una etapa a otro
+ * motor. Eso es deducción, no adivinanza — y por lo mismo no se aplica a sesiones ajenas,
+ * donde una segunda ventana es simplemente del usuario.
+ */
+export function attachPaneRoles(sessions: TmuxSessionInfo[]): TmuxSessionInfo[] {
+  return sessions.map((session) => session.kind !== "managed" ? session : {
+    ...session,
+    panes: session.panes.map((pane) => pane.role
+      ? pane
+      : { ...pane, role: pane.windowIndex === 0 ? "conductor" : "ejecutor" }),
+  });
+}
+
 /** `reached` wins; equal states preserve tmux pane order for a stable, explainable rollup. */
 export function rollupUsageLimit(panes: Map<string, string | null>): SessionUsageLimit | null {
   let winner: SessionUsageLimit | null = null;
@@ -268,6 +287,6 @@ export async function readTmuxInventory(): Promise<TmuxInventoryResult> {
   const inventory = inventoryFromRaw(sessionsResult, panesResult, (name) => existsSync(cycleDirForSession(name)));
   const sessions = withLaunchRequests(inventory.sessions, requestFromLaunch);
   const captures = await capturePanesTail(sessions.flatMap((session) => session.panes.map((pane) => pane.id)));
-  const enriched = attachPaneEngines(sessions, captures);
+  const enriched = attachPaneRoles(attachPaneEngines(sessions, captures));
   return { ...inventory, sessions: attachUsageLimit(attachAttention(enriched, captures, Date.now(), attentionTracker), captures) };
 }

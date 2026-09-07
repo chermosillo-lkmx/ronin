@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { attachAttention, attachPaneEngines, attachUsageLimit, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
+import { attachAttention, attachPaneEngines, attachPaneRoles, attachUsageLimit, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
 import { AttentionTracker } from "./attention-tracker.js";
 
 // Salidas de `tmux list-sessions -F` y `tmux list-panes -a -F` con los formatos de sessions.ts.
@@ -317,4 +317,39 @@ test("attachUsageLimit: sin avisos no añade el campo al inventario", () => {
   ]);
   const attached = attachUsageLimit(sessions, captures);
   assert.equal("usageLimit" in attached.find((session) => session.name === "cowork-CU-42-driver")!, false);
+});
+
+/**
+ * `@cowork-role` sólo se escribe en el arreglo de 4 panes (driver/worker/review/verify), que
+ * las sesiones de workflow no usan: medido en vivo, los 8 panes del operador lo tenían vacío.
+ * El rol restante SÍ es deducible sin adivinar, porque la estructura lo dice: la ventana 0 es
+ * el pane que crea Ronin y conduce el flujo; las ventanas siguientes las abre ese conductor
+ * para delegar una etapa (así aparecen `IMPL-codex`, `codex-impl`).
+ */
+test("attachPaneRoles: la ventana 0 conduce y las demás ejecutan", () => {
+  const sessions = buildInventory("cowork-x\t2\t1753747200\t0", [
+    "cowork-x\t0\t%1\tzsh\t\t\t1",
+    "cowork-x\t1\t%2\tnode\t\t\t0",
+  ].join("\n"), () => true);
+
+  const conRoles = attachPaneRoles(sessions);
+  assert.equal(conRoles[0]!.panes[0]!.role, "conductor");
+  assert.equal(conRoles[0]!.panes[1]!.role, "ejecutor");
+});
+
+test("attachPaneRoles: un @cowork-role explícito manda sobre la deducción", () => {
+  const sessions = buildInventory("cowork-x\t1\t1753747200\t0",
+    "cowork-x\t0\t%1\tzsh\t\tverify\t1", () => true);
+  assert.equal(attachPaneRoles(sessions)[0]!.panes[0]!.role, "verify");
+});
+
+test("attachPaneRoles: una sesión ajena no recibe roles inventados", () => {
+  // Sin cycle dir no es de Ronin: su ventana 1 puede ser cualquier cosa del usuario.
+  const sessions = buildInventory("dev-scratch\t2\t1753747200\t0", [
+    "dev-scratch\t0\t%1\tzsh\t\t\t1",
+    "dev-scratch\t1\t%2\tvim\t\t\t0",
+  ].join("\n"), () => false);
+  const roles = attachPaneRoles(sessions);
+  assert.equal(roles[0]!.panes[0]!.role, null);
+  assert.equal(roles[0]!.panes[1]!.role, null);
 });
