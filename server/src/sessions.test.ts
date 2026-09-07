@@ -367,7 +367,7 @@ test("attachFlow: sólo las sesiones gestionadas reciben el avance del flujo", (
     { key: "a", label: "A", status: "done" as const },
     { key: "b", label: "B", status: "current" as const },
   ] };
-  const conFlujo = attachFlow(sessions, () => flujo);
+  const conFlujo = attachFlow(sessions, () => ({ flow: flujo, unrecorded: false }));
 
   assert.equal(conFlujo.find((s) => s.name === "cowork-x")!.flow, flujo);
   assert.equal("flow" in conFlujo.find((s) => s.name === "dev-scratch")!, false);
@@ -375,5 +375,12 @@ test("attachFlow: sólo las sesiones gestionadas reciben el avance del flujo", (
 
 test("attachFlow: una gestionada sin workflow (terminal normal) no gana la clave", () => {
   const sessions = buildInventory("cowork-x\t1\t1753747200\t0", "cowork-x\t0\t%1\tzsh\t\t\t1", () => true);
-  assert.equal("flow" in attachFlow(sessions, () => null)[0]!, false);
+  assert.equal("flow" in attachFlow(sessions, () => ({ flow: null, unrecorded: false }))[0]!, false);
+});
+
+test("attachFlow: una gestionada sin nada anotado se marca para poder adoptarla", () => {
+  const sessions = buildInventory("cowork-x\t1\t1753747200\t0", "cowork-x\t0\t%1\tzsh\t\t\t1", () => true);
+  const marcada = attachFlow(sessions, () => ({ flow: null, unrecorded: true }))[0]!;
+  assert.equal(marcada.unrecorded, true);
+  assert.equal("flow" in marcada, false);
 });

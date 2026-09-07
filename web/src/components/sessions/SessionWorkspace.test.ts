@@ -84,3 +84,26 @@ test("SessionInspector: un diagnóstico de tmux manda sobre el flujo", () => {
   }));
   assert.doesNotMatch(html, /ron-flow/);
 });
+
+test("SessionWorkspace: una gestionada sin nada anotado ofrece adoptarla", () => {
+  // Es gestionada sólo porque su cycle dir existe. Sin este botón no hay forma de darle un flujo.
+  const session: TmuxSessionInfo = { ...sessionFixture(), unrecorded: true };
+  const html = renderToString(createElement(SessionWorkspace, {
+    session, diagnostic: null, terminalUrl: null, onRefresh: async () => {}, onNew: () => {},
+  }));
+  assert.match(html, /Adoptar/);
+});
+
+test("SessionWorkspace: una gestionada normal sigue sin ofrecer adopción", () => {
+  const html = renderToString(createElement(SessionWorkspace, {
+    session: sessionFixture(), diagnostic: null, terminalUrl: null, onRefresh: async () => {}, onNew: () => {},
+  }));
+  assert.doesNotMatch(html, /Adoptar/);
+});
+
+test("SessionInspector: la sesión sin registrar dice por qué no tiene etapas", () => {
+  const html = renderToString(createElement(SessionInspector, {
+    session: { ...sessionFixture(), unrecorded: true }, diagnostic: null,
+  }));
+  assert.match(html, /Sin flujo registrado/);
+});

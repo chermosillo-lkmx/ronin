@@ -191,6 +191,8 @@ export interface TmuxSessionInfo {
   attention?: SessionAttention;
   usageLimit?: SessionUsageLimit;
   flow?: SessionFlow;
+  /** Gestionada pero sin nada anotado en su cycle dir: adoptarla es lo que le da un flujo. */
+  unrecorded?: boolean;
 }
 
 // Espejo de server/src/types.ts. Lo calcula flow-progress.ts leyendo el cycle dir.

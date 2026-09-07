@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { readFlow, readVerifyState } from "./stages.js";
 import type { SessionFlow, FlowStageProgress } from "./types.js";
@@ -82,4 +82,25 @@ function workflowName(cycle: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Lo que el cycle dir tiene REGISTRADO sobre una sesión: su avance, y si no hay nada anotado.
+ *
+ * `unrecorded` distingue dos ausencias que se ven igual desde fuera pero no lo son: una terminal
+ * normal (launch.json con mode=terminal) NO tiene etapas por diseño, mientras que un dir vacío es
+ * un lanzamiento que se cortó entre ensureCycleDir y writeFlow. La sesión sigue contando como
+ * gestionada porque el dir existe, y sin esta marca la UI le esconde «Adoptar» — que es lo único
+ * que le escribiría un flujo. Un dir inexistente no se marca: esa sesión ni siquiera es gestionada.
+ */
+export interface CycleRecord {
+  flow: SessionFlow | null;
+  unrecorded: boolean;
+}
+
+export function readCycleRecord(cycle: string): CycleRecord {
+  const flow = readFlowProgress(cycle);
+  if (flow) return { flow, unrecorded: false };
+  const anotado = existsSync(join(cycle, "flow.json")) || existsSync(join(cycle, "launch.json"));
+  return { flow: null, unrecorded: existsSync(cycle) && !anotado };
 }

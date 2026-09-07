@@ -217,6 +217,8 @@ export interface TmuxSessionInfo {
   usageLimit?: SessionUsageLimit;
   /** Avance del flujo; sólo en sesiones gestionadas con workflow. */
   flow?: SessionFlow;
+  /** Gestionada pero sin nada anotado en su cycle dir: adoptarla es lo que le da un flujo. */
+  unrecorded?: boolean;
 }
 
 // ---- Preflight (F1). Espejo manual en web/src/types.ts ----

@@ -13,8 +13,8 @@ import {
 import { rollupAttention } from "./attention.js";
 import { AttentionTracker } from "./attention-tracker.js";
 import { detectPaneEngine } from "./engine-detect.js";
-import { readFlowProgress } from "./flow-progress.js";
-import type { SessionFlow, SessionUsageLimit, TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
+import { readCycleRecord, type CycleRecord } from "./flow-progress.js";
+import type { SessionUsageLimit, TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
 
 const attentionTracker = new AttentionTracker();
 
@@ -206,18 +206,22 @@ export function attachPaneRoles(sessions: TmuxSessionInfo[]): TmuxSessionInfo[] 
 }
 
 /**
- * Cuelga el avance del flujo de cada sesión GESTIONADA. `read` se inyecta para que la prueba no
- * necesite un cycle dir de verdad; en producción es readFlowProgress sobre el dir de la sesión.
- * Una gestionada sin workflow (una terminal normal) no gana la clave: no hay flujo que enseñar.
+ * Cuelga de cada sesión GESTIONADA lo que su cycle dir tiene registrado. `read` se inyecta para
+ * que la prueba no necesite un cycle dir de verdad; en producción es readCycleRecord.
+ *
+ * Dos ausencias distintas: una terminal normal no gana ninguna clave (no hay flujo que enseñar,
+ * y es correcto), mientras que una sin nada anotado se marca `unrecorded` para que la UI le
+ * ofrezca adoptarla en vez de dejarla en un callejón sin salida.
  */
 export function attachFlow(
   sessions: TmuxSessionInfo[],
-  read: (name: string) => SessionFlow | null,
+  read: (name: string) => CycleRecord,
 ): TmuxSessionInfo[] {
   return sessions.map((session) => {
     if (session.kind !== "managed") return session;
-    const flow = read(session.name);
-    return flow ? { ...session, flow } : session;
+    const { flow, unrecorded } = read(session.name);
+    if (flow) return { ...session, flow };
+    return unrecorded ? { ...session, unrecorded: true } : session;
   });
 }
 
@@ -256,9 +260,9 @@ function requestFromLaunch(name: string): string | undefined {
   return typeof request === "string" && request.trim() ? request : undefined;
 }
 
-/** Avance del flujo de una sesión gestionada, leído de su cycle dir. Nunca lanza. */
-function flowOf(name: string): SessionFlow | null {
-  return readFlowProgress(cycleDirForSession(name));
+/** Lo registrado en el cycle dir de una sesión gestionada. Nunca lanza. */
+function flowOf(name: string): CycleRecord {
+  return readCycleRecord(cycleDirForSession(name));
 }
 
 /** Result returned by the tmux inventory endpoint.

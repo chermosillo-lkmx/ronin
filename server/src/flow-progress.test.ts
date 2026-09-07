@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readFlowProgress } from "./flow-progress.js";
+import { readCycleRecord, readFlowProgress } from "./flow-progress.js";
 import type { WorkflowConfig } from "./workflow.js";
 
 const FLUJO: WorkflowConfig = {
@@ -145,4 +145,51 @@ test("readFlowProgress: toma el nombre del workflow del registro de lanzamiento"
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/**
+ * Un cycle dir VACÍO existe de verdad: se vieron tres en la máquina del operador. Sólo puede
+ * aparecer si el lanzamiento se cortó entre ensureCycleDir y writeFlow (session-launch.ts:179 y
+ * 181). La sesión cuenta como gestionada porque el dir existe, pero Ronin no sabe qué corre, y
+ * sin esta señal la UI le esconde «Adoptar» — la única acción que le escribiría un flujo.
+ */
+test("readCycleRecord: un ciclo vacío queda marcado como no registrado", () => {
+  const dir = mkdtempSync(join(tmpdir(), "flow-progress-"));
+  try {
+    const rec = readCycleRecord(dir);
+    assert.equal(rec.flow, null);
+    assert.equal(rec.unrecorded, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readCycleRecord: una terminal normal NO está sin registrar, sólo no tiene flujo", () => {
+  const dir = mkdtempSync(join(tmpdir(), "flow-progress-"));
+  try {
+    writeFileSync(join(dir, "launch.json"), JSON.stringify({ mode: "terminal" }));
+    const rec = readCycleRecord(dir);
+    assert.equal(rec.flow, null);
+    assert.equal(rec.unrecorded, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readCycleRecord: una sesión con flujo trae su avance y no está sin registrar", () => {
+  const dir = cicloTemporal();
+  try {
+    centinela(dir, "planning", 1_700_000_000_000);
+    const rec = readCycleRecord(dir);
+    assert.equal(rec.flow?.done, 1);
+    assert.equal(rec.unrecorded, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readCycleRecord: un ciclo inexistente no se anuncia como sin registrar", () => {
+  // Sin dir la sesión ni siquiera es gestionada: ofrecer adoptarla sería ruido.
+  const rec = readCycleRecord(join(tmpdir(), "no-existe-jamas-cycle-record"));
+  assert.equal(rec.unrecorded, false);
 });
