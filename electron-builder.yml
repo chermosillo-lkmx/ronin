@@ -13,6 +13,7 @@ files:
   - server/data/jira-seed.json
   - server/data/prompts.json
   - server/data/workflow.json
+  - server/data/workflows.json
   - package.json
 asar: true
 asarUnpack:
