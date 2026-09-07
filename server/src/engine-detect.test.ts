@@ -25,3 +25,30 @@ test("detectPaneEngine: un shell normal no tiene motor", () => {
 test("detectPaneEngine: conserva la herramienta sin inventar un modelo", () => {
   assert.deepEqual(detectPaneEngine("│ OpenAI Codex (v0.153.1) │"), { tool: "codex" });
 });
+
+/**
+ * El banner de arranque sólo está visible en un pane RECIÉN abierto: en una sesión que lleva
+ * horas trabajando ya se fue del scroll, y `capture-pane` sólo devuelve lo visible. Medido en
+ * vivo sobre las sesiones del operador: NINGÚN pane en marcha se detectaba con las marcas de
+ * cabecera. Estas son las capturas reales de sus pies de página.
+ */
+const CLAUDE_TRABAJANDO = `❯
+────────────────────────────────────────────────────────
+  cowork-86e35cke1-remap_sat_codes  ⎇ ronin/cowork-86e35cke1  ▓░░░░ 32%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents`;
+
+const CODEX_TRABAJANDO = `• Implemented, reviewed, KB updated, and verified.
+─ Worked for 13m 27s ────────────────────────────────────
+› Implement {feature}
+  gpt-5.6-terra high · /private/tmp/wt-api · Context 73% left · Context 27% used · weekly 93% left`;
+
+test("detectPaneEngine reconoce un pane EN MARCHA por su pie, no sólo por el banner", () => {
+  assert.deepEqual(detectPaneEngine(CLAUDE_TRABAJANDO), { tool: "claude" });
+  assert.deepEqual(detectPaneEngine(CODEX_TRABAJANDO), { tool: "codex", model: "gpt-5.6-terra high" });
+});
+
+test("un pane de claude en marcha da la herramienta SIN modelo inventado", () => {
+  const detectado = detectPaneEngine(CLAUDE_TRABAJANDO);
+  assert.equal(detectado?.tool, "claude");
+  assert.equal(detectado?.model, undefined); // su pie no lo dice; adivinarlo sería peor que omitirlo
+});

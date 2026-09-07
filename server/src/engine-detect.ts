@@ -30,8 +30,22 @@ export function detectPaneEngine(pane: string): PaneEngine | null {
     const model = nextModel(lines, agyIndex, /^Gemini\b/i);
     return model ? { tool: "agy", model } : { tool: "agy" };
   }
+  // Sin banner: el pane lleva rato trabajando y su cabecera ya salió del scroll. `capture-pane`
+  // sólo devuelve lo VISIBLE, así que la segunda señal es el pie, que sí permanece.
+  // Medido en vivo sobre sesiones reales: ningún pane en marcha se detectaba sólo por el banner.
+  if (lines.some((line) => CLAUDE_FOOTER.test(line))) return { tool: "claude" };
+
+  const codexFooter = lines.map((line) => line.match(CODEX_FOOTER)).find(Boolean);
+  // El pie de codex empieza por el modelo: "gpt-5.6-terra high · <ruta> · Context 73% left".
+  if (codexFooter) return { tool: "codex", model: codexFooter[1]!.trim() };
+
   return null;
 }
+
+/** `⏵⏵ bypass permissions on (shift+tab to cycle)` / `⏵⏵ auto mode on (…)` — el pie de Claude Code. */
+const CLAUDE_FOOTER = /⏵⏵\s+\S.*\(shift\+tab to cycle\)/;
+/** El pie de Codex: modelo, ruta y el medidor de contexto separados por " · ". */
+const CODEX_FOOTER = /^\s*(\S[^·]*?)\s+·\s+\S+\s+·\s+Context\s+\d+%\s+left/;
 
 function nextModel(lines: string[], markerIndex: number, knownModel: RegExp): string | undefined {
   for (const line of lines.slice(markerIndex + 1)) {
