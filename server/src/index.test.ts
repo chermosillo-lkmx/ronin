@@ -3,7 +3,9 @@ import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 import { execFile } from "node:child_process";
-import { existsSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { CAPABILITY_FILE, ensureCapabilityToken, readCapabilityToken } from "./capability.js";
 import { createApp, runConfiguredClaude, startServer } from "./index.js";
@@ -307,6 +309,57 @@ test("requireCapability: con la cabecera correcta, la petición LLEGA al handler
     body: {},
   });
   assert.notEqual(response.status, 401);
+});
+
+test("GET /api/repos/:repo/kb y POST /api/repos/:repo/kb/zip exigen capability y describen la KB", async () => {
+  const token = ensureCapabilityToken();
+  const root = mkdtempSync(join(tmpdir(), "ronin-api-kb-"));
+  const out = mkdtempSync(join(tmpdir(), "ronin-api-kb-out-"));
+  try {
+    mkdirSync(join(root, "kb"));
+    writeFileSync(join(root, "kb", "nota.md"), "contexto");
+    const app = createApp({ kb: {
+      listRepos: () => ["api"],
+      resolveCwd: () => ({ cwd: root, real: true }),
+      readRepoConfigFull: () => ({ kbPath: "" }),
+      downloadsDirectory: () => out,
+      temporaryDirectory: () => out,
+      now: () => new Date("2026-09-07T12:00:00Z"),
+    } });
+    const deniedGet = await invokeRequest(app, "GET", "/api/repos/api/kb");
+    assert.equal(deniedGet.status, 401);
+    const described = await invokeRequest(app, "GET", "/api/repos/api/kb", { headers: { "x-ronin-capability": token } });
+    assert.equal(described.status, 200);
+    assert.equal((described.body as any).exists, true);
+    assert.equal((described.body as any).relativePath, "kb");
+    const deniedZip = await invokeRequest(app, "POST", "/api/repos/api/kb/zip");
+    assert.equal(deniedZip.status, 401);
+    const zipped = await invokeRequest(app, "POST", "/api/repos/api/kb/zip", { headers: { "x-ronin-capability": token } });
+    assert.equal(zipped.status, 200);
+    assert.equal(existsSync((zipped.body as any).file), true);
+    assert.ok((zipped.body as any).bytes > 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("POST /api/repos/:repo/kb/zip devuelve 404 legible cuando el repo no tiene KB", async () => {
+  const token = ensureCapabilityToken();
+  const root = mkdtempSync(join(tmpdir(), "ronin-api-kb-vacia-"));
+  try {
+    const app = createApp({ kb: {
+      listRepos: () => ["vacia"],
+      resolveCwd: () => ({ cwd: root, real: true }),
+      readRepoConfigFull: () => ({ kbPath: "" }),
+    } });
+    const response = await invokeRequest(app, "POST", "/api/repos/vacia/kb/zip", { headers: { "x-ronin-capability": token } });
+    assert.equal(response.status, 404);
+    assert.match((response.body as any).error, /no tiene una base de conocimiento/i);
+    assert.equal((response.body as any).code, "KB_NOT_FOUND");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("requireCapability: si el token aún no existe en disco, una mutación responde 503 CAPABILITY_UNAVAILABLE — fail-closed, nunca 200", async () => {

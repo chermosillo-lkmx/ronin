@@ -29,7 +29,9 @@ const COMMENT =
   "startCommand (opcional; si falta → CLAUDE_CMD), setupCommand (opcional; comando shell que arma el " +
   "entorno de dependencias de cada worktree nuevo: sin él, la copia de la sesión no puede correr sus " +
   "propias pruebas) y plannerModel/workerModel (opcional; si faltan → " +
-  "COWORK_PLANNER_MODEL/COWORK_WORKER_MODEL). Las etapas del workflow aquí PUEDEN llevar verifyCmd " +
+  "COWORK_PLANNER_MODEL/COWORK_WORKER_MODEL), kbPath (opcional; ruta de la base de conocimiento; " +
+  "sin él se detectan convenciones locales) y " +
+  "las etapas del workflow aquí PUEDEN llevar verifyCmd " +
   "(comando shell que ejecuta el gate por-stage) — sólo se honra aquí (gitignored, mismo trust boundary " +
   "que startCommand/vars); en el workflow global (git-tracked) se ignora. Editable desde ⚙ Configuración → Workflows o a mano.";
 
@@ -38,6 +40,7 @@ interface RepoEntry {
   vars?: Record<string, string>;
   startCommand?: string;
   setupCommand?: string;  // arma el entorno de un worktree nuevo; absent → no se provisiona
+  kbPath?: string; // ruta de la base de conocimiento; absent → detectar convenciones conocidas
   plannerModel?: string; // sanitized model alias/id; absent → inherit PLANNER_MODEL
   workerModel?: string;  // sanitized model alias/id; absent → inherit WORKER_MODEL
   skills?: SkillRef[];
@@ -99,6 +102,7 @@ export function sanitizeEntry(raw: any): RepoEntry {
   if (raw?.vars !== undefined) e.vars = sanitizeVars(raw.vars);
   if (typeof raw?.startCommand === "string" && raw.startCommand.trim()) e.startCommand = raw.startCommand.trim();
   if (typeof raw?.setupCommand === "string" && raw.setupCommand.trim()) e.setupCommand = raw.setupCommand.trim();
+  if (typeof raw?.kbPath === "string" && raw.kbPath.trim()) e.kbPath = raw.kbPath.trim();
   // F5: charset defense-in-depth — a hand-edited `opus; rm -rf ~` never survives load.
   const pm = sanitizeModel(typeof raw?.plannerModel === "string" ? raw.plannerModel : "");
   const wm = sanitizeModel(typeof raw?.workerModel === "string" ? raw.workerModel : "");
@@ -167,6 +171,7 @@ export interface RepoConfigFull {
   vars: Record<string, string>;
   startCommand: string;  // RAW stored value ("" when unset), not the effective CLAUDE_CMD
   setupCommand: string;  // RAW stored value ("" = este repo no provisiona sus worktrees)
+  kbPath: string; // RAW stored value ("" = detectar candidatos)
   plannerModel: string;  // RAW stored value ("" = inherit PLANNER_MODEL)
   workerModel: string;   // RAW stored value ("" = inherit WORKER_MODEL)
   usesDefaultWorkflow: boolean;
@@ -180,6 +185,7 @@ export function readRepoConfigFull(repo: string): RepoConfigFull {
     vars: getRepoVars(repo),
     startCommand: entry?.startCommand ?? "", // raw: empty means "inherit CLAUDE_CMD"
     setupCommand: entry?.setupCommand ?? "",  // raw: empty means "no provisionar"
+    kbPath: entry?.kbPath ?? "", // raw: empty means "detectar candidatos"
     plannerModel: entry?.plannerModel ?? "", // raw: empty means "inherit PLANNER_MODEL"
     workerModel: entry?.workerModel ?? "",   // raw: empty means "inherit WORKER_MODEL"
     usesDefaultWorkflow: !wf,
@@ -200,6 +206,7 @@ export function saveRepoOverrides(
     vars?: unknown;
     startCommand?: unknown;
     setupCommand?: unknown;
+    kbPath?: unknown;
     plannerModel?: unknown;
     workerModel?: unknown;
     inheritWorkflow?: boolean;
@@ -217,6 +224,8 @@ export function saveRepoOverrides(
   if (sc) entry.startCommand = sc;
   const setup = typeof input.setupCommand === "string" ? input.setupCommand.trim() : "";
   if (setup) entry.setupCommand = setup;
+  const kbPath = typeof input.kbPath === "string" ? input.kbPath.trim() : "";
+  if (kbPath) entry.kbPath = kbPath;
   // F5: model overrides pass through the same charset sanitizer as load.
   const pm = sanitizeModel(typeof input.plannerModel === "string" ? input.plannerModel : "");
   const wm = sanitizeModel(typeof input.workerModel === "string" ? input.workerModel : "");
@@ -234,6 +243,7 @@ export function saveRepoOverrides(
     Object.keys(entry.vars).length === 0 &&
     !entry.startCommand &&
     !entry.setupCommand &&
+    !entry.kbPath &&
     !entry.plannerModel &&
     !entry.workerModel
     && entry.skills.length === 0

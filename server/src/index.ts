@@ -1,8 +1,10 @@
 import cors from "cors";
 import express from "express";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { PORT, REPORT_SCHEDULE, VERIFY_GATE } from "./config.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
 import { AdoptCommitError, AdoptValidationError, type AdoptErrorCode } from "./adopt.js";
@@ -34,12 +36,12 @@ import { startTtyd } from "./ttyd.js";
 import { getWorkflow, saveWorkflow, validateStages, WorkflowValidationError, type WorkflowConfig } from "./workflow.js";
 import { createWorkflowCatalogItem, deleteWorkflowCatalogItem, importWorkflowCatalogItem, loadWorkflowCatalog, updateWorkflowCatalogItem } from "./workflow-catalog.js";
 import { readPromptConfig, resetPromptTemplate, savePromptTemplate } from "./prompts.js";
-import { listRepos, readRepoConfig, saveRepoConfig } from "./repos.js";
+import { listRepos, readRepoConfig, resolveCwd, saveRepoConfig } from "./repos.js";
 import { readRepoConfigFull, saveRepoOverrides } from "./repo-config.js";
 import { readEngine, saveAllowedRoots, saveEngine } from "./settings.js";
 import { engineInvocation, type EngineChoice } from "./engine-config.js";
 import { trustedRoots } from "./repo-roots.js";
-import { ensureCapabilityToken, requireCapability } from "./capability.js";
+import { ensureCapabilityToken, readCapabilityToken, requireCapability } from "./capability.js";
 import { constantTimeEqual, corsOptions, requireLocalOrigin } from "./security.js";
 import { runPreflight } from "./preflight.js";
 import { listAllSessions, readTmuxInventory } from "./sessions.js";
@@ -57,6 +59,7 @@ import { createAnalyzer, type Analyzer } from "./workflow-insights/analyzer.js";
 import { InsightsError, parseRange, type ProposalStatus } from "./workflow-insights/model.js";
 import { collectSignals, defaultSignalDeps } from "./workflow-insights/signals.js";
 import { createProposalStore, type ProposalStore } from "./workflow-insights/store.js";
+import { scanKb, zipKb } from "./kb.js";
 
 /** T11: an invalid workflow gets an actionable {path, code} alongside the message; any other
  *  thrown error keeps the plain {error} shape every other 400 in this file already uses. */
@@ -120,6 +123,17 @@ export interface CreateAppOptions {
   /** Seams del lanzamiento gestionado y el inventario para pruebas HTTP sin tmux. */
   launchManagedSession?: typeof launchManagedSession;
   readTmuxInventory?: typeof readTmuxInventory;
+  /** Costuras de las rutas KB para pruebas HTTP con un repositorio temporal. */
+  kb?: {
+    listRepos?: typeof listRepos;
+    resolveCwd?: typeof resolveCwd;
+    readRepoConfigFull?: (repo: string) => { kbPath: string };
+    scanKb?: typeof scanKb;
+    zipKb?: typeof zipKb;
+    downloadsDirectory?: () => string;
+    temporaryDirectory?: () => string;
+    now?: () => Date;
+  };
 }
 
 /** Construye el ejecutor de análisis conservando sus límites y tomando el motor al invocarlo. */
@@ -161,6 +175,16 @@ const trustedRootsApi = options.trustedRoots ?? {
   },
 };
 const performAdoptSession = options.adoptSession ?? adoptSession;
+const kbApi = {
+  listRepos: options.kb?.listRepos ?? listRepos,
+  resolveCwd: options.kb?.resolveCwd ?? resolveCwd,
+  readRepoConfigFull: options.kb?.readRepoConfigFull ?? readRepoConfigFull,
+  scanKb: options.kb?.scanKb ?? scanKb,
+  zipKb: options.kb?.zipKb ?? zipKb,
+  downloadsDirectory: options.kb?.downloadsDirectory ?? (() => join(homedir(), "Downloads")),
+  temporaryDirectory: options.kb?.temporaryDirectory ?? tmpdir,
+  now: options.kb?.now ?? (() => new Date()),
+};
 app.use(cors(corsOptions));
 // Los tres guards van ANTES de express.json(): no hay razón para parsear el cuerpo de una
 // petición que vamos a rechazar. Cubren TODO /api, incluidos sus OPTIONS.
@@ -193,6 +217,67 @@ app.get("/api/health", (req, res) => {
 // Repo keys the custom-request modal can target (folder is resolved server-side)
 app.get("/api/repos", (_req, res) => {
   res.json({ repos: listRepos() });
+});
+
+// La KB puede incluir documentación sensible: estas dos rutas exigen capability incluso para
+// GET, a diferencia de los GET públicos de estado. Conservan los mismos códigos que el
+// lanzamiento gestionado al validar un repo declarado y disponible en disco.
+function requireKbCapability(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  const expected = readCapabilityToken();
+  if (expected === null) {
+    res.status(503).json({ error: "capability aún no disponible", code: "CAPABILITY_UNAVAILABLE" });
+    return;
+  }
+  if (!constantTimeEqual(expected, req.get("x-ronin-capability") ?? "")) {
+    res.status(401).json({ error: "capability requerida", code: "CAPABILITY_REQUIRED" });
+    return;
+  }
+  next();
+}
+
+function kbRepoRoot(repo: string, res: express.Response): string | null {
+  if (!kbApi.listRepos().includes(repo)) {
+    res.status(404).json({ error: "el repositorio seleccionado no está configurado", code: "REPO_UNKNOWN" });
+    return null;
+  }
+  const resolved = kbApi.resolveCwd(repo);
+  if (!resolved.real) {
+    res.status(404).json({ error: "el repositorio configurado no existe en disco", code: "REPO_UNAVAILABLE" });
+    return null;
+  }
+  return resolved.cwd;
+}
+
+function existingDirectory(path: string): boolean {
+  try { return statSync(path).isDirectory(); }
+  catch { return false; }
+}
+
+app.get("/api/repos/:repo/kb", requireKbCapability, (req, res) => {
+  const root = kbRepoRoot(req.params.repo, res);
+  if (!root) return;
+  res.json(kbApi.scanKb(root, kbApi.readRepoConfigFull(req.params.repo).kbPath || null));
+});
+
+app.post("/api/repos/:repo/kb/zip", requireKbCapability, async (req, res) => {
+  const root = kbRepoRoot(req.params.repo, res);
+  if (!root) return;
+  const kb = kbApi.scanKb(root, kbApi.readRepoConfigFull(req.params.repo).kbPath || null);
+  if (!kb.path) {
+    res.status(404).json({ error: "el repositorio no tiene una base de conocimiento configurada o detectada", code: "KB_NOT_FOUND" });
+    return;
+  }
+  const downloads = kbApi.downloadsDirectory();
+  const output = existingDirectory(downloads) ? downloads : kbApi.temporaryDirectory();
+  const date = kbApi.now();
+  const repoName = req.params.repo.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "") || "repo";
+  const day = date.toISOString().slice(0, 10);
+  try {
+    const file = await kbApi.zipKb(kb.path, output, `ronin-kb-${repoName}-${day}-${date.getTime()}`);
+    res.json({ file, bytes: statSync(file).size });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
 });
 
 // Read / edit the repo→folder map (data/repos.json) from the settings UI
@@ -294,6 +379,8 @@ app.put("/api/repo-config/:repo/skills", (req, res) => {
       workflow: current.workflow ?? undefined,
       vars: current.vars,
       startCommand: current.startCommand,
+      setupCommand: current.setupCommand,
+      kbPath: current.kbPath,
       plannerModel: current.plannerModel,
       workerModel: current.workerModel,
       skills: req.body?.skills,

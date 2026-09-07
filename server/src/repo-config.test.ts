@@ -95,10 +95,14 @@ test("saveRepoOverrides: persists unique qualified SkillRef values without chang
 // ---- setupCommand: cómo se arma el entorno de dependencias de un worktree recién creado.
 // Vive en el override por-repo (gitignorado) por el mismo motivo que startCommand y verifyCmd: es shell.
 const SETUP_KEY = "ronin-scratch-setup";
+const KB_KEY = "ronin-scratch-kb";
 
 test.after(() => {
   try {
     saveRepoOverrides(SETUP_KEY, { inheritWorkflow: true, vars: {}, startCommand: "", setupCommand: "", skills: [] });
+  } catch {}
+  try {
+    saveRepoOverrides(KB_KEY, { inheritWorkflow: true, vars: {}, startCommand: "", kbPath: "", skills: [] });
   } catch {}
 });
 
@@ -118,4 +122,10 @@ test("un setupCommand en blanco no se persiste y el repo queda sin provisión", 
   saveRepoOverrides(SETUP_KEY, { inheritWorkflow: true, vars: {}, startCommand: "", setupCommand: "   ", skills: [] });
   assert.equal(getRepoSetupCommand(SETUP_KEY), null);
   assert.equal(readRepoConfigFull(SETUP_KEY).setupCommand, "");
+});
+
+test("kbPath se guarda recortado, se lee crudo y un override exclusivo no se descarta", () => {
+  const full = saveRepoOverrides(KB_KEY, { inheritWorkflow: true, vars: {}, startCommand: "", kbPath: "  contexto/documentos  ", skills: [] });
+  assert.equal(full.kbPath, "contexto/documentos");
+  assert.equal(readRepoConfigFull(KB_KEY).kbPath, "contexto/documentos");
 });
