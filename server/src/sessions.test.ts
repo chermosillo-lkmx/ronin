@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { attachAttention, attachUsageLimit, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
+import { attachAttention, attachPaneEngines, attachUsageLimit, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
 import { AttentionTracker } from "./attention-tracker.js";
 
 // Salidas de `tmux list-sessions -F` y `tmux list-panes -a -F` con los formatos de sessions.ts.
@@ -193,6 +193,20 @@ test("buildInventory: une sesiones y panes, y clasifica", () => {
   const foreign = inv.find((s) => s.name === "dev-scratch")!;
   assert.equal(foreign.kind, "foreign");
   assert.equal(foreign.panes.length, 2);
+});
+
+test("attachPaneEngines: reutiliza las capturas disponibles sin inferir motores ausentes", () => {
+  const sessions = buildInventory("s\t1\t1753747200\t0", [
+    "s\t0\t%1\tzsh\t\t\t1",
+    "s\t0\t%2\tzsh\t\t\t0",
+  ].join("\n"), () => false);
+  const enriched = attachPaneEngines(sessions, new Map([
+    ["%1", "Claude Code v2.1.263\nOpus 5 (1M context) with high effort · Claude API"],
+    ["%2", null],
+  ]));
+
+  assert.deepEqual(enriched[0]!.panes[0]!.engine, { tool: "claude", model: "Opus 5 (1M context) with high effort · Claude API" });
+  assert.equal("engine" in enriched[0]!.panes[1]!, false);
 });
 
 test("buildInventory: una sesión sin panes listados queda con array vacío, no undefined", () => {

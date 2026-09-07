@@ -146,7 +146,14 @@ export interface TmuxPaneInfo {
   command: string;
   title: string;
   role: string | null;
+  engine?: PaneEngine;
   active: boolean;
+}
+
+/** Espejo de server/src/engine-detect.ts; se deriva del contenido capturado del pane. */
+export interface PaneEngine {
+  tool: "claude" | "codex" | "agy";
+  model?: string;
 }
 
 /** Etiqueta local para operar una sesión sin alterar su identificador real en tmux. */

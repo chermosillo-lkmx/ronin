@@ -1,5 +1,6 @@
 import type { WfStage, WorkflowConfig } from "./workflow.js"; // type-only (workflow.ts sólo importa tipos de aquí → ciclo inofensivo)
 import type { PaneRole, PaneStatus } from "./tmux.js"; // type-only (tmux.ts no importa este archivo)
+import type { PaneEngine } from "./engine-detect.js";
 
 export type Source = "clickup" | "jira" | "gitlab" | "adhoc" | "pr" | "custom";
 
@@ -154,6 +155,7 @@ export interface TmuxPaneInfo {
   command: string;       // claude renombra su proceso a la versión ("2.1.220"), no a "claude"
   title: string;
   role: string | null;   // @cowork-role; null = sin rol asignado
+  engine?: PaneEngine;   // derivado de una captura disponible; ausente sin señal confiable
   active: boolean;
 }
 

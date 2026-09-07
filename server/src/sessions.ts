@@ -12,6 +12,7 @@ import {
 } from "./tmux.js";
 import { rollupAttention } from "./attention.js";
 import { AttentionTracker } from "./attention-tracker.js";
+import { detectPaneEngine } from "./engine-detect.js";
 import type { SessionUsageLimit, TmuxPaneInfo, TmuxSessionInfo } from "./types.js";
 
 const attentionTracker = new AttentionTracker();
@@ -172,6 +173,18 @@ export function attachAttention(
   });
 }
 
+/** Añade el motor sólo desde capturas ya disponibles y con una firma reconocible. */
+export function attachPaneEngines(sessions: TmuxSessionInfo[], captures: Map<string, string | null>): TmuxSessionInfo[] {
+  return sessions.map((session) => ({
+    ...session,
+    panes: session.panes.map((pane) => {
+      const capture = captures.get(pane.id);
+      const engine = typeof capture === "string" ? detectPaneEngine(capture) : null;
+      return engine ? { ...pane, engine } : pane;
+    }),
+  }));
+}
+
 /** `reached` wins; equal states preserve tmux pane order for a stable, explainable rollup. */
 export function rollupUsageLimit(panes: Map<string, string | null>): SessionUsageLimit | null {
   let winner: SessionUsageLimit | null = null;
@@ -255,5 +268,6 @@ export async function readTmuxInventory(): Promise<TmuxInventoryResult> {
   const inventory = inventoryFromRaw(sessionsResult, panesResult, (name) => existsSync(cycleDirForSession(name)));
   const sessions = withLaunchRequests(inventory.sessions, requestFromLaunch);
   const captures = await capturePanesTail(sessions.flatMap((session) => session.panes.map((pane) => pane.id)));
-  return { ...inventory, sessions: attachUsageLimit(attachAttention(sessions, captures, Date.now(), attentionTracker), captures) };
+  const enriched = attachPaneEngines(sessions, captures);
+  return { ...inventory, sessions: attachUsageLimit(attachAttention(enriched, captures, Date.now(), attentionTracker), captures) };
 }
