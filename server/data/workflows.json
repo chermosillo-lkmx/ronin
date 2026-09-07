@@ -96,16 +96,18 @@
         "stages": [
           {
             "key": "planning",
-            "label": "Plan (Claude)",
+            "label": "Plan",
             "icon": "📋",
-            "instruction": "Tú (Claude) escribes {cycle}/plan.md: contexto del ticket, causa raíz si es bug (cita archivo:línea), pasos concretos, archivos a tocar, tests a agregar/reparar y criterios de aceptación con el curl exacto que los probará en DEV. Si una premisa del ticket no se sostiene (logs/DB), dilo en el plan antes de tocar código. No implementes."
+            "instruction": "Escribes {cycle}/plan.md: contexto del ticket, causa raíz si es bug (cita archivo:línea), pasos concretos, archivos a tocar, tests a agregar/reparar y criterios de aceptación con el curl exacto que los probará en DEV. Si una premisa del ticket no se sostiene (logs/DB), dilo en el plan antes de tocar código. No implementes.",
+            "executor": "claude"
           },
           {
             "key": "implementing",
-            "label": "Impl (Codex)",
+            "label": "Impl",
             "icon": "🤖",
-            "instruction": "Delega la implementación a Codex (codex:codex-rescue) con {cycle}/plan.md como contrato: TDD (test que falla primero, fix mínimo, refactor), commits Conventional Commits. Verifica el job de codex por su status/log — 'task started' no es resultado. Si codex está limitado, impleméntalo tú y déjalo dicho en la evidencia. Revisa el diff contra la lista de archivos prometida en el plan.",
-            "role": "impl"
+            "instruction": "Usa {cycle}/plan.md como contrato: TDD (test que falla primero, fix mínimo, refactor) y RGR (Red Green Refactor), commits Conventional Commits. Si la herramienta está limitada, impleméntalo tú y déjalo dicho en la evidencia. Revisa el diff contra la lista de archivos prometida en el plan.",
+            "role": "impl",
+            "executor": "codex"
           },
           {
             "key": "tests",
