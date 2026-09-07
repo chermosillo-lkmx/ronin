@@ -13,6 +13,26 @@ export function sanitizeModel(model: string): string {
   return /^[A-Za-z0-9._-]+$/.test(m) ? m : "";
 }
 
+/** Commands and model-transport capabilities for each supported stage executor. */
+export const EXECUTORS = {
+  claude: { command: "claude", modelFlag: false },
+  codex: { command: "codex", modelFlag: true },
+  agy: { command: "agy", modelFlag: false },
+} as const;
+
+export type Executor = keyof typeof EXECUTORS;
+
+/**
+ * Launch command for a stage executor. `model` has already been sanitized by the workflow
+ * boundary; do not sanitize it again here. Claude changes models in-session via `/model`.
+ * Agy's model flag is unknown: deliberately leave its model out of the command until its CLI
+ * documents one, rather than inventing a flag.
+ */
+export function executorCommand(executor: Executor, model: string): string {
+  const config = EXECUTORS[executor];
+  return config.modelFlag && model ? `${config.command} --model ${model}` : config.command;
+}
+
 /**
  * Return `cmd` with `--model <model>` appended, unless it already carries a
  * `--model`/`--model=` flag (whole-word, quote-aware) — in which case the existing

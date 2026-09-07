@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { buildDriverPrompt } from "./templates.js";
-import { DRIVER_STAGES } from "./workflow.js";
+import { assembleSteps, buildDriverPrompt, makeFill } from "./templates.js";
+import { DRIVER_STAGES, type WfStage } from "./workflow.js";
 import type { Task } from "./types.js";
 
 const PANES = { driver: "%1", worker: "%2", review: "%3", verify: "%4" };
@@ -20,6 +20,53 @@ const TASK: Task = {
 
 const build = (tool: "codex" | "agent" = "codex", task: Task = TASK) =>
   buildDriverPrompt(task, CYCLE, PANES, tool);
+
+const stepFlow = (stage: WfStage) => ({ stages: [stage], verifyAfter: null });
+
+test("assembleSteps: una etapa sin executor conserva exactamente la línea existente", () => {
+  assert.equal(
+    assembleSteps(
+      stepFlow({ key: "planning", label: "Plan", icon: "📋", instruction: "Trabaja en {repo}." }),
+      "/tmp/cycle",
+      makeFill("/tmp/cycle", "mi-repo", {})
+    ),
+    "1. touch /tmp/cycle/planning — Trabaja en mi-repo."
+  );
+});
+
+test("assembleSteps: claude con modelo cambia el modelo dentro de la sesión", () => {
+  assert.match(
+    assembleSteps(stepFlow({ key: "plan", label: "Plan", icon: "📋", executor: "claude", model: "opus", instruction: "Planea." }), "/tmp/cycle", (s) => s),
+    /Ejecuta esta etapa tú mismo con el modelo opus \(\/model opus\)\./
+  );
+});
+
+test("assembleSteps: codex delega con --model", () => {
+  assert.match(
+    assembleSteps(stepFlow({ key: "impl", label: "Impl", icon: "⌨️", executor: "codex", model: "gpt-5.1-codex", instruction: "Implementa." }), "/tmp/cycle", (s) => s),
+    /Delega esta etapa a codex: ábrelo en una ventana tmux NUEVA de esta sesión con `codex --model gpt-5\.1-codex`/
+  );
+});
+
+test("assembleSteps: agy con modelo lo menciona sin inventar una bandera", () => {
+  const steps = assembleSteps(
+    stepFlow({ key: "review", label: "Review", icon: "🔎", executor: "agy", model: "sonnet", instruction: "Revisa." }),
+    "/tmp/cycle",
+    (s) => s
+  );
+  assert.match(steps, /con `agy` y verifica su resultado por el log — «task started» no es resultado\. Usa el modelo sonnet\./);
+  assert.equal(steps.includes("--model"), false);
+});
+
+test("assembleSteps: fill sólo procesa la instrucción del usuario", () => {
+  const steps = assembleSteps(
+    stepFlow({ key: "impl", label: "Impl", icon: "⌨️", executor: "codex", model: "gpt-5.1-codex", instruction: "Implementa en {repo}." }),
+    "/tmp/cycle",
+    makeFill("/tmp/cycle", "mi-repo", {})
+  );
+  assert.match(steps, /Implementa en mi-repo\./);
+  assert.equal(steps.includes("{repo}"), false);
+});
 
 test("buildDriverPrompt: incluye los 4 pane ids (targets fijos, no índices)", () => {
   const p = build();

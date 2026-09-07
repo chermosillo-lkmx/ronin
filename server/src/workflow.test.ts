@@ -116,6 +116,22 @@ test("validateStages: a stage with no verifyCmd is byte-identical to before (bac
   assert.deepEqual(out.stages[0], { key: "planning", label: "Plan", icon: "📋", instruction: "x" });
 });
 
+test("validateStages: conserva executor válido, descarta uno inválido y sanea model", () => {
+  const out = validateStages({
+    stages: [
+      { key: "planning", label: "Plan", icon: "📋", executor: "codex", model: "  gpt-5.1-codex  " },
+      { key: "curl", label: "Curl", icon: "🌐", executor: "basura", model: "opus; rm -rf /" },
+      { key: "done", label: "Done", icon: "✓" },
+    ],
+    verifyAfter: null,
+  });
+  assert.equal(out.stages[0].executor, "codex");
+  assert.equal(out.stages[0].model, "gpt-5.1-codex");
+  assert.equal(out.stages[1].executor, undefined);
+  assert.equal(out.stages[1].model, undefined);
+  assert.deepEqual(out.stages[2], { key: "done", label: "Done", icon: "✓", instruction: "" });
+});
+
 const GATED: WfStage[] = [
   { key: "planning", label: "Plan", icon: "📋" },
   { key: "implementing", label: "Impl", icon: "⌨️", role: "impl" },

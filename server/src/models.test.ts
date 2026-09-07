@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   currentModelFromPane,
+  executorCommand,
   isModelPickerOpen,
   launchSwitchEnabled,
   modelFamily,
@@ -76,6 +77,12 @@ test("sanitizeModel: rejects shell/flag/newline injection to empty string", () =
   assert.equal(sanitizeModel("$(whoami)"), "");
   assert.equal(sanitizeModel(""), "");
   assert.equal(sanitizeModel("  "), "");
+});
+
+test("executorCommand: construye los comandos de los tres ejecutores", () => {
+  assert.equal(executorCommand("claude", "opus"), "claude");
+  assert.equal(executorCommand("codex", "gpt-5.1-codex"), "codex --model gpt-5.1-codex");
+  assert.equal(executorCommand("agy", "sonnet"), "agy");
 });
 
 test("withModel: appends --model when absent", () => {

@@ -1,7 +1,7 @@
 import type { CustomAction, DriverPanes, Task } from "./types.js";
 import { getPromptTemplate, renderPrompt } from "./prompts.js";
 import { DRIVER_FLOW, resolveFlow, type WfStage } from "./workflow.js";
-import { reviewToolCmd } from "./models.js";
+import { executorCommand, reviewToolCmd } from "./models.js";
 import { PLANNER_MODEL, WORKER_MODEL } from "./config.js";
 
 /**
@@ -39,8 +39,23 @@ export function assembleSteps(
   fill: (s: string) => string
 ): string {
   return flow.stages
-    .map((s, i) => `${i + 1}. touch ${cycleDir}/${s.key} — ${fill(s.instruction ?? `etapa ${s.label}.`)}`)
+    .map((s, i) => {
+      const instruction = fill(s.instruction ?? `etapa ${s.label}.`);
+      const directive = executorDirective(s);
+      return `${i + 1}. touch ${cycleDir}/${s.key} — ${directive ? `${directive} ${instruction}` : instruction}`;
+    })
     .join("\n");
+}
+
+/** Generated executor text is deliberately separate from fill(): only user instructions expand placeholders. */
+function executorDirective(stage: WfStage): string {
+  if (!stage.executor || (stage.executor === "claude" && !stage.model)) return "";
+  if (stage.executor === "claude") {
+    return `Ejecuta esta etapa tú mismo con el modelo ${stage.model} (/model ${stage.model}).`;
+  }
+  const command = executorCommand(stage.executor, stage.model ?? "");
+  const agyModelNote = stage.executor === "agy" && stage.model ? ` Usa el modelo ${stage.model}.` : "";
+  return `Delega esta etapa a ${stage.executor}: ábrelo en una ventana tmux NUEVA de esta sesión con \`${command}\` y verifica su resultado por el log — «task started» no es resultado.${agyModelNote}`;
 }
 
 export interface WorkflowPromptValuesInput {

@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./data-dir.js";
 import { getRepoWorkflow } from "./repo-config.js";
+import { sanitizeModel } from "./models.js";
 import type { TaskStatus, WorkerState } from "./types.js";
 
 /**
@@ -30,6 +31,8 @@ export interface WfStage {
   icon: string;         // stepper icon
   instruction?: string; // what to ask the worker to do at this stage
   role?: "impl";        // F0: marks the implementation stage → drives the plan→impl /model switch
+  executor?: "claude" | "codex" | "agy"; // tool that executes this stage; absent inherits the flow's current worker
+  model?: string;        // optional executor-specific model, sanitized on input
   verifyCmd?: string;   // P2: shell cmd (exit 0 = pass) gating advancement past this stage. ONLY honored
                         // from the gitignored per-repo override (stripped everywhere git-tracked — RCE guard).
   maxRetries?: number;  // P2: max verify attempts before the stage is marked failed (default 2).
@@ -248,12 +251,16 @@ export function validateStages(input: Partial<WorkflowConfig>, options: Validate
       const maxRetries = verifyCmd
         ? Number.isFinite(s?.maxRetries) ? Math.min(Math.max(0, Math.floor(s!.maxRetries as number)), 10) : 2
         : undefined;
+      const executor = s?.executor === "claude" || s?.executor === "codex" || s?.executor === "agy" ? s.executor : undefined;
+      const model = sanitizeModel(typeof s?.model === "string" ? s.model : "");
       return {
         key: slug(s?.key ?? ""),
         label: String(s?.label ?? "").trim() || (s?.key ?? "stage"),
         icon: String(s?.icon ?? "").trim() || "•",
         instruction: typeof s?.instruction === "string" ? s.instruction : "",
         ...(s?.role === "impl" ? { role: "impl" as const } : {}),
+        ...(executor ? { executor } : {}),
+        ...(model ? { model } : {}),
         ...(verifyCmd ? { verifyCmd } : {}),
         ...(maxRetries !== undefined ? { maxRetries } : {}),
       };
