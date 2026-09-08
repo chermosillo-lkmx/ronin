@@ -664,6 +664,25 @@ test("POST /api/sessions sólo reenvía inputs que sean un objeto plano de strin
   assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-inputs-http", mode: undefined, agent: undefined, request: undefined, inputs: { ticket: "CU-42" } }]);
 });
 
+test("POST /api/sessions propaga la causa real de un fallo de launch no tipado", async () => {
+  const token = ensureCapabilityToken();
+  const app = createApp({
+    launchManagedSession: async () => {
+      throw new Error("fatal: invalid reference: main");
+    },
+    readTmuxInventory: async () => ({ sessions: [], diagnostic: null }),
+  });
+  const response = await invokeRequest(app, "POST", "/api/sessions", {
+    headers: { "x-ronin-capability": token },
+    body: { repo: "monorepo", workflowId: "wf-test", name: "cowork-causa-real" },
+  });
+  assert.equal(response.status, 500);
+  const body = response.body as { error: string; code: string };
+  assert.equal(body.code, "LAUNCH_FAILED");
+  // El modal es un callejón sin salida si el 500 es mudo: la causa de git debe llegar al renderer.
+  assert.match(body.error, /fatal: invalid reference: main/);
+});
+
 test("POST /api/sessions/:name/{term,attach} valida la sesión y traduce los fallos discriminados de ttyd", async () => {
   const token = ensureCapabilityToken();
   const calls: string[] = [];
