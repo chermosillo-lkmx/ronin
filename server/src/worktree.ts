@@ -34,6 +34,29 @@ export async function isGitRepo(dir: string): Promise<boolean> {
   }
 }
 
+/**
+ * Resolve the reference from which a managed session branch should start.
+ * Prefer the repository's advertised remote default, then conventional local branches,
+ * and finally the current commit for repositories with a non-standard default branch.
+ */
+export async function resolveBaseRef(repoRoot: string): Promise<string | null> {
+  try {
+    const originHead = (await git(repoRoot, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim();
+    if (originHead) return originHead;
+  } catch {
+    // No origin default is normal for local-only repositories.
+  }
+  for (const branch of ["main", "master", "develop"]) {
+    if (await refExists(repoRoot, branch)) return branch;
+  }
+  try {
+    await git(repoRoot, ["rev-parse", "--verify", "HEAD"]);
+    return "HEAD";
+  } catch {
+    return null;
+  }
+}
+
 /** Absolute path of the shared `.git` (common dir) — the correct serialization key (P1a). */
 export async function gitCommonDir(dir: string): Promise<string | null> {
   try {

@@ -11,7 +11,7 @@ import { buildWorkflowRequestPrompt } from "./templates.js";
 import { createSession, hasSession, killSession } from "./tmux.js";
 import { findWorkflowCatalogItem, type WorkflowCatalogItem } from "./workflow-catalog.js";
 import type { WorkflowConfig } from "./workflow.js";
-import { addWorktree, removeWorktree, worktreePathForSession } from "./worktree.js";
+import { addWorktree, removeWorktree, resolveBaseRef, worktreePathForSession } from "./worktree.js";
 
 export type SessionLaunchErrorCode =
   | "REPO_UNKNOWN"
@@ -21,7 +21,8 @@ export type SessionLaunchErrorCode =
   | "AGENT_INVALID"
   | "INVALID_SESSION"
   | "MANAGED_SESSION_PREFIX_REQUIRED"
-  | "SESSION_ALREADY_EXISTS";
+  | "SESSION_ALREADY_EXISTS"
+  | "BASE_BRANCH_UNRESOLVED";
 
 export class SessionLaunchError extends Error {
   constructor(readonly code: SessionLaunchErrorCode, message: string) {
@@ -63,6 +64,7 @@ export interface ManagedSessionLaunchResult {
   cwd: string;
   worktree?: string;
   branch?: string;
+  baseRef?: string;
 }
 
 export interface ManagedSessionLaunchDeps {
@@ -71,6 +73,7 @@ export interface ManagedSessionLaunchDeps {
   hasSession: typeof hasSession;
   findWorkflowCatalogItem: typeof findWorkflowCatalogItem;
   worktreePathForSession: typeof worktreePathForSession;
+  resolveBaseRef: typeof resolveBaseRef;
   addWorktree: typeof addWorktree;
   removeWorktree: typeof removeWorktree;
   createSession: typeof createSession;
@@ -92,7 +95,7 @@ export interface ManagedSessionLaunchDeps {
 }
 
 const launchDeps: ManagedSessionLaunchDeps = {
-  listRepos, resolveCwd, hasSession, findWorkflowCatalogItem, worktreePathForSession,
+  listRepos, resolveCwd, hasSession, findWorkflowCatalogItem, worktreePathForSession, resolveBaseRef,
   addWorktree, removeWorktree, createSession, killSession, cycleDirForSession,
   ensureCycleDir, removeCycleDir, writeFlow, writeJsonAtomic, deliverPrompt: sendWhenReady,
   setupCommandFor: getRepoSetupCommand, provision: provisionWorktree,
@@ -165,6 +168,8 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
   if (!workflow) throw new SessionLaunchError("WORKFLOW_NOT_FOUND", "el workflow seleccionado ya no existe");
   const inputs = sanitizeWorkflowInputs(workflow.config, input.inputs);
 
+  const baseRef = await deps.resolveBaseRef(resolved.cwd);
+  if (!baseRef) throw new SessionLaunchError("BASE_BRANCH_UNRESOLVED", "no se pudo resolver una rama base para el repositorio");
   const branch = `ronin/${input.name}`;
   const worktree = deps.worktreePathForSession(resolved.cwd, input.name);
   const cycle = deps.cycleDirForSession(input.name);
@@ -172,7 +177,7 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
   let tmuxCreated = false;
   let cycleCreated = false;
   try {
-    await deps.addWorktree(resolved.cwd, worktree, branch, "main");
+    await deps.addWorktree(resolved.cwd, worktree, branch, baseRef);
     worktreeCreated = true;
     await deps.createSession(input.name, worktree, deps.startCommandFor?.(CLAUDE_CMD) ?? CLAUDE_CMD);
     tmuxCreated = true;
@@ -195,7 +200,7 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
         .catch((error) => deps.logError?.(error));
     }
     recordEvent({ type: "launch", key: input.name, title: input.request?.split(/\r?\n/, 1)[0] || input.name, repo: input.repo, source: "session", request: input.request });
-    return { name: input.name, repo: input.repo, mode: "workflow", workflowId: workflow.id, cwd: resolved.cwd, worktree, branch };
+    return { name: input.name, repo: input.repo, mode: "workflow", workflowId: workflow.id, cwd: resolved.cwd, worktree, branch, baseRef };
   } catch (error) {
     if (tmuxCreated) await deps.killSession(input.name);
     if (cycleCreated) deps.removeCycleDir(cycle);

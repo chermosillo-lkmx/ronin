@@ -23,6 +23,7 @@ function launchDeps(overrides: Partial<ManagedSessionLaunchDeps> = {}): ManagedS
     hasSession: async () => false,
     findWorkflowCatalogItem: () => workflow,
     worktreePathForSession: (_cwd, name) => `/worktrees/${name}`,
+    resolveBaseRef: async () => "main",
     addWorktree: async () => {},
     removeWorktree: async () => ({ removed: true, kept: false }),
     createSession: async () => {},
@@ -95,6 +96,33 @@ test("sin ruta MCP el workflow conserva el comando de siempre", async () => {
   await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-mcp" }, deps);
 
   assert.deepEqual(commands, ["claude --permission-mode bypassPermissions"]);
+});
+
+test("workflow crea el worktree desde la rama base resuelta", async () => {
+  const addCalls: unknown[][] = [];
+  const deps = launchDeps({
+    resolveBaseRef: async () => "develop",
+    addWorktree: async (...args) => { addCalls.push(args); },
+  });
+
+  const launched = await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-develop" }, deps);
+
+  assert.deepEqual(addCalls, [["/repo", "/worktrees/cowork-develop", "ronin/cowork-develop", "develop"]]);
+  assert.equal(launched.baseRef, "develop");
+});
+
+test("workflow sin rama base resoluble lanza BASE_BRANCH_UNRESOLVED antes de crear recursos", async () => {
+  let addWorktreeCalls = 0;
+  const deps = launchDeps({
+    resolveBaseRef: async () => null,
+    addWorktree: async () => { addWorktreeCalls++; },
+  });
+
+  await assert.rejects(
+    () => launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-base" }, deps),
+    (error: unknown) => error instanceof SessionLaunchError && error.code === "BASE_BRANCH_UNRESOLVED",
+  );
+  assert.equal(addWorktreeCalls, 0);
 });
 
 test("workflow con petición persiste launch.json y entrega el prompt completo sin esperar", async () => {

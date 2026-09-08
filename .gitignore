@@ -27,3 +27,6 @@ server/data/workflow-proposals.json
 # Lleva el token de capability: en dev el DATA_DIR es server/data y este archivo
 # aparecería sin rastrear. Nunca debe entrar a git.
 server/data/agent-mcp.json
+
+# artefactos de suites (JUnit/coverage) — no se publican
+reports/
