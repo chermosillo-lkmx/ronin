@@ -185,11 +185,59 @@ sólo tras confirmar `mergeable: MERGEABLE` / `mergeStateStatus: CLEAN`. No se f
 
 ---
 
-## 7. Pendientes
+## 7. Reempaquetado y relanzamiento
 
-- **La app empaquetada sigue con el binario viejo.** El fix está en `main`, pero el
-  Electron que corre en `:8787` no lo tiene hasta que se reconstruya
-  (`npm run package:desktop`). Hasta entonces el usuario seguirá viendo el error
-  en la app instalada. Es el único paso que falta para que lo note.
+A petición del usuario, la app se reconstruyó con el fix ya en `main`:
+
+```
+$ cd /Users/cesarhermosillo/code/claude-cowork
+$ git pull --ff-only origin main      → 688d9f2
+$ npm run package:desktop             → EXIT=0
+  • building target=DMG  file=release/Ronin-0.1.0-arm64.dmg
+  • building target=macOS zip  file=release/Ronin-0.1.0-arm64-mac.zip
+```
+
+**Comprobé que el fix viaja dentro del bundle**, no sólo en el repo — extraje los
+archivos del `app.asar`:
+```
+$ npx asar extract-file .../Ronin.app/Contents/Resources/app.asar server/dist/session-launch.js
+$ grep -o 'addWorktree([^)]*)' session-launch.js
+addWorktree(resolved.cwd, worktree, branch, baseRef)      ← ya no el literal "main"
+$ grep -c "LAUNCH_FAILED" index.js
+1
+```
+
+App relanzada (`open release/mac-arm64/Ronin.app`), backend arriba en `:8787`.
+
+**Verificación end-to-end contra la app reempaquetada** — la petición exacta de la
+captura del usuario:
+```
+POST http://127.0.0.1:8787/api/sessions
+{"repo":"procedureworks","workflowId":"wf-8cf0382b46dd436798","name":"cowork-verif-app","mode":"workflow"}
+
+HTTP 201
+{"name":"cowork-verif-app","repo":"procedureworks","mode":"workflow",
+ "branch":"ronin/cowork-verif-app","baseRef":"origin/develop", ...}
+```
+Antes: 500 mudo. Ahora: 201 con la rama nacida de `origin/develop`.
+Sesión, worktree y rama de verificación eliminados después (`ronin/*` en pw-local: 0).
+
+Una nota honesta: durante la verificación en DEV maté el server con
+`pkill -f server-entry.ts`, y eso alcanzó también al backend que la app tenía
+corriendo en `:8787`. Quedó resuelto al relanzar, pero conviene saberlo por si el
+usuario notó la app caída un momento.
+
+El firmado de código se saltó (no hay identidad «Developer ID Application» en la
+máquina); es lo mismo que ocurría antes, no algo introducido aquí.
+
+---
+
+## 8. Pendientes
+
+- **Ninguno bloqueante.** El fix está en `main`, empaquetado, relanzado y verificado
+  en la app real.
 - El repo no tiene CI: el PR se mergeó con 0 checks porque no hay ninguno configurado,
   no porque se saltara nada. Las suites se corrieron en local y quedan reportadas arriba.
+- El `.dmg` y el `.zip` quedaron en `release/`; no hay `Ronin.app` en `/Applications`
+  — la app corre desde `release/mac-arm64/`. Si se quiere instalada, se arrastra el
+  dmg; no lo hice porque nadie lo pidió.
