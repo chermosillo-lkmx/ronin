@@ -11,6 +11,7 @@ import {
   gitCommonDir,
   isGitRepo,
   removeWorktree,
+  resolveBaseRef,
   worktreePathForSession,
 } from "./worktree.js";
 
@@ -33,6 +34,35 @@ async function makeRepo(): Promise<string> {
   await pexec("git", ["-C", dir, "commit", "-q", "-m", "init"]);
   return dir;
 }
+
+test("resolveBaseRef: prioriza origin/HEAD y resuelve main, develop o un repo vacío", async () => {
+  const mainRepo = await makeRepo();
+  const developRepo = await makeRepo();
+  const headRepo = await makeRepo();
+  const originHeadRepo = await makeRepo();
+  const emptyRepo = mkdtempSync(join(tmpdir(), "cowork-empty-repo-"));
+  try {
+    await pexec("git", ["-C", mainRepo, "branch", "-M", "main"]);
+    await pexec("git", ["-C", developRepo, "branch", "-M", "develop"]);
+    await pexec("git", ["-C", headRepo, "branch", "-M", "feature/base"]);
+    await pexec("git", ["-C", originHeadRepo, "branch", "-M", "main"]);
+    await pexec("git", ["-C", originHeadRepo, "update-ref", "refs/remotes/origin/release", "HEAD"]);
+    await pexec("git", ["-C", originHeadRepo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/release"]);
+    await pexec("git", ["-C", emptyRepo, "init", "-q"]);
+
+    assert.equal(await resolveBaseRef(mainRepo), "main");
+    assert.equal(await resolveBaseRef(developRepo), "develop");
+    assert.equal(await resolveBaseRef(headRepo), "HEAD");
+    assert.equal(await resolveBaseRef(originHeadRepo), "origin/release");
+    assert.equal(await resolveBaseRef(emptyRepo), null);
+  } finally {
+    rmSync(mainRepo, { recursive: true, force: true });
+    rmSync(developRepo, { recursive: true, force: true });
+    rmSync(headRepo, { recursive: true, force: true });
+    rmSync(originHeadRepo, { recursive: true, force: true });
+    rmSync(emptyRepo, { recursive: true, force: true });
+  }
+});
 
 test("isGitRepo: true for a repo, false for a plain dir", async () => {
   const repo = await makeRepo();

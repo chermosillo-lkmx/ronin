@@ -616,7 +616,14 @@ app.post("/api/sessions", async (req, res) => {
       const status = e.code === "SESSION_ALREADY_EXISTS" ? 409 : e.code === "WORKFLOW_NOT_FOUND" ? 404 : 400;
       return void res.status(status).json({ error: e.message, code: e.code });
     }
-    res.status(500).json({ error: "no se pudo crear la sesión" });
+    // Un 500 mudo deja el modal en un callejón sin salida: el usuario ve "no se pudo crear la
+    // sesión" y no hay forma de saber que git rechazó la rama base. La causa real viaja al
+    // renderer — es un error de herramienta local, no un secreto del servidor.
+    const cause = (e as Error)?.message?.trim();
+    res.status(500).json({
+      error: cause ? `no se pudo crear la sesión: ${cause}` : "no se pudo crear la sesión",
+      code: "LAUNCH_FAILED",
+    });
   }
 });
 
