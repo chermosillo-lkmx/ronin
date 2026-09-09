@@ -65,11 +65,32 @@ case "$mode" in
   *) echo "usage: relay.sh <role> -f <file> | -m <msg> | --raw-key <key>" >&2; exit 2 ;;
 esac
 
-# Refuse to paste into a pane that is mid-turn: Claude Code will interleave the paste
-# with its own output and the message arrives corrupted or is swallowed entirely.
+# Refuse to paste into a pane that is mid-turn: the CLI will interleave the paste with
+# its own output and the message arrives corrupted or is swallowed entirely.
+#
+# ENGINE-PORTABLE BUSY CHECK (v2). Footer-grepping alone is NOT sufficient:
+#   claude → "esc to interrupt"  pinned footer, survives streaming
+#   agy    → "esc to cancel"     pinned footer, survives streaming
+#   codex  → "• Working (1s • esc to interrupt)" printed INLINE in the transcript, so
+#            it scrolls out of the -S window as soon as output streams. Measured over a
+#            16s codex turn, the grep matched on the first poll and returned 0 on every
+#            poll after it while text was still streaming — i.e. this guard was silently
+#            OFF for a codex Reviewer pane exactly when it mattered.
+# So: busy = footer matches OR the pane changed over ~1.5s. Idle panes are byte-stable on
+# all three engines; a codex pane that is merely thinking keeps its "Working (Ns" timer
+# ticking, so it trips the change check even before it prints anything.
+# Char class [·•]: claude's timer uses U+00B7, codex's uses U+2022.
+is_busy() {
+  tmux capture-pane -t "$1" -p -S -40 2>/dev/null | grep -qE 'esc to|\([0-9]+s [·•]' && return 0
+  _a=$(tmux capture-pane -t "$1" -p -S -40 2>/dev/null)
+  sleep 1.5
+  _b=$(tmux capture-pane -t "$1" -p -S -40 2>/dev/null)
+  [ "$_a" != "$_b" ]
+}
+
 tries=0
 while [ $tries -lt 120 ]; do
-  tmux capture-pane -t "$pane" -p -S -25 | grep -qE 'esc to|\([0-9]+s ·' || break
+  is_busy "$pane" || break
   tries=$((tries+1)); sleep 2
 done
 if [ $tries -ge 120 ]; then

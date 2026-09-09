@@ -1,25 +1,40 @@
 ---
 name: tmux-worker-loop
-description: Use when the user wants to delegate a coding requirement to sibling tmux panes running Claude, then orchestrate a Brain/Reviewer/Implementer trio across 4 panes (Brain+Reviewer on Opus, Implementer on Sonnet) through plan → adversarial review → strict RED-GREEN-REFACTOR implementation → refactor audit → KB update → tests → final review, watching that it doesn't drift from the requirement.
+description: Use when the user wants to delegate a coding requirement to sibling tmux panes running coding CLIs, then orchestrate a Brain/Reviewer/Implementer trio across 4 panes (Main + Brain on Claude, Reviewer on codex, Implementer on agy/Antigravity, each falling back to Claude) through plan → adversarial review → strict RED-GREEN-REFACTOR implementation → refactor audit → KB update → tests → final review, watching that it doesn't drift from the requirement.
 ---
 
 # tmux-worker-loop
 
 ## Overview
 
-You orchestrate **three** Claude agents in sibling tmux panes while you stay in the driver pane.
-Four roles, four panes:
+You orchestrate **three** coding agents in sibling tmux panes while you stay in the driver pane.
+Four roles, four panes — and, as of v9, **three different CLIs**:
 
-| Role | Pane | Model | Writes | Never |
-|---|---|---|---|---|
-| **Main** | driver (you) | user's choice | relays, decisions | implements |
-| **Brain** | worker 1 | **Opus** | `plan.md`, consult answers | production code |
-| **Reviewer** | worker 2 | **Opus** | report files only | production code |
-| **Implementer** | worker 3 | **Sonnet** | code + tests + KB + `rgr.log` | design decisions |
+| Role | Pane | Engine | Fallback | Writes | Never |
+|---|---|---|---|---|---|
+| **Main** | driver (you) | `claude` **Opus 4.8** | — | relays, decisions | implements |
+| **Brain** | worker 1 | `claude` **Opus 5** | — | `plan.md`, consult answers | production code |
+| **Reviewer** | worker 2 | **`codex`** | `claude --model opus` | report files only | production code |
+| **Implementer** | worker 3 | **`agy`** (Antigravity) | `claude --model sonnet` | code + tests + KB + `rgr.log` | design decisions |
 
 Four separate panes, always — never two roles sharing one session. A shared pane collapses the
 context isolation that makes the Implementer's fresh read of `plan.md` meaningful, and makes the
 Reviewer's audit of code it just watched being written worthless.
+
+**Why a different engine reviews.** Two Claudes reviewing each other share a prior: the same
+training, the same blind spots, the same taste in what "looks fine". Handing the adversarial pass
+to codex buys a genuinely independent read for free — and the same logic makes agy a legitimate
+Implementer, since executing a precise plan is verified by tests, not by pedigree.
+
+**The fallbacks are load-bearing, not decorative.** codex and agy have their own quotas, separate
+from Claude's, and they run out at their own pace. A rate-limited Reviewer is **not** a reason to
+park the cycle — park is only for when *Claude* is out, because then there is nothing left to fall
+back to. Swap the engine, re-assert the model, re-send the role prompt, and **write down in the
+final report which engine actually did the work**: "reviewed by codex" and "reviewed by codex
+until cycle 4, then Claude" are different claims about how well-reviewed the change is.
+
+Per-engine launch flags, banner assertions, busy detection, preflight probes and the fallback
+procedure all live in **`references/engines.md`** — read it before Step 0.
 
 **Why the split.** A single agent that plans *and* implements carries author bias: it builds what
 it meant rather than what the plan says, and its tests inherit the same blind spots. Handing
@@ -31,11 +46,27 @@ The same argument runs one level down, inside the implementation: the Implemente
 RED → GREEN → REFACTOR cycles, and the **Reviewer audits the refactors** — because an author
 restructuring its own code cannot see when "cleanup" quietly changed behavior. See "RGR" below.
 
-**Why Sonnet implements.** Execution against a precise plan is the cheapest phase to run and the
-easiest to verify — tests are the oracle. Spending Opus there buys little; spend it on design and
-adversarial review, where judgment is load-bearing. If the Implementer repeatedly asks questions a
-careful reader would not need, that is a signal the *plan* is underspecified. Fix the plan, don't
-upgrade the model.
+**Why the cheap tier implements.** Execution against a precise plan is the cheapest phase to run
+and the easiest to verify — tests are the oracle. Spending frontier judgment there buys little;
+spend it on design and adversarial review, where judgment is load-bearing. If the Implementer
+repeatedly asks questions a careful reader would not need, that is a signal the *plan* is
+underspecified. Fix the plan, don't upgrade the model.
+
+**Why Main runs on the cheaper tier and the Reviewer never does.** Measured across 20 Main
+sessions: Main is the role that exhausts its budget first (peak context 991 K vs the Reviewer's
+516 K and the Brain's 388 K) because every artifact, test run and relay passes through it. But
+Main's *job* — route messages, check the diff against the requirement, decide scope — does not
+need frontier judgment; the Reviewer's does. So spend the cheap tier where the volume is and the
+best available judgment where the thinking is.
+
+**Never downgrade the Reviewer to buy headroom** — including its fallback. If codex is out, the
+Reviewer falls back to `claude --model opus` at the **frontier** Opus tier (Opus 5), not 4.8: a
+degraded reviewer is indistinguishable from a clean review, which is the one failure this topology
+exists to prevent. The Reviewer is nowhere near its limit anyway, so there is nothing to buy.
+
+⚠️ **A cheaper Main buys usage headroom, not context.** Context is consumed by what flows through
+the conversation, and that is identical on any model — if Main is filling its window, the fix is
+"Main's context economy" below, not a model swap.
 
 Communication channels:
 - `tmux send-keys` / `paste-buffer` — send prompts
@@ -61,11 +92,12 @@ with a single cursor (no duplicate events) and tracks busy→idle **per pane**, 
 
 ```dot
 digraph workflow {
-  "Verify tmux + codex" -> "Create 4-pane layout (capture %ids)";
+  "Verify tmux" -> "PREFLIGHT probe codex + agy -> pick engine per role";
+  "PREFLIGHT probe codex + agy -> pick engine per role" -> "Create 4-pane layout (capture %ids)";
   "Create 4-pane layout (capture %ids)" -> "GATE: 4 panes, 4 unique ids";
-  "GATE: 4 panes, 4 unique ids" -> "Start claude in each worker pane";
-  "Start claude in each worker pane" -> "ASSERT per-pane model: Brain/Reviewer=Opus, Impl=Sonnet";
-  "ASSERT per-pane model: Brain/Reviewer=Opus, Impl=Sonnet" -> "Write panes.env + Setup artifacts + watch-multi Monitor";
+  "GATE: 4 panes, 4 unique ids" -> "Start the chosen engine in each worker pane";
+  "Start the chosen engine in each worker pane" -> "ASSERT per-pane engine+model banner";
+  "ASSERT per-pane engine+model banner" -> "Write panes.env + Setup artifacts + watch-multi Monitor";
   "Write panes.env + Setup artifacts + watch-multi Monitor" -> "Send BRAIN prompt + REQUIREMENT.md";
   "Send BRAIN prompt + REQUIREMENT.md" -> "Wait BRAIN:PLAN-READY";
 
@@ -93,8 +125,48 @@ digraph workflow {
 
 ## Step-by-step
 
-### 0. Verify tmux + codex are installed
-Run `command -v tmux` and the codex plugin/CLI checks. If anything is missing, **stop and read `references/install-setup.md`** for the install/verify flow before continuing. Do NOT proceed to step 1 with a degraded codex — the adversarial review gate is the whole point of this skill.
+### 0. Verify tmux, then preflight the engines
+
+`command -v tmux` first — no tmux, no panes. If it is missing, **stop and read
+`references/install-setup.md`**.
+
+Then **probe codex and agy before you build anything**, because the answer decides what you launch
+in two of the three panes. Each probe is one cheap non-interactive turn and it distinguishes "not
+installed", "broken auth" and "no quota left" in a single exit code:
+
+```bash
+D=/tmp/tmux-worker-cycle-$(date +%Y%m%d-%H%M%S); mkdir -p "$D"
+
+reviewer_engine=claude
+command -v codex >/dev/null 2>&1 \
+  && codex exec --sandbox read-only --skip-git-repo-check -m gpt-5.4-mini \
+       'Reply with exactly: READY' >"$D/preflight-codex.log" 2>&1 \
+  && grep -q READY "$D/preflight-codex.log" && reviewer_engine=codex
+
+impl_engine=claude
+command -v agy >/dev/null 2>&1 \
+  && agy -p 'Reply with exactly: READY' --model gemini-3.6-flash-low \
+       >"$D/preflight-agy.log" 2>&1 \
+  && grep -q READY "$D/preflight-agy.log" && impl_engine=agy
+
+echo "reviewer_engine=$reviewer_engine impl_engine=$impl_engine"
+```
+
+Do the probe **now**, not lazily at the first review gate. Discovering codex is out *after* you
+have pasted a 2,000-line plan into its pane costs the paste, the wait, and a confused diagnosis.
+
+**Then say one line to the user naming the engines the cycle will run on.** A cycle reviewed by a
+fallback Claude instead of codex is a materially different cycle; the user should not have to read
+`panes.env` to learn that. Do not stop for approval — the fallback is the designed behavior, not
+an exception — but do not let it pass silently either.
+
+Missing entirely (`command -v` fails) is an install question, not a fallback question: mention it
+once so the user can fix it, then proceed on Claude. Install flow for both CLIs is in
+`references/install-setup.md`.
+
+**Read `references/engines.md` before Step 2.** It carries the launch flags, the per-engine banner
+assertions, the busy/idle predicate, and the mid-cycle fallback procedure — none of which are the
+same across the three CLIs.
 
 ### 1. Build the 4-pane layout
 
@@ -142,6 +214,7 @@ if [ -n "$clipboard_cmd" ]; then
   tmux bind-key -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$clipboard_cmd"
   tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$clipboard_cmd"
 fi
+
 
 # HARD GATE: exactly 4 panes, 4 distinct ids, none empty.
 n=$(tmux list-panes -t "$win" | wc -l | tr -d ' ')
@@ -193,67 +266,128 @@ If `$TMUX` is unset, tell the user to relaunch (`tmux new -s <name> && claude`) 
 **Fallback path** (detached session + new Terminal/iTerm window via osascript) is in
 `references/pane-discovery.md`.
 
-### 2. Start Claude in each worker pane, with the right model per role
+### 2. Start the chosen engine in each worker pane
 
-Launch with an explicit `--model` — do not ride the account default, which may be a 1M-context tier
-that costs more and may not even be entitled:
-
-```bash
-tmux send-keys -t "$brain"     "cd $cwd && claude --model opus"   Enter
-tmux send-keys -t "$reviewer"  "cd $cwd && claude --model opus"   Enter
-tmux send-keys -t "$impl"      "cd $cwd && claude --model sonnet" Enter
-```
-
-Then **assert the right model landed in the right pane.** A blanket
-`grep -qE 'Opus|Sonnet|Haiku'` is not a check — it passes when the Implementer came up on Opus,
-which is exactly the failure you are trying to catch (and the expensive one). Assert per pane, and
-assert the *negative* too:
+Launch each pane with the engine the preflight picked and an **explicit model** — never ride an
+account default, which may be a tier that costs more, or one you are not even entitled to. `$D` is
+the cycle dir; `$WT` the worktree (repeat `--add-dir` per worktree):
 
 ```bash
-expect_model() {   # expect_model <pane-id> <role> <wanted-regex> <forbidden-regex>
-  local t=$1 role=$2 want=$3 nope=$4 tries=0 snap
-  while [ $tries -lt 45 ]; do
-    snap=$(tmux capture-pane -t "$t" -p -S -50)
-    if echo "$snap" | grep -qiE "$want"; then
-      echo "$snap" | grep -qiE "$nope" \
-        && { echo "MODEL FAIL [$role] $t: forbidden model in banner"; return 1; }
-      echo "MODEL OK [$role] $t: $(echo "$snap" | grep -oiE "$want" | tail -1)"; return 0
-    fi
-    tries=$((tries+1)); sleep 2
-  done
-  echo "MODEL FAIL [$role] $t: no banner after 90s"; return 1
-}
+tmux send-keys -t "$brain" "cd $cwd && claude --model opus" Enter
 
-expect_model "$brain"    BRAIN       'opus'   'sonnet|haiku'
-expect_model "$reviewer" REVIEWER    'opus'   'sonnet|haiku'
-expect_model "$impl"     IMPLEMENTER 'sonnet' 'opus|haiku'
+# Reviewer — codex, else the Claude fallback
+[ "$reviewer_engine" = codex ] \
+  && tmux send-keys -t "$reviewer" "cd $cwd && codex --sandbox workspace-write --add-dir $D --add-dir $WT -a never -c model_reasoning_effort=high" Enter \
+  || tmux send-keys -t "$reviewer" "cd $cwd && claude --model opus" Enter
+
+# Implementer — agy, else the Claude fallback
+[ "$impl_engine" = agy ] \
+  && tmux send-keys -t "$impl" "cd $cwd && agy --model gemini-3.6-flash-high --add-dir $D --add-dir $WT --dangerously-skip-permissions" Enter \
+  || tmux send-keys -t "$impl" "cd $cwd && claude --model sonnet" Enter
 ```
 
-Any `MODEL FAIL` is a **hard stop**: kill that pane's Claude (`tmux send-keys -t <id> C-c`), relaunch
-with the explicit `--model`, and re-assert. Never send a role prompt into an unverified pane —
-a Reviewer silently running Sonnet degrades the one gate this whole topology exists to provide,
-and nothing downstream will tell you it happened.
+**Pre-trust the worktree for BOTH codex and agy before you launch** (snippets in `engines.md`). This
+is not an edge case — the cycle creates a fresh `git worktree`, so the path is always new and
+therefore always untrusted, and **both** CLIs open on a *"Do you trust the contents of this …?"*
+menu in an untrusted directory. Every paste then lands in the menu instead of the prompt.
+
+**The flags are not optional garnish either** — `engines.md` has the flag-by-flag table; the one to
+internalize is `--add-dir $D`. Without it the cycle dir is outside the workspace, **every
+`sentinels.log` append is refused**, and the cycle stalls at the first phase boundary with the pane
+looking like it is thinking.
+
+⚠️ **A pane blocked on a menu reads as *busy*, not stuck.** agy renders `esc to cancel` in its
+footer while a permission menu is up, so the busy predicate says "working" and every observer
+agrees. Measured: `relay.sh` waited out its full 240 s timeout and the old watcher emitted nothing
+at all for the whole hang. `watch-multi.sh` v9 now alerts on the menus themselves —
+`ALERT [<role>] BLOCKED on a permission/trust menu` — and that alert means hands-on now, not
+patience.
+
+Then **assert the right engine and model landed in the right pane.** A blanket
+`grep -qE 'Opus|Sonnet|Haiku'` was never a real check, and across three CLIs it is not even
+well-defined. Each engine prints its own banner; assert that one, and assert the *negative* too:
+
+| Engine | Assert | Forbid |
+|---|---|---|
+| claude | `opus` (Brain) / `sonnet` (Impl) | the other tiers |
+| codex | `model: *gpt-[0-9.]+ *(high\|medium\|low)` | `not supported when using Codex`, `Do you trust the contents of` |
+| agy | `Antigravity CLI [0-9]` | `is no longer available. Using`, `Do you trust the contents of` |
+
+`expect_engine`, the shared helper, is in `references/engines.md` — along with why the version digit
+in the agy pattern is load-bearing (`Antigravity CLI` alone also matches the trust menu's own text,
+so the bare pattern reports OK for a pane stuck on a menu) and which pattern to use when you
+re-assert a pane that has already been working (the banner scrolls away; match the footer).
+
+⚠️ **The agy negative assertion is the one that will actually fire.** `agy models` prints the whole
+catalogue, not your entitlement, and asking for a model you cannot run does **not** fail — agy warns
+and silently runs something else:
+
+```
+⚠ Warning
+  ⎿  "gemini-3.1-pro-high" is no longer available. Using "Gemini 3.6 Flash (High)".
+```
+
+That is a hard FAIL, identical in kind to a Reviewer coming up on the wrong tier: the cycle would
+run on a model nobody chose and nothing downstream would ever mention it.
+
+Any FAIL is a **hard stop**: kill that pane's CLI (`C-c` twice), relaunch with the explicit model,
+and re-assert. Never send a role prompt into an unverified pane — a degraded Reviewer removes the
+one gate this whole topology exists to provide, and it fails silently.
 
 **Model per role, not per cycle:**
 
-| Role | Model | Why |
+| Role | Engine · model | Why |
 |---|---|---|
-| Brain | **Opus** | design judgment, KB reconciliation, premise-checking |
-| Reviewer | **Opus** | adversarial reasoning is the one place you cannot afford to skimp |
-| Implementer | **Sonnet** | executing a precise plan; tests are the oracle |
+| Main | claude **Opus 4.8** | highest volume, lowest judgment requirement — spend the cheap tier here |
+| Brain | claude **Opus 5** | design judgment, KB reconciliation, premise-checking |
+| Reviewer | **codex**, high effort | adversarial reasoning, from outside Claude's blind spots |
+| Implementer | **agy** (top available tier) | executing a precise plan; tests are the oracle |
 
-Verify the banner in each pane before sending prompts (`Opus 5 with high effort`,
-`Sonnet 4.6`, …). Only reach for a 1M-context variant when the Brain genuinely must read a huge
-codebase — and expect `API Error: Extra usage is required for 1M context` if the account lacks the
-entitlement. On that error, park the cycle and tell the user; do NOT force it through.
+Only reach for a 1M-context Claude variant when the Brain genuinely must read a huge codebase — and
+expect `API Error: Extra usage is required for 1M context` if the account lacks the entitlement. On
+that error, park the cycle and tell the user; do NOT force it through.
 
-The driver pane's model stays whatever the user picked — don't change it without asking.
+**The driver pane defaults to Opus 4.8.** If it is on something else, say so once and offer to
+switch (`/model`) — but never switch without asking, and never downgrade the Reviewer to save
+budget. If codex is unavailable the Reviewer falls back to Opus 5, not to something cheaper.
+
+### 2.6. Main's context economy (the reason Main hits the wall first)
+
+Measured on a real cycle, Main's context was 377 KB of tool results — **54 % of it `Read`**, almost
+all of it reading `plan.md` and review reports **in full**. Three rules cut that by roughly 40 %
+without losing a single check:
+
+1. **Read verdicts, not reports.** Brain and Reviewer must open their artifacts with a `## VERDICT`
+   block (verdict line + blockers, ≤30 lines). Main reads **only that**:
+   ```bash
+   sed -n '1,60p' "$D/review-plan-1.md"
+   ```
+   Open the full file **only** when the verdict is not clean, and then jump to the named findings
+   rather than reading cover-to-cover. *(This does not weaken "read plan.md yourself" in the plan
+   phase — the plan is the contract and Main still reads it once, in full.)*
+2. **Never let a test run dump into context.** Redirect, then print only what you reason about:
+   ```bash
+   pytest -q --tb=no > /tmp/run.txt 2>&1; tail -2 /tmp/run.txt
+   grep -E '^FAILED [^ ]+::' /tmp/run.txt | awk '{print $2}' | sort -u > /tmp/f.txt
+   comm -13 /tmp/base.txt /tmp/f.txt          # only NEW failures reach you
+   ```
+   A 45-failure list pasted twice is 20 KB that told you nothing a `comm` line wouldn't.
+3. **Relay pointers, not quotes.** `"lee $D/review-plan-1.md y aplica F1-F14"` costs ~200 bytes;
+   pasting the findings costs 4 KB **and** duplicates text the pane can read itself. Quote only the
+   handful of findings you independently verified, plus your own decisions.
+
+The same discipline applies to `capture-pane`: prefer `cat "$D/sentinels.log"` (ground truth,
+small) over scraping scrollback.
 
 ### 2.5. Clear any pane that has prior conversation
 A pane with a previous cycle's plan, review pastes, or diff in scrollback burns tokens every turn
 and risks bleed-through. See `references/session-handling.md` for the decision tree
-(fresh / mid-execution / idle-with-scrollback) and the `/clear` procedure. When in doubt, clear —
-fresh context is cheap, a polluted one is not.
+(fresh / mid-execution / idle-with-scrollback). When in doubt, clear — fresh context is cheap, a
+polluted one is not.
+
+`/clear` is **Claude-only**. For a codex or agy pane the reset is to kill the CLI and relaunch it
+(`C-c` twice, then the launch command) — verified on both. Do not type `/clear` into them; it is
+not their slash command and it lands as a literal prompt.
 
 ### 3. Set up artifacts and the multi-pane watcher
 
@@ -263,10 +397,22 @@ Cycle id = timestamp; dir = `/tmp/tmux-worker-cycle-<id>`. Copy **both** `watch-
 Monitor for all three panes:
 
 ```bash
-D=/tmp/tmux-worker-cycle-$(date +%Y%m%d-%H%M%S); mkdir -p "$D"
+# $D already exists — Step 0 created it for the preflight logs.
 S=~/.claude/skills/tmux-worker-loop
 cp "$S/watch-multi.sh" "$S/relay.sh" "$D"/ && chmod +x "$D/watch-multi.sh" "$D/relay.sh"
 touch "$D/sentinels.log" "$D/rgr.log"
+```
+
+**`panes.env` records the engines too**, not just the pane ids — the watcher's alert patterns and
+your own fallback decisions key on them, and after a mid-cycle swap this file is the only place the
+truth is written down:
+
+```bash
+cat >> "$D/panes.env" <<EOF
+brain_engine=claude
+reviewer_engine=$reviewer_engine
+impl_engine=$impl_engine
+EOF
 ```
 
 The Monitor takes the same `%id`s you recorded in `panes.env` — never pane indices:
@@ -284,6 +430,16 @@ One watcher, not three: it reads the shared `sentinels.log` with a single cursor
 fires **once**, tracks busy→idle per pane as `IDLE <role>`, and runs limit/traceback alerts on every
 poll, ungated.
 
+**v9 is engine-aware in two places.** Its limit regex now carries codex's and agy's phrasings
+alongside Claude's, so a rate-limited Reviewer surfaces as an `ALERT` instead of as a pane that
+mysteriously stops answering. And its busy check no longer trusts the footer alone: claude and agy
+pin `esc to …` at the bottom of the pane, but **codex prints its working indicator inline in the
+transcript**, so it scrolls out of view the moment output streams — measured over a 16-second codex
+turn, the footer grep matched on the first poll and returned nothing on every poll after it while
+text was still streaming. v9 adds a change-detector (pane differs from last poll ⇒ busy) that covers
+the gap. `relay.sh` carries the same predicate, which is what stops it pasting into a codex pane
+mid-answer. Details in `references/engines.md`.
+
 > **Re-arm the Monitor after any layout change.** If you add or remove a pane mid-cycle, indices
 > shift (step 1) and the running watcher is now polling the wrong panes. `TaskStop` it and start a
 > new one with the corrected mapping.
@@ -291,7 +447,7 @@ poll, ungated.
 **Alert filtering (learned the hard way).** The role prompts contain the literal strings
 "usage limit" and "approaching limit" in their self-throttle sections. A naive ungated grep matches
 that echo in the scrollback and re-fires **every poll**, burying real events under a 5-second alarm
-loop. `watch-multi.sh` v8 handles this two ways: it matches only plain-prose banner phrasings
+loop. `watch-multi.sh` handles this two ways: it matches only plain-prose banner phrasings
 (`you've hit your limit`, `usage limit will reset`, `Extra usage is required`, …) and drops any line
 carrying markdown (backticks, `**`, `===`, list bullets), then de-dupes per role so an unchanged
 banner fires once, not forever.
@@ -321,6 +477,13 @@ Three templates, one per role. Render each with `sed`, substituting `<CYCLE_DIR>
 | `brain_prompt_template.md` | Brain | at cycle start |
 | `reviewer_prompt_template.md` | Reviewer | at cycle start (it waits for your go) |
 | `implementer_prompt_template.md` | Implementer | only after `PLAN APPROVED` |
+
+**The templates are engine-neutral — send them verbatim to codex and agy too.** They are written in
+terms of "run a shell command" and "read the file", not Claude tool names, and the sentinel contract
+is a shell append that all three CLIs can perform (verified end to end on codex: pasted instruction →
+`printf … >> sentinels.log` → line in the file, no approval stall). Do not write a reduced
+"codex version" of the reviewer prompt: the severity ladder and the mandatory RGR audit are the
+review, and a paraphrase drops them.
 
 **Isolate the work first.** Create a dedicated `git worktree` per repo off `origin/main` and name
 them in `<WORKTREES>`. Never point workers at a shared checkout — it is usually dirty and on an
@@ -360,10 +523,10 @@ renegotiated with no record and no one verifying the result still matches `REQUI
            │          │          │ ▲ IMPL:READY / QUESTION
       ┌────┴────┐     │     ┌────┴──────────┐
       │  BRAIN  │     │     │ IMPLEMENTER   │
-      │  opus   │     │     │   sonnet      │
+      │ claude  │     │     │     agy       │
       └─────────┘     │     └───────────────┘
                  ┌────▼─────┐
-                 │ REVIEWER │  opus — reads plan.md, the diff, and rgr.log
+                 │ REVIEWER │  codex — reads plan.md, the diff, and rgr.log
                  └──────────┘
 ```
 
@@ -391,8 +554,10 @@ Exchange 5 is where the RGR audit happens — the Reviewer reads `rgr.log` along
 > below — do NOT enter another phase. At ≥ 95%, finish the current phase and start no new one.
 
 **Plan phase.** On `===BRAIN:PLAN-READY===`:
-1. `Read` plan.md yourself. You are the last line of defense against drift; do not outsource
-   comprehension.
+1. `Read` plan.md yourself, **in full, once**. You are the last line of defense against drift; do
+   not outsource comprehension. On every *later* `PLAN-UPDATED`, read only the `## TL;DR` block and
+   the sections its changelog says moved — re-reading 1,000+ lines per revision is what exhausts
+   the driver (see §2.6).
 2. Tell the Reviewer to run its **plan pass**. In parallel, dispatch 2-3 subagents with distinct
    lenses (requirement coverage / alternative approaches / risk & failure modes) — the Reviewer is
    one opinion, not an oracle.
@@ -400,8 +565,13 @@ Exchange 5 is where the RGR audit happens — the Reviewer reads `rgr.log` along
    "X already behaves like Y", read X yourself or send a verification subagent. A plan built on a
    misread citation is the most expensive failure mode in this workflow, and it is invisible to
    every downstream check.
-4. Relay findings to the Brain prefixed `REVIEW:`. It updates and emits `===BRAIN:PLAN-UPDATED===`.
-5. Loop until clean. **Escalate genuine scope decisions to the user** — do not let an agent quietly
+4. On `===REVIEW:PLAN-VERDICT===`, read the report's **`## VERDICT` block first**
+   (`sed -n '1,60p'`). Open the body only for findings that are blockers, that you intend to
+   push back on, or that you are about to verify yourself.
+5. Relay findings to the Brain prefixed `REVIEW:`. **Point at the report file**; quote only the
+   findings you personally verified and your own decisions — the Brain can read the rest itself.
+   It updates and emits `===BRAIN:PLAN-UPDATED===`.
+6. Loop until clean. **Escalate genuine scope decisions to the user** — do not let an agent quietly
    redefine what ships. Then send `PLAN APPROVED` (the Brain becomes a consultant).
 
 **Implementation phase.** Send the Implementer prompt. On `===IMPL:QUESTION===`, relay to the Brain,
@@ -412,13 +582,23 @@ in the plan. On `===IMPL:READY===`:
    Missing or thin → send it back before spending the Reviewer on it.
 2. Run the Reviewer's **diff pass**, which includes the mandatory RGR/refactor audit.
 3. Run your own `git diff --stat` against the plan's promised file list.
-4. Relay findings; loop until clean; then `IMPL APPROVED — proceed`.
+4. **Run the suites yourself, but never into your context** — redirect, then compare failure sets
+   against a baseline worktree on `origin/main` (§2.6 rule 2). "Zero new failures" is a `comm`
+   line; a 45-name failure list is 20 KB that says the same thing. Keep the baseline worktree
+   around for the whole cycle and delete it at the end.
+5. Read the diff report's `## VERDICT` block first; open the body for blockers only.
+6. Relay findings; loop until clean; then `IMPL APPROVED — proceed`.
 
-**Codex, when available.** `codex:codex-rescue` is a valuable *second engine* at both gates — but it
-is a thin forwarder that returns "task started" even when the job dies. Always verify via the job's
-status/log file before treating its output as a gate decision. If codex is rate-limited, say so
-plainly in your report: the cycle ran with single-engine review, which is a real reduction in
-quality, not a footnote.
+**Engine trouble at either gate.** The Reviewer pane *is* codex now, so a codex rate limit no longer
+degrades the review to "skipped" — it degrades it to Claude. Swap the engine per
+`references/engines.md`, re-assert the banner, re-send the reviewer prompt, and record the swap.
+Same for agy on the Implementer side, with one extra cost: a mid-RGR swap loses every cycle of
+context, so the replacement must be handed `plan.md`, `rgr.log` and `git diff` explicitly and told
+which cycle it is resuming at, or it will re-implement work already sitting in the diff.
+
+If you also reach for `codex:codex-rescue` from your own context as an extra opinion, remember it is
+a thin forwarder that returns "task started" even when the job dies — verify via the job's
+status/log file before treating its output as a gate decision.
 
 ### 6. Final verification
 After `===IMPL:CYCLE-DONE===`:
@@ -428,6 +608,9 @@ After `===IMPL:CYCLE-DONE===`:
   A cycle in the log with no verdict in the report was never reviewed.
 - Report changed files, test results, RGR cycle count (and how many had a real refactor), deploy
   order, and any deferred follow-ups to the user.
+- **State which engine did each job**, including any mid-cycle fallback and the cycle it happened
+  at. "Reviewed by codex" and "reviewed by codex through cycle 4, then Claude" are different claims
+  about how independently the change was checked; the user cannot infer which one is true.
 
 ## Sentinels (the contract)
 
@@ -501,6 +684,23 @@ Drift = the worker is implementing something that isn't in the requirement, or s
 
 **Both the driver AND the worker MUST self-throttle. Either side blowing past the limit strands the orchestration.** This section overrides anything else in the skill — when in doubt, park.
 
+### Park vs. fall back — decide by engine, not by symptom
+
+The rules below were written when every pane was Claude and a limit meant "everyone waits". With
+three engines on three separate quotas, that is no longer the right default:
+
+| Who hit the limit | Action |
+|---|---|
+| **Reviewer on codex** | **Fall back**, don't park: swap to `claude --model opus`, re-assert, re-send the reviewer prompt, record the swap in the report. |
+| **Implementer on agy** | **Fall back** to `claude --model sonnet` — but only at a clean RGR boundary, and hand the replacement `plan.md` + `rgr.log` + `git diff` and the cycle number it resumes at. |
+| **Any pane already on the Claude fallback** | **Park.** There is nothing left to swap to. |
+| **Brain, or Main (the driver)** | **Park.** Both are Claude-only by design. |
+
+Falling back is not free — it costs a re-prompt and, for the Implementer, a context handoff — but
+it costs far less than parking a whole cycle until a reset. Park is the last resort, not the first
+response. The full procedure is in `references/engines.md`; the Park procedure below is unchanged
+for the cases that genuinely need it.
+
 ### Pre-dispatch budget gate (do NOT skip)
 
 **Before sending the worker prompt** (step 4 above), check the driver's session-usage indicator. The cycle ahead will spend tokens on subagents, codex reviews, plan/diff reads, and watcher events. Refuse to dispatch if the headroom is too small:
@@ -529,18 +729,26 @@ If usage ≥ 95% but < 99%: finish current phase if possible, no new phase. Warn
 ### Worker self-throttle (worker enforces this on itself)
 
 Each role prompt instructs that agent to check its own usage **between phases and between RGR
-iterations** and emit `===<ROLE>:PARKED-LIMIT:<reset>===` if usage ≥ 95%. When the driver sees that
-sentinel (or the watcher emits `ALERT [<role>] …`):
+iterations** and emit `===<ROLE>:PARKED-LIMIT:<reset>===` when it is out. When the driver sees that
+sentinel (or the watcher emits `ALERT [<role>] …`), first ask which engine that pane is running
+(`panes.env`) and apply the table above. If the answer is **fall back**, do that — do not sleep. If
+the answer is **park**:
 
 1. Do NOT relay anything into that pane.
 2. Do NOT dispatch any subagents/codex/reads.
 3. Tell the user in one line: "<Role> hit limit, resets at <time> — sleeping until then."
 4. `ScheduleWakeup` until the reset time. That's it.
 
-Note the roles hit limits **independently**. A parked Reviewer does not mean the Implementer must
-stop mid-RGR-cycle — let it finish the current cycle and park at a clean boundary. But never run a
-diff pass without the Reviewer: single-engine review is a real quality reduction, and if you skip
-the gate you must say so plainly in your report rather than presenting the cycle as fully reviewed.
+⚠️ **codex and agy do not expose a percentage the way Claude does.** Their role prompts cannot
+"check usage ≥ 95%" — they park on the first hard limit/quota error instead, which means a codex or
+agy pane parks *at* the wall rather than before it. Budget for that: it is one more reason a
+fallback beats a park for those two panes.
+
+Note the roles hit limits **independently**, and now on independent quotas. A parked Reviewer does
+not mean the Implementer must stop mid-RGR-cycle — let it finish the current cycle and park at a
+clean boundary. But never run a diff pass without the Reviewer: no review is a real quality
+reduction, and if you skip the gate you must say so plainly in your report rather than presenting
+the cycle as fully reviewed.
 
 ### Park procedure (driver hits 99% mid-cycle)
 
@@ -583,12 +791,17 @@ Quick reference table (capture, send, paste, idle/running detection) and common 
 
 ## Files in this skill
 - `SKILL.md` — this file (core flow)
-- `watch-multi.sh` — **v8 multi-pane watcher**; copy into the cycle dir, one Monitor for all roles
-- `relay.sh` — **inter-pane messaging**; resolves role→`%id`, blocks on busy panes, logs `relay.log`
+- `references/engines.md` — **the three-CLI contract**: preflight probes, launch flags, per-engine
+  banner assertions, the busy/idle predicate, limit strings, and the mid-cycle fallback procedure.
+  Read it before Step 2.
+- `watch-multi.sh` — **v9 multi-pane, multi-engine watcher**; copy into the cycle dir, one Monitor
+  for all roles
+- `relay.sh` — **inter-pane messaging**; resolves role→`%id`, blocks on busy panes (engine-portable
+  check), logs `relay.log`
 - `brain_prompt_template.md` — Brain: plan + consultant, never writes code
 - `reviewer_prompt_template.md` — Reviewer: adversarial passes + RGR/refactor audit, read-only
 - `implementer_prompt_template.md` — Implementer: strict RED→GREEN→REFACTOR from `plan.md` alone
-- `references/install-setup.md` — tmux + codex install/verify
+- `references/install-setup.md` — tmux + codex + agy install/verify
 - `references/pane-discovery.md` — full pane discovery + non-tmux fallback
 - `references/provisioned-panes.md` — **Ronin Driver mode: the 4 panes already exist with fixed
   `%N` ids; replaces Steps 0–2.** Read it FIRST when the prompt hands you pane ids.
@@ -602,10 +815,13 @@ Files written per cycle into `<CYCLE_DIR>`: `REQUIREMENT.md`, `plan.md`, `panes.
 
 ## Topology is fixed at four panes
 
-**Always run the full four panes: Main, Brain, Reviewer, Implementer — four separate Claude
-sessions, four separate contexts.** Do not collapse roles, do not run two roles in one pane, do not
-skip the Reviewer because the change looks small. The layout gate in step 1 and the model
-assertions in step 2 exist to make this checkable rather than assumed.
+**Always run the full four panes: Main, Brain, Reviewer, Implementer — four separate CLI sessions,
+four separate contexts.** Do not collapse roles, do not run two roles in one pane, do not skip the
+Reviewer because the change looks small. The layout gate in step 1 and the engine assertions in
+step 2 exist to make this checkable rather than assumed.
+
+Which *engine* fills a pane is negotiable (that is what the fallbacks are for). Whether the pane
+exists is not.
 
 The reason is that every shortcut removes exactly the check that the remaining agents cannot
 replace themselves:

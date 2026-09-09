@@ -13,7 +13,9 @@ If the worker pane already has Claude running with an active conversation (prior
   - If wait: stop and resume when the prior cycle emits `===CYCLE-DONE===`.
 - **Idle but with prior conversation in scrollback** → clear it.
 
-To clear, send `/clear` (Claude Code's built-in conversation reset):
+**How you clear depends on the engine in that pane** (`panes.env` records it).
+
+Claude — `/clear`, its built-in conversation reset:
 
 ```bash
 tmux send-keys -t "$sib" "/clear" Enter
@@ -21,6 +23,21 @@ until tmux capture-pane -t "$sib" -p -S -20 | grep -qE 'Opus|Sonnet|Haiku'; do
   sleep 1
 done
 ```
+
+codex / agy — **`/clear` is not their slash command**; typed into either it lands as a literal
+prompt and you have polluted the context further. Kill the CLI and relaunch it instead (verified on
+both: a double `C-c` exits cleanly and the relaunch returns a fresh banner with no prior turns):
+
+```bash
+tmux send-keys -t "$sib" C-c; sleep 1; tmux send-keys -t "$sib" C-c; sleep 1
+tmux send-keys -t "$sib" "clear && <the launch command from engines.md>" Enter
+until tmux capture-pane -t "$sib" -p -S -20 | grep -qE 'model: *gpt-|Antigravity CLI'; do
+  sleep 1
+done
+```
+
+Re-run the banner assertion after any relaunch — a pane you just restarted is a pane whose model you
+have not verified.
 
 Detect prior conversation by checking the bottom of the scrollback for either an old sentinel (`===CYCLE-DONE===`, `===PLAN-READY===`, etc.) or a non-trivial number of `>` prompt entries. When in doubt, clear — a fresh context is cheap; a polluted one is not.
 

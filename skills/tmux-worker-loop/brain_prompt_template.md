@@ -60,6 +60,17 @@ Your sentinels:
    file, data-model changes, error handling (a table of situation → behavior → where), the test
    plan, deploy/rollout order and rollback, KB sections to update, and an explicit in-scope /
    out-of-scope section.
+
+   **`plan.md` MUST open with a `## TL;DR` block, ≤30 lines**, before anything else. Main reads the
+   whole plan (it is the contract), but on every *re-read* after an update it reads only this — so
+   the block has to carry the decisions, not tease them. Include: the chosen approach in one line
+   and why the obvious alternative was rejected; any **false premise in the requirement** you
+   found; the deploy order if it matters; open decisions marked `TBD-n` that Main must escalate;
+   and a one-line changelog of what this revision changed. Everything else goes below it, at
+   whatever length the work deserves.
+
+   When you emit `PLAN-UPDATED`, that changelog line is what tells Main whether its earlier
+   decisions survived — keep it accurate.
 5. **Verify every `file:line` you cite.** A plan built on a misread citation is worse than no plan.
 6. Emit `===BRAIN:PLAN-READY:<CYCLE_DIR>/plan.md===`. Then STOP.
 
