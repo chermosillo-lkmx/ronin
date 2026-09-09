@@ -1,11 +1,6 @@
 import { deriveGraph, type DraftGraphNode } from "./workflow-draft";
 import type { WfStage } from "../types";
-
-const NODE_W = 182;
-const NODE_H = 64;
-const GAP_X = 68;
-const ROW_Y = 16;
-const VERIFY_ROW_Y = ROW_Y + NODE_H + 40;
+import { GAP_X, NODE_H, NODE_W, ROW_Y, VERIFY_ROW_Y } from "./workflow-layout";
 
 function nodeLabel(n: DraftGraphNode): string {
   return `${n.icon} ${n.label}`;

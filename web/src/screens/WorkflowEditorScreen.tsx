@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import {
+  getHealth,
   getRepoConfig,
   getRepos,
+  getSessions,
   getWorkflow,
   saveRepoConfig2,
   saveWorkflow,
@@ -13,13 +15,20 @@ import {
   adoptServerConfig,
   cancel as cancelDraft,
   createWorkflowDraft,
+  editControlValue,
   setFieldError,
   setJsonText,
   setStages,
   switchView,
+  toggleHarnessControl,
+  toggleHarnessSection,
   type DraftView,
   type WorkflowDraftState,
 } from "../components/workflow-draft";
+import type { ArmWarning } from "../components/harness-arm";
+import { pendingDiscards, type BandId, type ControlId, type ControlValue } from "../components/harness-controls";
+import { HarnessView } from "../components/HarnessView";
+import { confirmWorkflowSave, globalWorkflowPayload, repoPayload, workflowPayload } from "../components/workflow-save";
 import { StageEditor } from "../components/StageEditor";
 import { WorkflowGraph } from "../components/WorkflowGraph";
 import { WorkflowJsonEditor } from "../components/WorkflowJsonEditor";
@@ -31,10 +40,25 @@ const VIEWS: { key: DraftView; label: string }[] = [
   { key: "stepper", label: "Stepper" },
   { key: "graph", label: "Grafo" },
   { key: "json", label: "JSON" },
+  { key: "harness", label: "Harness" },
 ];
 
+async function confirmArmWarning(warning: ArmWarning): Promise<boolean> {
+  return window.confirm(`${warning.title}\n\n${warning.message}`);
+}
+
+function DiscardWarning({ discards }: { discards: ReturnType<typeof pendingDiscards> }) {
+  if (discards.length === 0) return null;
+  return (
+    <p className="ron-msg warn wf-harness-discard-warning">
+      {discards.length} controles apagados descartan su texto al guardar:{" "}
+      {discards.map(({ stageKey, id }) => <code key={`${stageKey}.${id}`}>{stageKey}.{id}</code>)}
+    </p>
+  );
+}
+
 /**
- * T14/T15: the three synchronized views (Stepper/Grafo/JSON) over one workflow-draft state
+ * T14/T15: the four synchronized views (Stepper/Grafo/JSON/Harness) over one workflow-draft state
  * machine. Global workflow → `PUT /api/workflow` (verifyCmd rejected, T11-85). A repo override
  * → `PUT /api/repo-config/:repo` (verifyCmd honored — gitignored). Live edits get a
  * per-field check via `/validate` (never persists); the real save re-validates server-side
@@ -48,9 +72,14 @@ export function WorkflowEditorScreen() {
   const [inheritWorkflow, setInheritWorkflow] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveNote, setSaveNote] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [verifyGate, setVerifyGate] = useState<boolean | null>(null);
 
   useEffect(() => {
     getRepos().then(setRepos);
+  }, []);
+
+  useEffect(() => {
+    getHealth().then((health) => setVerifyGate(health?.verifyGate ?? null));
   }, []);
 
   useEffect(() => {
@@ -79,7 +108,7 @@ export function WorkflowEditorScreen() {
   // Chequeo en vivo por campo (T14) — nunca persiste; sólo alimenta draft.fieldError.
   useEffect(() => {
     if (!draft || draft.jsonError) return;
-    const cfg = { stages: draft.stages, verifyAfter: draft.verifyAfter };
+    const cfg = target.kind === "global" ? globalWorkflowPayload(draft) : workflowPayload(draft);
     let cancelled = false;
     const check = target.kind === "global" ? validateWorkflow(cfg) : validateRepoWorkflow(target.repo, cfg);
     check.then((result) => {
@@ -90,33 +119,43 @@ export function WorkflowEditorScreen() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft?.stages, draft?.verifyAfter, draft?.jsonError]);
+  }, [draft?.stages, draft?.verifyAfter, draft?.inputs, draft?.jsonError]);
 
   if (!draft) return <div className="nocturne ron-wf-editor">cargando…</div>;
 
   const allowVerifyCmd = target.kind === "repo" && !inheritWorkflow;
   const canSave = !draft.jsonError && !saving;
+  const repo = target.kind === "repo" ? target.repo : null;
+  const discards = pendingDiscards(draft.stages, draft.stash);
+  const armDeps = {
+    getSessions,
+    confirm: confirmArmWarning,
+  };
+
+  function onHarnessToggle(stageKey: string, id: ControlId, on: boolean) {
+    setDraft((prev) => prev ? toggleHarnessControl(prev, stageKey, id, on, allowVerifyCmd) : prev);
+  }
+
+  function onHarnessEdit(stageKey: string, value: ControlValue) {
+    setDraft((prev) => prev ? editControlValue(prev, stageKey, value) : prev);
+  }
+
+  function onHarnessBandToggle(band: BandId, on: boolean) {
+    setDraft((prev) => prev ? toggleHarnessSection(prev, band, on, allowVerifyCmd) : prev);
+  }
 
   async function onSave() {
     setSaving(true);
     setSaveNote(null);
     try {
-      if (target.kind === "global") {
-        const saved = await saveWorkflow({ stages: draft!.stages, verifyAfter: draft!.verifyAfter });
-        setDraft((prev) => (prev ? adoptServerConfig(prev, saved) : prev));
-      } else {
-        const full = await saveRepoConfig2(target.repo, {
-          workflow: inheritWorkflow ? null : { stages: draft!.stages, verifyAfter: draft!.verifyAfter },
-          vars: repoEntry?.vars ?? {},
-          startCommand: repoEntry?.startCommand ?? "",
-          plannerModel: repoEntry?.plannerModel ?? "",
-          workerModel: repoEntry?.workerModel ?? "",
-          inheritWorkflow,
-        });
+      const saved = await confirmWorkflowSave(draft!, repo, armDeps, async () => {
+        if (target.kind === "global") return saveWorkflow(globalWorkflowPayload(draft!));
+        const full = await saveRepoConfig2(target.repo, repoPayload(draft!, repoEntry, inheritWorkflow));
         setRepoEntry(full);
-        const saved = full.workflow ?? (await getWorkflow())!;
-        setDraft((prev) => (prev ? adoptServerConfig(prev, saved) : prev));
-      }
+        return full.workflow ?? (await getWorkflow())!;
+      });
+      if (!saved) return;
+      setDraft((prev) => (prev ? adoptServerConfig(prev, saved) : prev));
       setSaveNote({ kind: "ok", text: "workflow guardado" });
     } catch (e) {
       const err = e as WorkflowSaveError;
@@ -132,7 +171,7 @@ export function WorkflowEditorScreen() {
   }
 
   return (
-    <div className="nocturne ron-wf-editor">
+    <div className={`nocturne ron-wf-editor${draft.view === "harness" ? " ron-wf-editor-wide" : ""}`}>
       <div className="ron-wf-editor-head">
         <h2>Workflow</h2>
         <select
@@ -180,6 +219,21 @@ export function WorkflowEditorScreen() {
       {!inheritWorkflow && draft.view === "json" && (
         <WorkflowJsonEditor jsonText={draft.jsonText} jsonError={draft.jsonError} onChange={(text) => setDraft(setJsonText(draft, text))} />
       )}
+      {!inheritWorkflow && draft.view === "harness" && (
+        <fieldset className="wf-harness-fieldset" disabled={draft.jsonError !== null}>
+          {draft.jsonError && <p className="ron-msg err">Corrige el JSON antes de cambiar controles del harness.</p>}
+          <HarnessView
+            stages={draft.stages}
+            verifyAfter={draft.verifyAfter}
+            allowVerifyCmd={allowVerifyCmd}
+            arming={draft.arming}
+            verifyGate={verifyGate}
+            onToggle={onHarnessToggle}
+            onEdit={onHarnessEdit}
+            onBandToggle={onHarnessBandToggle}
+          />
+        </fieldset>
+      )}
       {inheritWorkflow && <p className="ron-pf-note">este repo hereda el workflow global — desmarca "heredar" para editar su propio override.</p>}
 
       {draft.fieldError && (
@@ -188,6 +242,7 @@ export function WorkflowEditorScreen() {
         </p>
       )}
       {saveNote && <p className={`ron-msg ${saveNote.kind === "err" ? "err" : "ok"}`}>{saveNote.text}</p>}
+      <DiscardWarning discards={discards} />
 
       <div className="wf-editor-actions">
         <button className="n-btn n-btn-secondary" onClick={() => setDraft(cancelDraft(draft))} disabled={saving}>

@@ -99,6 +99,8 @@ function sessionInputsFromBody(value: unknown): Record<string, string> | undefin
 }
 
 export interface CreateAppOptions {
+  /** Gate de verifyCmd inyectable para probar ambas ramas de /api/health. */
+  verifyGate?: boolean;
   adoptSession?: typeof adoptSession;
   /** Seams de tests HTTP; producción usa settings.json + la política efectiva. */
   trustedRoots?: {
@@ -156,6 +158,7 @@ export function runConfiguredClaude(
 
 export function createApp(options: CreateAppOptions = {}): express.Express {
 const app = express();
+const verifyGate = options.verifyGate ?? VERIFY_GATE;
 const engineApi = options.engine ?? { read: readEngine, save: saveEngine };
 const runBackgroundClaude = runConfiguredClaude(engineApi.read, options.runClaudeP);
 const harness = options.harness ?? createTestHarnessService({ store: createHarnessStore() });
@@ -222,7 +225,7 @@ app.get("/api/health", (req, res) => {
   const expected = process.env.COWORK_DESKTOP_BOOT_TOKEN?.trim() || "";
   const presented = req.get("x-ronin-boot-token") ?? "";
   const tokenOk = constantTimeEqual(expected, presented);
-  res.json({ version: 1, ok: true, service: "ronin-api", tokenOk });
+  res.json({ version: 1, ok: true, service: "ronin-api", tokenOk, verifyGate });
 });
 
 

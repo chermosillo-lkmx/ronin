@@ -153,6 +153,71 @@
 .wf-graph-add text { fill: var(--color-accent-200); font-size: 17px; font-weight: 700; pointer-events: none; }
 .wf-graph-add:hover circle,.wf-graph-add:focus circle { fill: var(--color-accent-800); }
 
+/* ── Harness: riel de controles + loop operativo ───────────────────────── */
+.ron-wf-editor-wide { max-width: 100%; }
+.wf-harness { display: flex; flex-wrap: wrap; gap: var(--space-8); align-items: flex-start; color: var(--color-text); }
+.wf-harness-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.wf-harness-rail { flex: 1 1 262px; max-width: 306px; display: flex; flex-direction: column; gap: var(--space-3); }
+.wf-harness-loop { flex: 1 1 620px; min-width: 0; overflow-x: auto; padding: var(--space-4); border-radius: var(--radius-lg); background: var(--color-bg); }
+.wf-harness-band,
+.wf-harness-coverage,
+.wf-harness-legend { margin: 0; padding: var(--space-5); border: 1px solid var(--color-neutral-800); border-radius: var(--radius-lg); background: var(--color-surface); }
+.wf-harness-band button { width: 100%; display: flex; justify-content: space-between; gap: var(--space-3); padding: var(--space-2); border: 0; border-radius: var(--radius-md); color: var(--color-text); background: transparent; text-align: left; cursor: pointer; }
+.wf-harness-band button:hover:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.wf-harness-band button[aria-pressed="true"] { color: var(--color-accent-200); background: var(--color-accent-900); }
+.wf-harness-band button:disabled { color: var(--color-neutral-600); cursor: not-allowed; }
+.wf-harness-band > small { display: block; margin: var(--space-1) var(--space-2) 0; color: var(--color-neutral-600); line-height: 1.4; }
+.wf-harness-coverage { color: var(--color-neutral-400); }
+.wf-harness-coverage strong { display: block; margin-bottom: var(--space-2); color: currentColor; font: 500 32px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.wf-harness-coverage-cells { display: flex; gap: var(--space-1); margin-bottom: var(--space-3); }
+.wf-harness-coverage-cell { height: 6px; flex: 1; border-radius: 999px; background: var(--color-neutral-800); }
+.wf-harness-coverage-cell[data-coverage-cell="on"] { background: currentColor; }
+.wf-harness-coverage p { color: var(--color-neutral-400); font-size: 12px; line-height: 1.45; }
+.wf-harness-coverage-0 { color: var(--status-fail); }
+.wf-harness-coverage-1, .wf-harness-coverage-2 { color: var(--status-warn); }
+.wf-harness-coverage-3 { color: var(--status-ok); }
+.wf-harness-gate-warning { padding: var(--space-3); border-radius: var(--radius-md); background: color-mix(in srgb, var(--status-fail) 10%, transparent); }
+.wf-harness-legend { list-style: none; background: color-mix(in srgb, var(--color-accent) 7%, var(--color-surface)); border-color: color-mix(in srgb, var(--color-accent) 28%, transparent); }
+.wf-harness-legend li { display: flex; justify-content: space-between; gap: var(--space-3); padding: var(--space-1) 0; color: var(--color-neutral-300); font-size: 12px; }
+.wf-harness-legend small { color: var(--color-neutral-600); }
+.wf-harness-track { display: flex; align-items: flex-end; min-width: max-content; }
+.wf-harness-stage-run { display: flex; align-items: flex-end; }
+.wf-harness-stage-column { width: var(--wf-harness-node-width); flex: 0 0 var(--wf-harness-node-width); display: flex; flex-direction: column; gap: var(--space-3); }
+.wf-harness-controls { min-height: 212px; display: flex; flex-direction: column; justify-content: flex-end; gap: var(--space-2); }
+.wf-harness-control,
+.wf-harness-instruction-chip { width: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-3); border-radius: var(--radius-md); color: var(--color-text); background: var(--color-surface); text-align: left; font: inherit; }
+.wf-harness-control { cursor: pointer; }
+.wf-harness-control-name { display: flex; justify-content: space-between; gap: var(--space-2); font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.wf-harness-control-name small { color: var(--color-neutral-600); font: 9.5px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+.wf-harness-control > small,
+.wf-harness-instruction-chip small { color: var(--color-neutral-600); font-size: 10.5px; line-height: 1.35; }
+.wf-harness-control-on { border-style: solid; border-width: 1px; }
+.wf-harness-control-on[data-kind="deterministic"] { border-color: var(--status-ok); }
+.wf-harness-control-on[data-kind="inferential"] { border-color: var(--color-accent); }
+.wf-harness-control-off { border: 1px dashed var(--color-neutral-700); color: var(--color-neutral-400); }
+.wf-harness-control:disabled { opacity: 0.55; cursor: not-allowed; }
+.wf-harness-control-loss { color: var(--color-neutral-700); }
+.wf-harness-instruction-chip { border: 1px dashed var(--color-neutral-700); opacity: 0.75; }
+.wf-harness-editor { padding: var(--space-3); border: 1px solid var(--color-divider); border-radius: var(--radius-md); background: var(--color-neutral-900); }
+.wf-harness-editor textarea,
+.wf-harness-editor input { width: 100%; box-sizing: border-box; padding: var(--space-2); border: 1px solid var(--color-divider); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-bg); }
+.wf-harness-editor textarea { min-height: 72px; resize: vertical; }
+.wf-harness-node,
+.wf-harness-verify-node { position: relative; width: var(--wf-harness-node-width); height: var(--wf-harness-node-height); box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; gap: var(--space-1); padding: var(--space-3) var(--space-4); border: 1.5px solid var(--color-divider); border-radius: var(--radius-md); background: var(--color-surface); overflow: hidden; }
+.wf-harness-node-title { display: flex; align-items: center; gap: var(--space-2); font-size: 12px; }
+.wf-harness-executor-summary { display: flex; align-items: center; gap: var(--space-2); min-width: 0; color: var(--color-neutral-500); font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.wf-harness-executor-summary > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-harness-executor-summary small { color: var(--status-warn); }
+.wf-harness-gate-dot { position: absolute; top: var(--space-3); right: var(--space-3); width: 6px; height: 6px; border-radius: 999px; background: var(--status-ok); }
+.wf-harness-stage-key { color: var(--color-neutral-700); text-align: center; font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.wf-harness-edge { position: relative; width: var(--wf-harness-gap); flex: 0 0 var(--wf-harness-gap); height: 1.5px; margin-bottom: calc(var(--wf-harness-node-height) / 2 + 19px); background: var(--color-neutral-500); }
+.wf-harness-edge::after { content: ""; position: absolute; right: 0; top: -3px; border-left: 6px solid var(--color-neutral-500); border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; }
+.wf-harness-verify-branch { margin-left: var(--wf-harness-verify-x); display: flex; align-items: center; gap: var(--space-6); padding-top: var(--space-8); color: var(--color-neutral-600); }
+.wf-harness-verify-node { flex: 0 0 var(--wf-harness-node-width); border-style: dashed; border-color: var(--color-accent); }
+.wf-harness-verify-node > span { display: flex; gap: var(--space-2); color: var(--color-text); }
+.wf-harness-verify-node small { color: var(--color-neutral-600); }
+.wf-harness-verify-branch p { max-width: 300px; color: var(--color-neutral-600); font-size: 11.5px; line-height: 1.4; }
+
 /* ── Ejecutores por etapa: la chapa comunica herramienta, nunca resultado ─ */
 .wf-graph-node .ron-exec-graph-title { fill: var(--color-text); font-size: 12px; }
 .wf-graph-node .ron-exec-graph-text { fill: var(--color-neutral-400); font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; }

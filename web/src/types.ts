@@ -40,9 +40,17 @@ export interface WfStage extends WfStep {
   maxRetries?: number;         // P2: reintentos antes de marcar la etapa como fallida
 }
 
+export interface WfInput {
+  key: string;
+  label: string;
+  placeholder?: string;
+  required?: boolean;
+}
+
 export interface WorkflowConfig {
   stages: WfStage[];
   verifyAfter: string | null;
+  inputs?: WfInput[];
 }
 
 export interface WorkflowCatalogItem {

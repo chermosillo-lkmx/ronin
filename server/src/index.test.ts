@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { CAPABILITY_FILE, ensureCapabilityToken, readCapabilityToken } from "./capability.js";
+import { VERIFY_GATE } from "./config.js";
 import { createApp, runConfiguredClaude, startServer } from "./index.js";
 import { createSession } from "./tmux.js";
 import { cycleDirForSession } from "./stages.js";
@@ -163,7 +164,7 @@ test("startServer does not listen until background setup is ready", async () => 
   assert.deepEqual(events, ["listen"]);
 
   const health = await invokeGet(handle.app, "/api/health");
-  assert.deepEqual(health, { status: 200, body: { version: 1, ok: true, service: "ronin-api", tokenOk: false } });
+  assert.deepEqual(health, { status: 200, body: { version: 1, ok: true, service: "ronin-api", tokenOk: false, verifyGate: VERIFY_GATE } });
   assert.equal(JSON.stringify(health.body).includes("token-value"), false);
 
   await handle.close();
@@ -177,18 +178,28 @@ test("/api/health never publishes the boot token, only whether the caller presen
   try {
     const app = createApp();
     const withoutHeader = await invokeGet(app, "/api/health");
-    assert.deepEqual(withoutHeader, { status: 200, body: { version: 1, ok: true, service: "ronin-api", tokenOk: false } });
+    assert.deepEqual(withoutHeader, { status: 200, body: { version: 1, ok: true, service: "ronin-api", tokenOk: false, verifyGate: VERIFY_GATE } });
     assert.equal(JSON.stringify(withoutHeader.body).includes("token-value"), false);
 
     const withWrongHeader = await invokeGet(app, "/api/health", { "x-ronin-boot-token": "wrong" });
-    assert.deepEqual(withWrongHeader.body, { version: 1, ok: true, service: "ronin-api", tokenOk: false });
+    assert.deepEqual(withWrongHeader.body, { version: 1, ok: true, service: "ronin-api", tokenOk: false, verifyGate: VERIFY_GATE });
 
     const withCorrectHeader = await invokeGet(app, "/api/health", { "x-ronin-boot-token": "token-value" });
-    assert.deepEqual(withCorrectHeader, { status: 200, body: { version: 1, ok: true, service: "ronin-api", tokenOk: true } });
+    assert.deepEqual(withCorrectHeader, { status: 200, body: { version: 1, ok: true, service: "ronin-api", tokenOk: true, verifyGate: VERIFY_GATE } });
   } finally {
     if (previous === undefined) delete process.env.COWORK_DESKTOP_BOOT_TOKEN;
     else process.env.COWORK_DESKTOP_BOOT_TOKEN = previous;
   }
+});
+
+test("/api/health expone el gate real y permite inyectar ambas ramas", async () => {
+  const enabled = await invokeGet(createApp({ verifyGate: true }), "/api/health");
+  const disabled = await invokeGet(createApp({ verifyGate: false }), "/api/health");
+  const defaulted = await invokeGet(createApp(), "/api/health");
+
+  assert.equal(enabled.body.verifyGate, true);
+  assert.equal(disabled.body.verifyGate, false);
+  assert.equal(defaulted.body.verifyGate, VERIFY_GATE);
 });
 
 test("startServer generates the capability token exactly once, before listening", async () => {

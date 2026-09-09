@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
@@ -47,4 +48,12 @@ test("WorkflowGraph muestra el ejecutor y el modelo, y hace visible la herencia"
 
   assert.match(html, /codex · gpt-5\.3-codex/);
   assert.match(html, /hereda del flujo/);
+});
+
+test("WorkflowGraph y HarnessView comparten las constantes de geometría", () => {
+  const graphSource = readFileSync(new URL("./WorkflowGraph.tsx", import.meta.url), "utf8");
+  const harnessSource = readFileSync(new URL("./HarnessView.tsx", import.meta.url), "utf8");
+
+  assert.match(graphSource, /from "\.\/workflow-layout"/);
+  assert.match(harnessSource, /from "\.\/workflow-layout\.js"/);
 });

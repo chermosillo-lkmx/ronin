@@ -158,14 +158,40 @@ Cada etapa declara **quién la ejecuta** y **con qué modelo**, y el prompt se g
 
 - `executor` es `claude`, `codex` o `agy`. **Ausente = hereda del flujo**, y esa herencia se ve
   escrita en el nodo: nunca queda en blanco.
-- El grafo, el stepper y el modal muestran la herramienta con una chapa de monograma. A propósito
-  **no** se usan los colores de estado: en esta app el verde, el rojo y el ámbar significan
-  resultado de pruebas, y reusarlos aquí haría que el grafo pareciera hablar del estado del flujo.
+- El grafo, el stepper y el modal muestran la herramienta con una chapa de monograma, y la chapa
+  **no** usa colores de estado: el ejecutor de una etapa no dice nada sobre cómo fue.
+- El verde tiene dos significados en la app, y los dos son «esto está comprobado»: en Pruebas,
+  que una corrida pasó; en la vista **Harness**, que la etapa lleva un **sensor determinista**
+  (`verifyCmd`) y no depende de que el agente diga que terminó. El ámbar y el rojo del medidor de
+  cobertura son el mismo eje: cuánta evidencia verificable deja el loop. Lo que sigue prohibido es
+  pintar de verde una etapa por su ejecutor o por su avance: eso hablaría del estado del flujo.
 - Cada herramienta recibe el modelo a su manera: Claude lo cambia dentro de la sesión con
   `/model`, Codex lo toma con `--model`. **La bandera de modelo de `agy` es un hueco conocido**:
   hasta que su CLI documente una, el comando sale sin bandera y el modelo se menciona en prosa.
 - Esto sustituye a escribir el ejecutor a mano en la instrucción. Las instrucciones dicen ahora
   **qué** hacer; **quién** lo hace lo redacta Ronin.
+
+### Vista Harness del editor
+
+La cuarta vista del editor lee cada etapa como un pequeño arnés: separa lo que guía al agente de
+lo que observa o bloquea su avance. Hay cuatro controles con interruptor:
+
+- **Instrucción** edita `instruction`.
+- **Ejecutor/modelo** edita `executor` y `model` como una unidad.
+- **Verificador inferencial** elige la etapa de `verifyAfter`.
+- **Gate de avance** edita `verifyCmd`; `maxRetries` es un parámetro del comando, no un quinto
+  interruptor.
+
+Los chips derivados de la instrucción —por ejemplo `junit.xml`, cobertura o ingesta— describen
+intención, pero no prueban que el artefacto exista.
+
+El medidor muestra `etapas con verifyCmd / etapas totales`: cuenta gates deterministas declarados,
+no controles encendidos, texto abundante ni verificaciones ya ejecutadas. Por eso puede marcar
+`0 / N` aunque el riel y las etapas se vean llenos de guías, sensores inferenciales y chips de
+prosa. En un workflow global siempre queda en cero: `verifyCmd` y `maxRetries` sólo se conservan en
+el override por-repo. Incluso allí, el servidor sólo honra `verifyCmd` si arrancó con
+`COWORK_VERIFY_GATE=1`; sin esa bandera el medidor sigue describiendo configuración declarada, no
+comprobaciones realizadas.
 
 ### Gate de etapa por `verifyCmd` (opcional)
 
@@ -182,6 +208,25 @@ salta **sin tocar el estado del gate** — un entorno roto no es un veredicto so
 > **Límite conocido:** esto sólo sirve en repos de una pieza. Un worktree de un repo paraguas que
 > contiene otros repos independientes (ignorados por él) no trae el código de los sub-repos, así
 > que no hay nada que probar ahí. Para esos casos, el camino es el MCP: que reporte el agente.
+
+### Pendiente conocido: instrucción vacía
+
+`server/src/templates.ts:44` intenta dar una instrucción por defecto así:
+
+```ts
+const instruction = fill(s.instruction ?? `etapa ${s.label}.`);
+```
+
+El operador `??` no atrapa la cadena vacía que produce la normalización del workflow. Al apagar
+`instruction`, el prompt puede contener un paso numerado sin texto después del guion. El arreglo de
+una línea pendiente es:
+
+```ts
+const instruction = fill(s.instruction?.trim() || `etapa ${s.label}.`);
+```
+
+No se aplica en este cambio porque altera el comportamiento del runner, que queda fuera de este
+alcance.
 
 ## Arquitectura
 

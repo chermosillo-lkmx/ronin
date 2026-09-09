@@ -13,6 +13,13 @@ export class WorkflowSaveError extends Error {
   }
 }
 
+export async function getHealth(): Promise<{ verifyGate: boolean } | null> {
+  const response = await fetch("/api/health").catch(() => null);
+  if (!response?.ok) return null;
+  const body = await response.json().catch(() => null);
+  return typeof body?.verifyGate === "boolean" ? { verifyGate: body.verifyGate } : null;
+}
+
 export async function getWorkflow(): Promise<WorkflowConfig | null> {
   const r = await fetch("/api/workflow");
   return r.ok ? r.json() : null;
