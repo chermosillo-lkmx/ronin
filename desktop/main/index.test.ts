@@ -69,7 +69,7 @@ test("desktop tooling exposes the focused Electron test command", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
   assert.equal(
     packageJson.scripts?.["test:desktop"],
-    "env -u TMUX node --import tsx --test desktop/main/backend-supervisor.test.ts desktop/main/renderer-readiness.test.ts desktop/main/window-security.test.ts desktop/main/pty.test.ts desktop/main/ipc.test.ts desktop/main/session-name.test.ts desktop/main/capability-path.test.ts desktop/main/smoke.test.ts desktop/main/bootstrap.test.ts desktop/main/app-protocol.test.ts desktop/main/tmux-path.test.ts desktop/main/ttyd-path.test.ts desktop/main/login-path.test.ts desktop/main/index.test.ts desktop/preload/index.test.ts desktop/test/electron-launcher.test.mjs",
+    "env -u TMUX node --import tsx --test desktop/main/backend-supervisor.test.ts desktop/main/renderer-readiness.test.ts desktop/main/window-security.test.ts desktop/main/pty.test.ts desktop/main/ipc.test.ts desktop/main/session-name.test.ts desktop/main/capability-path.test.ts desktop/main/smoke.test.ts desktop/main/bootstrap.test.ts desktop/main/app-protocol.test.ts desktop/main/tmux-path.test.ts desktop/main/ttyd-path.test.ts desktop/main/login-path.test.ts desktop/main/index.test.ts desktop/preload/index.test.ts desktop/test/electron-launcher.test.mjs skills/tmux-worker-loop/harness/harness.test.mjs",
   );
 });
 

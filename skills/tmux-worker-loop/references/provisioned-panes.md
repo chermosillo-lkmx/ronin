@@ -12,14 +12,15 @@ invent a cycle dir. Ronin created a single tmux window with four panes and passe
 
 ```bash
 command -v tmux || echo "MISSING tmux"
-# Only when reviewTool is codex:
-command -v codex || echo "MISSING codex"
 ```
 
-If `reviewTool` is `codex` and codex is **not** installed: **do not proceed to the review gate.**
-Write the problem to `<CYCLE_DIR>/evidence/summary.md` and say so in your pane. Stalling silently at
-the gate is the failure mode to avoid — Ronin can only see sentinels, so a driver that quietly waits
-forever looks identical to one that is thinking.
+Then run the **engine preflight from `SKILL.md` Step 0** — the codex and agy probes that decide what
+goes in the Reviewer and Implementer panes. It applies here unchanged.
+
+A failed probe is **not** a reason to stop: the role falls back to Claude, and you note the swap in
+`<CYCLE_DIR>/evidence/summary.md` and in your pane. What you must never do is stall silently at the
+gate — Ronin can only see sentinels, so a driver quietly waiting forever is indistinguishable from
+one that is thinking. Missing tmux is the only hard stop here.
 
 Do **not** create panes, kill panes, or run `select-layout`. The 2×2 layout is Ronin's, and
 `tmux.ts` asserts the window has exactly four panes — a fifth pane throws
@@ -30,18 +31,18 @@ Do **not** create panes, kill panes, or run `select-layout`. The 2×2 layout is 
 The prompt contains four `pane_id`s of the form `%N`. **Ronin's pane names are slots, not roles** —
 the skill's four roles map onto them like this:
 
-| Ronin slot | Placeholder | Skill role | Model | Writes |
+| Ronin slot | Placeholder | Skill role | Engine (fallback) | Writes |
 |---|---|---|---|---|
-| driver | `{driverPane}` | **Main** (you) | operator's choice | relays, decisions |
-| worker | `{workerPane}` | **Implementer** | **Sonnet** | code + tests + KB + `rgr.log` |
-| review | `{reviewPane}` | **Reviewer** | **Opus** (or codex) | report files only |
-| verify | `{verifyPane}` | **Brain** | **Opus** | `plan.md`, consult answers |
+| driver | `{driverPane}` | **Main** (you) | claude, operator's choice | relays, decisions |
+| worker | `{workerPane}` | **Implementer** | **agy** (`claude --model sonnet`) | code + tests + KB; invokes the RGR writer |
+| review | `{reviewPane}` | **Reviewer** | **codex** (`claude --model opus`) | report files only |
+| verify | `{verifyPane}` | **Brain** | claude **Opus** | `plan.md`, consult answers |
 
 Two things about this mapping are worth stating plainly, because both are easy to get backwards:
 
 - **`worker` is the Implementer, not the planner.** It is the pane that writes code, which is why it
-  runs Sonnet — matching `WORKER_MODEL`. Under the four-role topology the planning it used to do
-  moved out to its own pane.
+  runs the execution-tier engine — agy, or Sonnet on the fallback, matching `WORKER_MODEL`. Under
+  the four-role topology the planning it used to do moved out to its own pane.
 - **`verify` hosts the Brain.** The slot is named for the old flow's verification step; verification
   now belongs to Main and the Reviewer. Giving the Brain its own long-lived pane is the whole point
   of the split — it stays alive as a consultant while the Implementer works from `plan.md` alone.
@@ -77,41 +78,50 @@ Get this file right and every later `relay.sh brain …` lands where you mean. G
 message in the cycle goes to the wrong pane while each individual command reports success — which
 is exactly the failure the `%N` discipline above exists to prevent, reintroduced one layer up.
 
-Copy the two scripts into the cycle dir as Step 3 describes; Ronin does not place them for you:
+Copy the transport scripts and complete harness into the cycle dir; Ronin does not place them for you:
 
 ```bash
-S=~/.claude/skills/tmux-worker-loop   # or the vendored skills/ dir
+S="${TMUX_WORKER_SKILL_SRC:-$HOME/.claude/skills/tmux-worker-loop}"
 cp "$S/watch-multi.sh" "$S/relay.sh" "$CYCLE_DIR"/ && chmod +x "$CYCLE_DIR"/{watch-multi.sh,relay.sh}
+cp -R "$S/harness" "$CYCLE_DIR"/ && chmod +x "$CYCLE_DIR"/harness/*.sh
 touch "$CYCLE_DIR/sentinels.log" "$CYCLE_DIR/rgr.log"
 ```
 
-## 2′. Start Claude in the three sibling panes
+## 2′. Start the engines in the three sibling panes
 
-They start as bare shells, so you start the tools yourself. **Launch each with the explicit
-`--model` your prompt gave you** (§2.6′) — in Driver mode nothing else sets it, and riding the
-account default is how a Reviewer ends up on Sonnet:
+They start as bare shells, so you start the tools yourself. **Run the engine preflight from
+`SKILL.md` Step 0 first** — Driver mode does not exempt you from it; the Reviewer still defaults to
+codex and the Implementer to agy, each falling back to Claude when its probe fails. Then launch each
+pane with the explicit model (§2.6′): in Driver mode nothing else sets it, and riding the account
+default is how a Reviewer ends up on the wrong tier.
 
 ```bash
 start_pane() {  # $1 = pane id, $2 = command
   snap=$(tmux capture-pane -t "$1" -p -S -50)
-  if ! grep -qE 'Opus|Sonnet|Haiku|Claude Max|esc to' <<<"$snap"; then
+  if ! grep -qE 'Opus|Sonnet|Haiku|Claude Max|model: *gpt-|Antigravity CLI|esc to' <<<"$snap"; then
     tmux send-keys -t "$1" "$2" Enter
-    until tmux capture-pane -t "$1" -p -S -50 | grep -qE 'Opus|Sonnet|Haiku|esc to'; do sleep 2; done
+    until tmux capture-pane -t "$1" -p -S -50 \
+      | grep -qE 'Opus|Sonnet|Haiku|model: *gpt-|Antigravity CLI|esc to'; do sleep 2; done
   fi
 }
 
 start_pane "$VERIFY_PANE" "claude --model $BRAIN_MODEL"   # Brain
-start_pane "$REVIEW_PANE" "$REVIEW_CMD"                   # Reviewer: codex, or claude --model $REVIEWER_MODEL
-start_pane "$WORKER_PANE" "claude --model $IMPL_MODEL"    # Implementer
+start_pane "$REVIEW_PANE" "$REVIEW_CMD"                   # Reviewer: codex …, else claude --model $REVIEWER_MODEL
+start_pane "$WORKER_PANE" "$IMPL_CMD"                     # Implementer: agy …, else claude --model $IMPL_MODEL
 ```
+
+The full launch commands (with the `--add-dir`, approval-policy and trust flags that codex and agy
+both need) are in `references/engines.md`. Note the readiness grep now covers all three banners —
+the Claude-only version would spin forever against a codex or agy pane that came up fine.
 
 Start a pane only when you actually need it: the Brain at cycle start, the Reviewer at the first
 review gate, the Implementer after `PLAN APPROVED`. Every idle Claude still costs tokens once it has
 a conversation.
 
-Then run the per-pane model assertions from `SKILL.md` Step 2 (`expect_model`). They apply here
-unchanged and they are worth more in this mode, not less — you did not launch these panes from a
-clean layout, so a leftover session from a prior run on the wrong model is a live possibility.
+Then run the per-pane model assertions from `SKILL.md` Step 2 (`expect_engine`). Every call must end
+in `|| exit 1`; a failed banner is a stopped launch, not prose to inspect later. They are worth more
+in this mode, not less — you did not launch these panes from a clean layout, so a leftover session
+from a prior run on the wrong model is a live possibility.
 
 ## 2.6′. Models — they come from your prompt, and there is no `/model` switch
 
@@ -145,8 +155,10 @@ This matters more than it looks: Ronin's dashboard polls `CYCLE_DIR` for stage s
 them anywhere else, the stepper and the ⌘ Sessions sidebar sit frozen at "no stage" for the entire
 run even though the cycle is progressing perfectly.
 
-Write `REQUIREMENT.md`, `sentinels.log`, `rgr.log`, `panes.env` and `relay.log` there, and `touch`
-each stage sentinel **when you start that stage** — the keys are listed in your prompt:
+Write `REQUIREMENT.md`, `sentinels.log`, `rgr.log`, `panes.env`, `worktrees.env`, each
+`harness.<slot>.env`, `harness.provenance`, `verify-rgr.md`, and `relay.log` there. The harness also
+uses `.rgr-index`. Touch each stage sentinel **when you start that stage** — the keys are listed in
+your prompt:
 
 ```
 planning · plan-review · implementing · diff-review · verifying · done
@@ -172,20 +184,25 @@ The only difference is *where* the review happens: instead of calling `codex:cod
 - **`reviewTool: agent`** — the Reviewer pane is a Claude. Send it
   `reviewer_prompt_template.md` verbatim; it already contains the adversarial protocol, the severity
   ladder, and the mandatory RGR/refactor audit.
-- **`reviewTool: codex`** — codex will not follow the sentinel contract. Paste the plan/diff into
-  its pane and read the answer with `capture-pane`. **Include the RGR audit explicitly in what you
-  ask it**, since it is not running the reviewer template: *"read `<CYCLE_DIR>/rgr.log`; for each
-  cycle, was RED real, and did REFACTOR change behavior? Tests must be byte-identical across a
-  refactor."* Then relay its findings to the Implementer prefixed `REVIEW:`.
+- **`reviewTool: codex`** — send `reviewer_prompt_template.md` verbatim here too. **codex *does*
+  follow the sentinel contract**, contrary to what this file said before: sentinels are shell
+  appends, codex runs shell, and it was verified end to end (pasted instruction → `printf … >>
+  sentinels.log` → line in the file, no approval stall) provided the pane was launched with
+  `--add-dir <CYCLE_DIR>`. Without that flag the cycle dir is outside the workspace, every append is
+  refused, and the pane stalls looking like it is thinking. Launch flags: `references/engines.md`.
+
+  Only fall back to "paste the plan, read the answer with `capture-pane`" if the sentinel appends
+  are genuinely blocked on that machine. Pass `verify-rgr.md` with the diff and ask for the semantic
+  work the gate cannot do: whether each refactor is real rather than formal, whether behavior
+  changed at an edge, whether `catches=n/a` hides an unverified bug, and whether scope crept.
 
 Relay findings prefixed `REVIEW:` in both cases — that prefix is what the role protocols key on.
 (`CODEX REVIEW:` is also accepted by the Brain, for continuity with older cycles.)
 
 ## Notes
 
-- The layout commands in `SKILL.md` enable tmux `mouse`, `window-size latest`, and `history-limit
-  50000` for the session. One ttyd renders all four panes, so the operator can click any pane and
-  type into it directly. Assume a human may interject at any time.
+- One ttyd renders all four panes, and tmux `mouse` is on: the operator can click any pane and type
+  into it directly. Assume a human may interject at any time.
 - Ronin kills the whole session on Stop, so all four panes die together. You don't need to clean up.
 - If a pane dies, the remaining `%N` ids stay valid. Restart the tool in that pane (`start_pane`)
   rather than re-splitting — Ronin expects exactly four panes with their slot options set. Note that
