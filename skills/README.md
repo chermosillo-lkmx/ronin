@@ -37,7 +37,29 @@ En modo Driver los slots de Ronin **no** coinciden con los roles del skill — e
 - `relay.sh` — mensajería entre panes: resuelve rol→`%id`, no pega en un pane ocupado, registra `relay.log`.
 - `watch-multi.sh` — watcher único para los 3 panes worker (sentinels + idle + alertas de límite).
 - `references/` — install/setup, pane-discovery, **provisioned-panes** (modo Driver), session-handling, troubleshooting.
+- **Archivos instalables de `harness/`:**
+  - `rgr.sh` — ejecutable que corre las fases, ancla su evidencia y es el único escritor de `rgr.log`.
+  - `verify-rgr.sh` — ejecutable que valida los ciclos y produce el gate mecánico de Main.
+  - `probe-repo.sh` — ejecutable que detecta el stack y escribe el contrato de cada slot.
+  - `fitness.sh` — ejecutable que aplica las reglas estructurales específicas del repositorio.
+  - `gate-layout.sh` — ejecutable que exige cuatro panes y cuatro identificadores únicos.
+  - `rgr-log.sh` — biblioteca sourceada, no un comando; es la única dueña del constructor y parser del log.
+  - `fixture-runner.mjs` — infraestructura de test sin aserciones; limpia el entorno y lanza procesos fixture.
+  - `harness.test.mjs` — suite que prueba los scripts y los contratos markdown operativos.
+- **Artefactos efímeros de cada ciclo:** no se instalan ni viven en el repo; nacen bajo `CYCLE_DIR` y se eliminan con el ciclo.
+  - `harness.<slot>.env` — contrato ejecutable detectado para un worktree declarado.
+  - `worktrees.env` — mapa de slots a rutas físicas de worktree.
+  - `.rgr-index` — índice temporal usado para construir snapshots sin tocar el índice del usuario.
+  - `harness.provenance` — identidad y hash de la copia del harness realmente ejecutada.
 - `watch.sh`, `worker_prompt_template.md` — **legacy** del modo single-worker; se conservan para leer cycle dirs viejos.
+
+La tesis del harness es breve: **nada en `rgr.log` se cree**. Cada campo de evidencia es un SHA que
+existe en la base de objetos Git o un escalar que `verify-rgr.sh` vuelve a derivar de uno de esos
+SHA. El reporte del gate hace explícito el límite de esa afirmación: enumera `covered=`,
+`not-covered=`, las fronteras históricas de evidencia y todas las excepciones/deudas declaradas por
+Main. Un `RESULT: PASS` certifica sólo `covered=`; el Reviewer verifica por su cuenta cada dimensión
+`not-covered=` y trata fronteras, avisos y excepciones como entradas de revisión, no como hechos
+perdonados en silencio.
 
 ### `liebre-commit-workflow`
 Guía los commits/push/PRs: Conventional Commits, el bump de versión de AgileFlow al pushear a

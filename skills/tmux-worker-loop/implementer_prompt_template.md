@@ -66,10 +66,12 @@ Your sentinels:
 
    **🔴 RED — write ONE failing test.**
    - Write the smallest test that expresses the next behavior in the plan.
-   - Run it. **It MUST fail, and you MUST read the failure message.**
+   - Run it through `<CYCLE_DIR>/harness/rgr.sh red "<behavior>" --test-file <path> --name
+     "<exact test name>"`. **It MUST fail, and you MUST read the failure message.**
    - Confirm it fails *for the intended reason* — `AssertionError: expected 3, got 0` is red;
-     `ImportError`, `fixture not found`, `SyntaxError`, or a typo'd attribute is a **broken test**,
-     not a red test. Fix the test and re-run until the failure is the real one.
+     module-loading, missing-fixture, syntax, or a typo'd attribute is a **broken test**, not a red
+     test. The concrete signatures depend on `STACK` and `PASS_FORMAT` in `harness.<slot>.env`.
+     Fix the test and re-run until the failure is the real one.
    - A test that passes on first run is telling you one of three things: the behavior already
      exists (skip the cycle, note it), the test asserts nothing, or it asserts the wrong thing.
      **Never proceed past an unexpectedly-green RED.** Diagnose it and say which of the three it was.
@@ -77,8 +79,16 @@ Your sentinels:
    **🟢 GREEN — make it pass, minimally.**
    - Write the least code that turns that test green. Not the elegant version — the working one.
    - You may not touch any other test to get here. If an existing test breaks, that is a real
-     regression: stop and fix the code, never the assertion.
-   - Run the test. Green. Then run the file's whole suite to confirm you broke nothing adjacent.
+     regression: stop and fix the code, never the assertion. `rgr.sh` enforces this with
+     `tests-diff=` between RED and GREEN.
+   - Run `<CYCLE_DIR>/harness/rgr.sh green`. It reruns the selected test and every `$TEST_CMD_*`;
+     adjacent safety means no failures beyond the anchored baseline, not that every suite exits 0.
+
+   **🧪 VERIFY-CATCHES — for a test that claims to catch a specific bug.**
+   - Before REFACTOR, run `<CYCLE_DIR>/harness/rgr.sh verify-catches --fix-file <path>
+     [--fix-file <path> ...]`. It temporarily reverts the named fix files, runs the frozen RED
+     selector, restores every file, and anchors the resulting failure set. A new file is recorded
+     as `catches=n/a reason=new-file`, which means not mutation-verified, never success.
 
    **🔵 REFACTOR — improve structure, change zero behavior.**
    - This phase is **not optional and not automatically empty.** Look at what GREEN just left
@@ -90,52 +100,51 @@ Your sentinels:
      not the parametrize lists, not the test names. If you find yourself editing a test to keep
      it green while refactoring, you changed behavior — that is not a refactor. Revert, and either
      do it as a new RED cycle or raise `===IMPL:QUESTION===`.
-   - Re-run the suite after refactoring. **The exact same set of tests must pass** — same count,
-     same names. A changed pass-count during REFACTOR is a defect regardless of the direction.
+   - Run `<CYCLE_DIR>/harness/rgr.sh refactor "<what you restructured, or NONE: reason>"`.
+     It reruns the exact suite universe and rejects changes to tests, counts, directives, or the
+     anchored failure set.
 
-3. **Log every cycle to `<CYCLE_DIR>/rgr.log` as you go** — append at the end of each cycle, never
-   reconstruct from memory afterwards. This file is the Reviewer's audit trail; a cycle that is
-   not in it did not happen as far as the review is concerned.
+3. **Never write `rgr.log` yourself.** `rgr.sh` is its sole writer and every decisive value is
+   derived from an anchored tree or raw test-output blob. If a phase command fails, diagnose the
+   command; do not fabricate, repair, or append a phase line manually.
 
-   ```
-   printf '%s\n' \
-   "CYCLE <n> :: <behavior in one line>" \
-   "  RED      test=<test id> :: <exact first failure line>" \
-   "  GREEN    files=<paths touched> :: <N passed>" \
-   "  REFACTOR <what you restructured, or NONE + reason> :: <N passed, same N>" \
-   "  TESTS-TOUCHED-IN-REFACTOR: none" \
-   >> <CYCLE_DIR>/rgr.log
-   ```
-
-   If you ever must write anything other than `none` on that last line, you broke the invariant —
-   stop and raise `===IMPL:QUESTION===` instead of logging it and continuing.
-
-4. For any test the plan flags as catching a specific bug, **verify it actually catches it**:
-   temporarily revert the fix, confirm the test goes red, restore. Note the result in `rgr.log`.
-   A test that stays green with the fix reverted is not testing the fix.
+4. **Expected assertion values are derived from a real fixture run; never predicted.** Run the
+   fixture command first, inspect its literal output, and only then write the assertion. If an
+   assertion uses a regex over structured text, test that regex against the observed literal before
+   putting it in the test. A word boundary before `tests` also matches inside `suite-tests` because
+   `-` is not a word character; that exact mistake caused repeated rollbacks in this harness.
+   Before asserting a file's contents, print the resolved path and confirm it is the file you intend;
+   a plausible relative URL can produce a valid-looking RED against the wrong file.
 
 5. No mocks where the spec depends on real schema behavior. A mock that returns a `dict` where
    production returns a model will make a broken implementation pass.
 
-6. When all cycles are done: run the full suites the plan names, not just your new files. Compare
-   against a baseline captured from `origin/main` so pre-existing failures are not mistaken for
-   regressions.
+6. Before the first RED, run `<CYCLE_DIR>/harness/rgr.sh baseline`. For source diffs use the frozen
+   `BASELINE_REF` from `harness.<slot>.env`; for regressions use the failure-set baseline anchored by
+   `rgr baseline`. Before READY, run `<CYCLE_DIR>/harness/fitness.sh <slot>` and the `$TEST_CMD_*`
+   commands declared in that same environment file.
 
-7. Emit `===IMPL:READY===` with: a per-repo list of changed/added files, the exact pytest summary
-   lines, and the **cycle count with how many had a non-NONE REFACTOR**. Then STOP.
+7. Emit `===IMPL:READY===` with: a per-repo list of changed/added files, each declared suite's actual
+   summary format, and the **cycle count with how many had a non-NONE REFACTOR**. The gate derives
+   authoritative counts from the anchored `$TEST_CMD_*` runs. Then STOP.
 
 ### Phase B — review loop
-6. Main pastes findings prefixed `REVIEW:`. Apply them. Push back in writing if a finding is
+6. Main runs `verify-rgr.sh` before dispatching the Reviewer. If the gate rejects, Main returns
+   `verify-rgr.md`; fix the mechanical violation and emit READY again. A passing report establishes
+   only its explicit `covered=` dimensions. Its `not-covered=` dimensions, historical evidence
+   frontiers, warnings, debts, and exceptions remain inputs for the Reviewer's independent audit.
+7. Main pastes findings prefixed `REVIEW:`. Apply them. Push back in writing if a finding is
    wrong — do not silently comply with something you believe is incorrect, and do not silently
    ignore it either.
-7. Emit `===IMPL:UPDATED===` and wait.
-8. When Main says `IMPL APPROVED — proceed`, go to Phase C.
+8. Emit `===IMPL:UPDATED===` and wait.
+9. When Main says `IMPL APPROVED — proceed`, go to Phase C.
 
 ### Phase C — KB + final
-9. Update the knowledge-base files the plan's "Secciones de KB a actualizar" names. Follow the
-   plan's instructions about in-place amendments vs appends.
-10. Re-run the full suites. Print exact pytest summary lines.
-11. Emit `===IMPL:CYCLE-DONE===`.
+10. Operational KB (`SKILL.md`, role templates, `references/`) is production and must already have
+   been changed inside its own RGR cycles. Phase C updates only `skills/README.md` and other
+   non-executable documentation named by the plan.
+11. Re-run every `$TEST_CMD_*` from `harness.<slot>.env` and report its actual summary format.
+12. Emit `===IMPL:CYCLE-DONE===`.
 
 ## SESSION-USAGE SELF-THROTTLE (NON-NEGOTIABLE)
 
@@ -163,12 +172,13 @@ If Main sends `PAUSE`, reply with ONLY `===IMPL:PAUSED===` and run no tools unti
 
 - Work ONLY inside the worktrees listed above. Never touch the shared checkouts — they are dirty
   and on unrelated branches.
-- Do NOT push, do NOT open PRs, do NOT run destructive git commands (`reset --hard`, `stash`,
+- Never push and do not open PRs. Do not run destructive git commands (`reset --hard`, `stash`,
   force-anything) — other people's uncommitted work lives in sibling worktrees.
+- rgr.sh is the only sanctioned exception to the general no-mutation git rule: its documented evidence refs and
+  temporary index are required by the protocol. It never authorizes a push.
 - Match existing project conventions; read neighboring code before inventing a pattern.
-- **Alembic revision ids must be ≤32 chars** (`alembic_version.version_num` is VARCHAR(32)).
-  Convention: `YYYYMMDD_<short-slug>`. A longer id fails at runtime on the version-pin UPDATE and
-  rolls back the whole migration transaction.
+- Repository-specific rules, including Alembic revision ids ≤32 chars, live in `fitness.sh`; run it
+  instead of relying on repeated prompt prose.
 - Keep output between sentinels concise. Main is reading every line.
 
 START NOW: read plan.md in full, build your todo list, then begin Phase A.

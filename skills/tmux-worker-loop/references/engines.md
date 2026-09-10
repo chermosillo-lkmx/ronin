@@ -73,31 +73,42 @@ to read `panes.env` to find that out.
 ## Launch commands
 
 ```bash
+# RGR refs live in the Git common directory, outside a linked worktree.
+GIT_COMMON_DIR=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir) || exit 1
+
 # Brain — unchanged
 tmux send-keys -t "$brain" "cd $cwd && claude --model opus" Enter
 
 # Reviewer
 tmux send-keys -t "$reviewer" \
-  "cd $cwd && codex --sandbox workspace-write --add-dir $D --add-dir $WT -a never -c model_reasoning_effort=high" Enter
+  "cd $cwd && codex --sandbox workspace-write --add-dir $D --add-dir $WT --add-dir $GIT_COMMON_DIR -a never -c model_reasoning_effort=high" Enter
 # fallback:  cd $cwd && claude --model opus
 
 # Implementer
 tmux send-keys -t "$impl" \
-  "cd $cwd && agy --model gemini-3.6-flash-high --add-dir $D --add-dir $WT --dangerously-skip-permissions" Enter
+  "cd $cwd && agy --model gemini-3.6-flash-high --add-dir $D --add-dir $WT --add-dir $GIT_COMMON_DIR --dangerously-skip-permissions" Enter
 # fallback:  cd $cwd && claude --model sonnet
 ```
 
-`$WT` is the worktree the role works in; repeat `--add-dir` once per worktree.
+`$WT` is the worktree the role works in; repeat `--add-dir` once per worktree and once per distinct
+Git common directory returned by the command above.
 
 **Why each flag is there — none of them are decoration:**
 
 | Flag | Without it |
 |---|---|
 | codex `--add-dir $D` | `<CYCLE_DIR>` is outside the workspace, so **every `sentinels.log` append is refused** and the cycle stalls at the first phase boundary |
+| codex/agy `--add-dir $GIT_COMMON_DIR` | linked-worktree metadata is writable but the shared refs directory is not; `rgr.sh` cannot anchor phase evidence even though worktree edits succeed |
 | codex `-a never` | codex stops to ask for command approval and the pane waits on a human that is not there |
 | codex `-c model_reasoning_effort=high` | you get the config default (`medium`); the Reviewer is the one role where reasoning depth is the product |
 | codex `--sandbox workspace-write` | `read-only` blocks the Reviewer from writing its own report files |
 | agy `--add-dir $D` | same sentinel problem as codex |
+
+`rgr.sh` writes reports through `CYCLE_DIR` and refs through the path returned by
+`git rev-parse --path-format=absolute --git-common-dir`. A linked worktree's common directory is
+outside both `$WT` and `$D`; granting the worktree alone therefore leaves edits working while every
+evidence ref fails. **Codex sandbox has no network**; Main must provision dependencies before
+`probe-repo.sh` and dispatch, as described in `SKILL.md`.
 | agy `--dangerously-skip-permissions` | interactive agy stops on a *"Requesting permission for: … Do you want to proceed?"* menu for **every** shell command, including the sentinel append; headless agy auto-denies them outright. The alternative is pre-seeding `permissions.allow` in `~/.gemini/antigravity-cli/settings.json` — pick one, but you must pick one |
 | trust pre-seed (below) | the pane opens on a *"Do you trust the contents of this …?"* menu and every paste lands in the menu instead of the prompt — **both CLIs, not just agy** |
 
@@ -183,11 +194,11 @@ expect_engine() {   # expect_engine <pane> <role> <want-regex> <forbid-regex>
 
 MENU='Do you trust the contents of'
 
-expect_engine "$brain"    BRAIN       'opus' 'sonnet|haiku'
+expect_engine "$brain"    BRAIN       'opus' 'sonnet|haiku' || exit 1
 expect_engine "$reviewer" REVIEWER    'model: *gpt-[0-9.]+ *(high|medium|low)' \
-                                      "not supported when using Codex|$MENU"
+                                      "not supported when using Codex|$MENU" || exit 1
 expect_engine "$impl"     IMPLEMENTER 'Antigravity CLI [0-9]' \
-                                      "is no longer available\. Using|$MENU"
+                                      "is no longer available\. Using|$MENU" || exit 1
 ```
 
 ⚠️ **`Antigravity CLI` alone is not a valid assertion** — the trust menu's own text reads
@@ -303,9 +314,9 @@ Three things this procedure must not skip:
    how a Reviewer ends up on Sonnet.
 2. **Re-send the full role prompt.** The replacement process has no memory of the cycle. For the
    Reviewer that is cheap. For the **Implementer it is not** — a mid-RGR swap loses every cycle of
-   context, so the replacement must be handed `plan.md`, `rgr.log`, and `git diff` explicitly, and
-   told which cycle it is resuming at. Anything less and it re-implements work that is already in
-   the diff.
+   context, so the replacement must be handed `plan.md`, `rgr.log`, `harness.<slot>.env`, and
+   `git diff` explicitly, and told which cycle it is resuming at. Anything less and it re-implements
+   work that is already in the diff.
 3. **Say so in the final report.** "Reviewed by codex" and "reviewed by codex until cycle 4, then
    Claude" are different claims. Write down which one is true, and update `panes.env` so the
    watcher's alert patterns follow the engine that is actually running.

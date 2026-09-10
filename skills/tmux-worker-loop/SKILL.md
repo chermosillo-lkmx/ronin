@@ -15,7 +15,7 @@ Four roles, four panes — and, as of v9, **three different CLIs**:
 | **Main** | driver (you) | `claude` **Opus 4.8** | — | relays, decisions | implements |
 | **Brain** | worker 1 | `claude` **Opus 5** | — | `plan.md`, consult answers | production code |
 | **Reviewer** | worker 2 | **`codex`** | `claude --model opus` | report files only | production code |
-| **Implementer** | worker 3 | **`agy`** (Antigravity) | `claude --model sonnet` | code + tests + KB + `rgr.log` | design decisions |
+| **Implementer** | worker 3 | **`agy`** (Antigravity) | `claude --model sonnet` | code + tests + KB | design decisions; writing `rgr.log` by hand |
 
 Four separate panes, always — never two roles sharing one session. A shared pane collapses the
 context isolation that makes the Implementer's fresh read of `plan.md` meaningful, and makes the
@@ -98,7 +98,10 @@ digraph workflow {
   "GATE: 4 panes, 4 unique ids" -> "Start the chosen engine in each worker pane";
   "Start the chosen engine in each worker pane" -> "ASSERT per-pane engine+model banner";
   "ASSERT per-pane engine+model banner" -> "Write panes.env + Setup artifacts + watch-multi Monitor";
-  "Write panes.env + Setup artifacts + watch-multi Monitor" -> "Send BRAIN prompt + REQUIREMENT.md";
+  "Write panes.env + Setup artifacts + watch-multi Monitor" -> "Create isolated worktrees + worktrees.env";
+  "Create isolated worktrees + worktrees.env" -> "Provision dependencies";
+  "Provision dependencies" -> "Run probe-repo.sh per slot";
+  "Run probe-repo.sh per slot" -> "Send BRAIN prompt + REQUIREMENT.md";
   "Send BRAIN prompt + REQUIREMENT.md" -> "Wait BRAIN:PLAN-READY";
 
   "Wait BRAIN:PLAN-READY" -> "Send REVIEWER prompt (plan pass)";
@@ -114,8 +117,10 @@ digraph workflow {
   "Send IMPLEMENTER prompt (plan.md only)" -> "Wait IMPL:READY / IMPL:QUESTION";
   "Wait IMPL:READY / IMPL:QUESTION" -> "Relay question to Brain; paste answer back" [label="QUESTION"];
   "Relay question to Brain; paste answer back" -> "Wait IMPL:READY / IMPL:QUESTION";
-  "Wait IMPL:READY / IMPL:QUESTION" -> "Check rgr.log exists + cycles match diff" [label="READY"];
-  "Check rgr.log exists + cycles match diff" -> "Reviewer diff pass + RGR/refactor audit";
+  "Wait IMPL:READY / IMPL:QUESTION" -> "Run verify-rgr.sh" [label="READY"];
+  "Run verify-rgr.sh" -> "Return verify-rgr.md to Implementer" [label="nonzero"];
+  "Return verify-rgr.md to Implementer" -> "Wait IMPL:READY / IMPL:QUESTION";
+  "Run verify-rgr.sh" -> "Reviewer diff pass + semantic RGR/refactor audit" [label="zero"];
   "Reviewer diff pass + RGR/refactor audit" -> "Relay; loop until clean";
   "Relay; loop until clean" -> "Send IMPL APPROVED";
   "Send IMPL APPROVED" -> "Wait IMPL:CYCLE-DONE";
@@ -214,18 +219,12 @@ if [ -n "$clipboard_cmd" ]; then
   tmux bind-key -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$clipboard_cmd"
   tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$clipboard_cmd"
 fi
-
-
-# HARD GATE: exactly 4 panes, 4 distinct ids, none empty.
-n=$(tmux list-panes -t "$win" | wc -l | tr -d ' ')
-ids=$(printf '%s\n' "$main" "$brain" "$reviewer" "$impl" | grep -c '^%')
-uniq=$(printf '%s\n' "$main" "$brain" "$reviewer" "$impl" | sort -u | wc -l | tr -d ' ')
-[ "$n" = 4 ] && [ "$ids" = 4 ] && [ "$uniq" = 4 ] \
-  || { echo "LAYOUT FAIL: panes=$n ids=$ids uniq=$uniq"; }
 echo "main=$main brain=$brain reviewer=$reviewer impl=$impl"
+/bin/bash "$D/gate-layout.sh" "$win" "$main" "$brain" "$reviewer" "$impl"
 ```
 
-If the gate prints `LAYOUT FAIL`, **stop** — do not send prompts into a topology you cannot address.
+Run that block as one Bash invocation and decide from `$?`. If it returns nonzero, **stop** — do not
+send prompts into a topology you cannot address.
 Tear the extra panes down (`tmux kill-pane -t <id>`) and redo the block.
 
 Label each pane so a human glancing at the window can tell who is who:
@@ -270,19 +269,22 @@ If `$TMUX` is unset, tell the user to relaunch (`tmux new -s <name> && claude`) 
 
 Launch each pane with the engine the preflight picked and an **explicit model** — never ride an
 account default, which may be a tier that costs more, or one you are not even entitled to. `$D` is
-the cycle dir; `$WT` the worktree (repeat `--add-dir` per worktree):
+the cycle dir; `$WT` the worktree. RGR refs live in the Git common directory, which is outside a
+linked worktree, so grant that physical path separately:
 
 ```bash
+GIT_COMMON_DIR=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir) || exit 1
+
 tmux send-keys -t "$brain" "cd $cwd && claude --model opus" Enter
 
 # Reviewer — codex, else the Claude fallback
 [ "$reviewer_engine" = codex ] \
-  && tmux send-keys -t "$reviewer" "cd $cwd && codex --sandbox workspace-write --add-dir $D --add-dir $WT -a never -c model_reasoning_effort=high" Enter \
+  && tmux send-keys -t "$reviewer" "cd $cwd && codex --sandbox workspace-write --add-dir $D --add-dir $WT --add-dir $GIT_COMMON_DIR -a never -c model_reasoning_effort=high" Enter \
   || tmux send-keys -t "$reviewer" "cd $cwd && claude --model opus" Enter
 
 # Implementer — agy, else the Claude fallback
 [ "$impl_engine" = agy ] \
-  && tmux send-keys -t "$impl" "cd $cwd && agy --model gemini-3.6-flash-high --add-dir $D --add-dir $WT --dangerously-skip-permissions" Enter \
+  && tmux send-keys -t "$impl" "cd $cwd && agy --model gemini-3.6-flash-high --add-dir $D --add-dir $WT --add-dir $GIT_COMMON_DIR --dangerously-skip-permissions" Enter \
   || tmux send-keys -t "$impl" "cd $cwd && claude --model sonnet" Enter
 ```
 
@@ -291,10 +293,10 @@ is not an edge case — the cycle creates a fresh `git worktree`, so the path is
 therefore always untrusted, and **both** CLIs open on a *"Do you trust the contents of this …?"*
 menu in an untrusted directory. Every paste then lands in the menu instead of the prompt.
 
-**The flags are not optional garnish either** — `engines.md` has the flag-by-flag table; the one to
-internalize is `--add-dir $D`. Without it the cycle dir is outside the workspace, **every
-`sentinels.log` append is refused**, and the cycle stalls at the first phase boundary with the pane
-looking like it is thinking.
+**The flags are not optional garnish either** — `engines.md` has the flag-by-flag table. Without
+`--add-dir $D`, every sentinel append is refused. Without `--add-dir $GIT_COMMON_DIR`, ordinary
+worktree edits succeed but `rgr.sh` cannot create the shared evidence refs. Either omission stalls
+the cycle at a phase boundary with the pane looking like it is thinking.
 
 ⚠️ **A pane blocked on a menu reads as *busy*, not stuck.** agy renders `esc to cancel` in its
 footer while a permission menu is up, so the busy predicate says "working" and every observer
@@ -367,9 +369,10 @@ without losing a single check:
    phase — the plan is the contract and Main still reads it once, in full.)*
 2. **Never let a test run dump into context.** Redirect, then print only what you reason about:
    ```bash
-   pytest -q --tb=no > /tmp/run.txt 2>&1; tail -2 /tmp/run.txt
-   grep -E '^FAILED [^ ]+::' /tmp/run.txt | awk '{print $2}' | sort -u > /tmp/f.txt
-   comm -13 /tmp/base.txt /tmp/f.txt          # only NEW failures reach you
+   cmd=$(awk -F= -v key=TEST_CMD_1 '$1 == key {sub(/^[^=]*=/, ""); print}' "$D/harness.$slot.env")
+   (cd "$worktree" && sh -c "$cmd") > /tmp/run.txt 2>&1
+   tail -2 /tmp/run.txt
+   sed -n '/^## GATE/,$p' "$D/verify-rgr.md"   # only the verified summary reaches you
    ```
    A 45-failure list pasted twice is 20 KB that told you nothing a `comm` line wouldn't.
 3. **Relay pointers, not quotes.** `"lee $D/review-plan-1.md y aplica F1-F14"` costs ~200 bytes;
@@ -391,15 +394,24 @@ not their slash command and it lands as a literal prompt.
 
 ### 3. Set up artifacts and the multi-pane watcher
 
-Cycle id = timestamp; dir = `/tmp/tmux-worker-cycle-<id>`. Copy **both** `watch-multi.sh` and
-`relay.sh` into the dir (so each cycle is self-contained), write the requirement to
+Cycle id = timestamp; dir = `/tmp/tmux-worker-cycle-<id>`. Copy the transport scripts and the
+complete harness into the dir (so each cycle is self-contained), write the requirement to
 `REQUIREMENT.md`, `touch sentinels.log rgr.log`, write `panes.env` (step 1), then arm **one**
 Monitor for all three panes:
 
 ```bash
 # $D already exists — Step 0 created it for the preflight logs.
-S=~/.claude/skills/tmux-worker-loop
+S="${TMUX_WORKER_SKILL_SRC:-$HOME/.claude/skills/tmux-worker-loop}"
 cp "$S/watch-multi.sh" "$S/relay.sh" "$D"/ && chmod +x "$D/watch-multi.sh" "$D/relay.sh"
+cp -R "$S/harness" "$D"/ && chmod +x "$D"/harness/*.sh
+skill_source=$(cd "$S" && pwd -P)
+skill_head=$(git -C "$skill_source" rev-parse HEAD)
+rgr_sha=$(git -C "$skill_source" hash-object "$skill_source/harness/rgr.sh")
+printf '%s\n' \
+  "source=$skill_source" \
+  "head=$skill_head" \
+  "rgr-sha=$rgr_sha" \
+  > "$D/harness.provenance"
 touch "$D/sentinels.log" "$D/rgr.log"
 ```
 
@@ -469,8 +481,27 @@ false positives, it does not eliminate them, and a real limit must never be dism
 > "Usage limits (HARD STOPS)" below. Refuse to dispatch a new cycle without headroom; refuse an
 > autonomous multi-task batch at ≥ 50%.
 
-Three templates, one per role. Render each with `sed`, substituting `<CYCLE_DIR>`, `<SERVICE>`,
-`<WORKTREES>`, `<KB_PATH>`:
+Before rendering any prompt, prepare every repository in this order:
+
+1. Create a dedicated `git worktree` per repository off the approved base and give each one a
+   stable slot name. Never point workers at a shared checkout.
+2. Write `worktrees.env` as `slot=/physical/path` entries, resolving every path with `pwd -P`.
+   Reject duplicate slots and duplicate physical paths.
+3. Provision dependencies before probing. For Node, a main-checkout `node_modules` symlink is
+   allowed only when the two `package-lock.json` files are byte-identical; otherwise install in the
+   worktree using Main's network access. The worker sandboxes have no network.
+4. Probe every declared slot and capture its executable contract. Conceptually this is
+   `probe-repo.sh "$slot"`; invoke the cycle-local copy as shown:
+
+   ```bash
+   while IFS='=' read -r slot worktree; do
+     [ -n "$slot" ] || continue
+     CYCLE_DIR="$D" "$D/harness/probe-repo.sh" "$slot" || exit $?
+   done < "$D/worktrees.env"
+   ```
+
+Render each template only after those steps, substituting `<CYCLE_DIR>`, `<SERVICE>`, `<WORKTREES>`,
+`<KB_PATH>`, and the values from each `harness.<slot>.env`:
 
 | Template | Pane | Sent when |
 |---|---|---|
@@ -484,10 +515,6 @@ is a shell append that all three CLIs can perform (verified end to end on codex:
 `printf … >> sentinels.log` → line in the file, no approval stall). Do not write a reduced
 "codex version" of the reviewer prompt: the severity ladder and the mandatory RGR audit are the
 review, and a paraphrase drops them.
-
-**Isolate the work first.** Create a dedicated `git worktree` per repo off `origin/main` and name
-them in `<WORKTREES>`. Never point workers at a shared checkout — it is usually dirty and on an
-unrelated branch, and concurrent sessions will clobber each other.
 
 Make sure `<KB_PATH>` exists; if not, fall back to `knowledge-base/README.md` + `architecture.md`.
 
@@ -526,7 +553,7 @@ renegotiated with no record and no one verifying the result still matches `REQUI
       │ claude  │     │     │     agy       │
       └─────────┘     │     └───────────────┘
                  ┌────▼─────┐
-                 │ REVIEWER │  codex — reads plan.md, the diff, and rgr.log
+                 │ REVIEWER │  codex — reads plan.md, the diff, rgr.log, and verify-rgr.md
                  └──────────┘
 ```
 
@@ -538,14 +565,14 @@ The conversations that actually carry the work:
 | 2 | Reviewer → Brain | Main relays as `REVIEW:` | findings; loops until clean |
 | 3 | Brain → Implementer | `plan.md` **only** | the contract — no design reasoning |
 | 4 | Implementer → Brain | `IMPL:QUESTION` → Main → Brain → `BRAIN:ANSWER-READY` → Main → Impl | ambiguity in the plan |
-| 5 | Implementer → Reviewer | the diff + `rgr.log` | diff pass + RGR audit |
+| 5 | Implementer → Reviewer | the diff + `rgr.log` + `verify-rgr.md` | diff pass + semantic RGR audit |
 | 6 | Reviewer → Implementer | Main relays as `REVIEW:` | findings; loops until clean |
 
 Exchange 4 is the one people are tempted to shortcut. Don't: **every question the Implementer asks
 is evidence the plan was underspecified**, and Main seeing it is how that gets fixed at the source
 instead of being patched verbally. Log them.
 
-Exchange 5 is where the RGR audit happens — the Reviewer reads `rgr.log` alongside the diff. See
+Exchange 5 is where the semantic RGR audit happens — the Reviewer reads the gate report alongside the diff. See
 "RGR: the loop the Implementer runs and the Reviewer audits" below.
 
 ### 5. The orchestration loop
@@ -578,14 +605,19 @@ Exchange 5 is where the RGR audit happens — the Reviewer reads `rgr.log` along
 wait for `===BRAIN:ANSWER-READY===`, paste the answer back — and note the question, it is a defect
 in the plan. On `===IMPL:READY===`:
 
-1. **Check `<CYCLE_DIR>/rgr.log` exists** and its cycle count is plausible against `git diff --stat`.
-   Missing or thin → send it back before spending the Reviewer on it.
-2. Run the Reviewer's **diff pass**, which includes the mandatory RGR/refactor audit.
+1. Run the machine gate before spending the Reviewer on semantic work:
+   ```bash
+   CYCLE_DIR="$D" "$D/harness/verify-rgr.sh"
+   ```
+   If it exits nonzero, do not dispatch review. Return the Implementer to `verify-rgr.md` and wait
+   for a new READY. Main declares every approved exception only through argv as
+   `--<type> <subject> [--scope key=value]... --reason "<why>"`; all must appear
+   together under `DECLARED EXCEPTIONS` in that report, never inside `rgr.log`.
+2. Run the Reviewer's **diff pass**, which consumes `verify-rgr.md` and includes the mandatory
+   semantic RGR/refactor audit.
 3. Run your own `git diff --stat` against the plan's promised file list.
-4. **Run the suites yourself, but never into your context** — redirect, then compare failure sets
-   against a baseline worktree on `origin/main` (§2.6 rule 2). "Zero new failures" is a `comm`
-   line; a 45-name failure list is 20 KB that says the same thing. Keep the baseline worktree
-   around for the whole cycle and delete it at the end.
+4. **Run the declared `$TEST_CMD_*` suites yourself, but never into your context** — redirect their
+   raw output and compare the result with the anchored baseline and counts in `verify-rgr.md`.
 5. Read the diff report's `## VERDICT` block first; open the body for blockers only.
 6. Relay findings; loop until clean; then `IMPL APPROVED — proceed`.
 
@@ -593,7 +625,7 @@ in the plan. On `===IMPL:READY===`:
 degrades the review to "skipped" — it degrades it to Claude. Swap the engine per
 `references/engines.md`, re-assert the banner, re-send the reviewer prompt, and record the swap.
 Same for agy on the Implementer side, with one extra cost: a mid-RGR swap loses every cycle of
-context, so the replacement must be handed `plan.md`, `rgr.log` and `git diff` explicitly and told
+context, so the replacement must be handed `plan.md`, `rgr.log`, `harness.<slot>.env`, and `git diff` explicitly and told
 which cycle it is resuming at, or it will re-implement work already sitting in the diff.
 
 If you also reach for `codex:codex-rescue` from your own context as an extra opinion, remember it is
@@ -603,7 +635,11 @@ status/log file before treating its output as a gate decision.
 ### 6. Final verification
 After `===IMPL:CYCLE-DONE===`:
 - Confirm the KB files actually mention the new flow (read them; don't trust the claim).
-- Re-run the test suites yourself, or demand the exact pytest summary lines.
+- Re-run every `$TEST_CMD_*` declared in each `harness.<slot>.env`; report the format each stack
+  actually emits rather than assuming pytest.
+- Read `DEPS_OK` and `MISSING` from every slot contract. Missing affordances are declared limits,
+  not silently successful checks.
+- Run `verify-rgr.sh` one final time and confirm its `## GATE` result before reporting success.
 - Read `rgr.log` end to end and confirm the Reviewer's audit table covers every cycle in it.
   A cycle in the log with no verdict in the report was never reviewed.
 - Report changed files, test results, RGR cycle count (and how many had a real refactor), deploy
@@ -611,6 +647,20 @@ After `===IMPL:CYCLE-DONE===`:
 - **State which engine did each job**, including any mid-cycle fallback and the cycle it happened
   at. "Reviewed by codex" and "reviewed by codex through cycle 4, then Claude" are different claims
   about how independently the change was checked; the user cannot infer which one is true.
+- Warn if the installed skill and repository copy differ: merging does not install the skill.
+- After every verification and report is complete, remove the cycle evidence namespace explicitly:
+  ```bash
+  git for-each-ref --format='delete %(refname)' "refs/rgr/<cycle-id>" | git update-ref --stdin
+  ```
+
+## Steering loop
+
+Every problem observed twice becomes a named control. Record the incident, whether the response is
+guidance or a machine sensor, and where that response now lives. Prefer a sensor when the property is
+computable; when it is not, keep the limitation explicit and assign the semantic check to a role.
+This is how footer truncation became file sentinels, alert false positives gained filtering and
+dedupe, and the 93% usage incident became a pre-dispatch budget gate. Do not leave repeated failures
+as oral history.
 
 ## Sentinels (the contract)
 
@@ -647,9 +697,10 @@ The worker appends each to `sentinels.log` AND prints it on its own line, only a
 
 ## RGR: the loop the Implementer runs and the Reviewer audits
 
-The Implementer works in strict **RED → GREEN → REFACTOR** cycles, one behavior per cycle, and
-appends each cycle to `<CYCLE_DIR>/rgr.log`. The Reviewer audits that log against the diff during
-its diff pass. Both halves are mandatory — the log without the audit is paperwork.
+The Implementer works in strict **RED → GREEN → REFACTOR** cycles, one behavior per cycle.
+`rgr.sh` executes every phase, anchors its evidence under `refs/rgr/<cycle-id>/…`, and is the sole
+writer of `<CYCLE_DIR>/rgr.log`. Main runs `verify-rgr.sh`; the Reviewer then audits the remaining
+semantic questions against the diff and `verify-rgr.md`.
 
 | Phase | Implementer must | Failure that hides here |
 |---|---|---|
@@ -665,13 +716,23 @@ what the code now does. This is the same argument that splits Brain from Impleme
 level down.
 
 As Main, your part is narrow but non-negotiable:
-- **`rgr.log` must exist before you run the diff pass.** Missing, or fewer cycles than the diff
-  implies → send it back; do not ask the Reviewer to audit a refactor with no record.
-- **Skim it yourself** for `REFACTOR: NONE` on every cycle (phase performed as a formality) and for
-  any `TESTS-TOUCHED-IN-REFACTOR` line that is not `none` (the invariant broke).
+- **The gate must exit zero before you run the diff pass.** Its cycle count, phase order, test diffs,
+  scalar totals, failure sets and object ownership are established evidence.
+- **Read `verify-rgr.md` as a coverage boundary, not a blanket certificate.** It declares the
+  mechanical `covered=` dimensions, the `not-covered=` dimensions, every historical evidence
+  frontier, and every Main-declared exception or debt. `RESULT: PASS` establishes only `covered=`;
+  the Reviewer must independently audit every `not-covered=` item, plus `catches=n/a`, repeated
+  `REFACTOR note=NONE`, warnings, frontiers, and exceptions.
 - **Never approve a "refactor" that required a test edit** without an explicit scope decision from
   the user. That is a behavior change wearing a refactor label, and it is exactly the drift this
   skill exists to catch.
+
+The refs are probative, not temporary decoration: they keep each tree, raw run and normalized
+failure-set blob reachable through `git gc`, while an unreferenced object can be pruned. Delete the
+namespace only after final verification as shown above.
+
+Two accepted limits remain visible. The emission of voluntary sentinels is not mechanically forced.
+"Never push" has no sensor because Git hooks are shared across worktrees; Main must verify that rule.
 
 ## Detecting drift
 Drift = the worker is implementing something that isn't in the requirement, or skipping a clause. Catch it by:
@@ -798,6 +859,15 @@ Quick reference table (capture, send, paste, idle/running detection) and common 
   for all roles
 - `relay.sh` — **inter-pane messaging**; resolves role→`%id`, blocks on busy panes (engine-portable
   check), logs `relay.log`
+- `harness/` — computational RGR tooling:
+  - `rgr.sh` — sole phase runner and writer of `rgr.log`
+  - `verify-rgr.sh` — Main's machine gate over anchored RGR evidence
+  - `probe-repo.sh` — discovers and records each slot's executable repository contract
+  - `fitness.sh` — dispatches repository-specific fitness rules
+  - `gate-layout.sh` — enforces the four-pane topology by exit code
+  - `rgr-log.sh` — sourced library; sole owner of the frozen log constructor and parser
+  - `fixture-runner.mjs` — execution-only fixture plumbing outside `TEST_GLOBS`; it contains no assertions
+  - `harness.test.mjs` — fixture suite for the scripts and operational markdown contracts
 - `brain_prompt_template.md` — Brain: plan + consultant, never writes code
 - `reviewer_prompt_template.md` — Reviewer: adversarial passes + RGR/refactor audit, read-only
 - `implementer_prompt_template.md` — Implementer: strict RED→GREEN→REFACTOR from `plan.md` alone
@@ -811,7 +881,8 @@ Quick reference table (capture, send, paste, idle/running detection) and common 
   topology is no longer collapsible (see below). Kept only for reading old cycle dirs.
 
 Files written per cycle into `<CYCLE_DIR>`: `REQUIREMENT.md`, `plan.md`, `panes.env`,
-`sentinels.log`, `rgr.log`, `relay.log`, and the Reviewer's report files.
+`worktrees.env`, `harness.<slot>.env`, `harness.provenance`, `.rgr-index`, `sentinels.log`, `rgr.log`,
+`verify-rgr.md`, `relay.log`, and the Reviewer's report files.
 
 ## Topology is fixed at four panes
 

@@ -34,7 +34,7 @@ the skill's four roles map onto them like this:
 | Ronin slot | Placeholder | Skill role | Engine (fallback) | Writes |
 |---|---|---|---|---|
 | driver | `{driverPane}` | **Main** (you) | claude, operator's choice | relays, decisions |
-| worker | `{workerPane}` | **Implementer** | **agy** (`claude --model sonnet`) | code + tests + KB + `rgr.log` |
+| worker | `{workerPane}` | **Implementer** | **agy** (`claude --model sonnet`) | code + tests + KB; invokes the RGR writer |
 | review | `{reviewPane}` | **Reviewer** | **codex** (`claude --model opus`) | report files only |
 | verify | `{verifyPane}` | **Brain** | claude **Opus** | `plan.md`, consult answers |
 
@@ -78,11 +78,12 @@ Get this file right and every later `relay.sh brain …` lands where you mean. G
 message in the cycle goes to the wrong pane while each individual command reports success — which
 is exactly the failure the `%N` discipline above exists to prevent, reintroduced one layer up.
 
-Copy the two scripts into the cycle dir as Step 3 describes; Ronin does not place them for you:
+Copy the transport scripts and complete harness into the cycle dir; Ronin does not place them for you:
 
 ```bash
-S=~/.claude/skills/tmux-worker-loop   # or the vendored skills/ dir
+S="${TMUX_WORKER_SKILL_SRC:-$HOME/.claude/skills/tmux-worker-loop}"
 cp "$S/watch-multi.sh" "$S/relay.sh" "$CYCLE_DIR"/ && chmod +x "$CYCLE_DIR"/{watch-multi.sh,relay.sh}
+cp -R "$S/harness" "$CYCLE_DIR"/ && chmod +x "$CYCLE_DIR"/harness/*.sh
 touch "$CYCLE_DIR/sentinels.log" "$CYCLE_DIR/rgr.log"
 ```
 
@@ -117,9 +118,10 @@ Start a pane only when you actually need it: the Brain at cycle start, the Revie
 review gate, the Implementer after `PLAN APPROVED`. Every idle Claude still costs tokens once it has
 a conversation.
 
-Then run the per-pane model assertions from `SKILL.md` Step 2 (`expect_model`). They apply here
-unchanged and they are worth more in this mode, not less — you did not launch these panes from a
-clean layout, so a leftover session from a prior run on the wrong model is a live possibility.
+Then run the per-pane model assertions from `SKILL.md` Step 2 (`expect_engine`). Every call must end
+in `|| exit 1`; a failed banner is a stopped launch, not prose to inspect later. They are worth more
+in this mode, not less — you did not launch these panes from a clean layout, so a leftover session
+from a prior run on the wrong model is a live possibility.
 
 ## 2.6′. Models — they come from your prompt, and there is no `/model` switch
 
@@ -153,8 +155,10 @@ This matters more than it looks: Ronin's dashboard polls `CYCLE_DIR` for stage s
 them anywhere else, the stepper and the ⌘ Sessions sidebar sit frozen at "no stage" for the entire
 run even though the cycle is progressing perfectly.
 
-Write `REQUIREMENT.md`, `sentinels.log`, `rgr.log`, `panes.env` and `relay.log` there, and `touch`
-each stage sentinel **when you start that stage** — the keys are listed in your prompt:
+Write `REQUIREMENT.md`, `sentinels.log`, `rgr.log`, `panes.env`, `worktrees.env`, each
+`harness.<slot>.env`, `harness.provenance`, `verify-rgr.md`, and `relay.log` there. The harness also
+uses `.rgr-index`. Touch each stage sentinel **when you start that stage** — the keys are listed in
+your prompt:
 
 ```
 planning · plan-review · implementing · diff-review · verifying · done
@@ -188,10 +192,9 @@ The only difference is *where* the review happens: instead of calling `codex:cod
   refused, and the pane stalls looking like it is thinking. Launch flags: `references/engines.md`.
 
   Only fall back to "paste the plan, read the answer with `capture-pane`" if the sentinel appends
-  are genuinely blocked on that machine — and if you do, **ask for the RGR audit explicitly**, since
-  you are then no longer running the reviewer template: *"read `<CYCLE_DIR>/rgr.log`; for each
-  cycle, was RED real, and did REFACTOR change behavior? Tests must be byte-identical across a
-  refactor."*
+  are genuinely blocked on that machine. Pass `verify-rgr.md` with the diff and ask for the semantic
+  work the gate cannot do: whether each refactor is real rather than formal, whether behavior
+  changed at an edge, whether `catches=n/a` hides an unverified bug, and whether scope crept.
 
 Relay findings prefixed `REVIEW:` in both cases — that prefix is what the role protocols key on.
 (`CODEX REVIEW:` is also accepted by the Brain, for continuity with older cycles.)

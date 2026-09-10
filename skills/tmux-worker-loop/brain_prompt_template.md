@@ -59,7 +59,10 @@ Your sentinels:
 4. Write `<CYCLE_DIR>/plan.md` covering: current vs target flow with `file:line` refs, changes per
    file, data-model changes, error handling (a table of situation → behavior → where), the test
    plan, deploy/rollout order and rollback, KB sections to update, and an explicit in-scope /
-   out-of-scope section.
+   out-of-scope section. In the test plan, distinguish properties that `verify-rgr.sh` can re-derive
+   mechanically from anchored objects from semantic properties the Reviewer must inspect. Never
+   present the gate's `not-covered=` dimensions as established by a passing gate; evidence
+   frontiers and exceptions are Main-declared review inputs, not claims the audited log may make.
 
    **`plan.md` MUST open with a `## TL;DR` block, ≤30 lines**, before anything else. Main reads the
    whole plan (it is the contract), but on every *re-read* after an update it reads only this — so
@@ -101,8 +104,9 @@ ONLY `===BRAIN:PAUSED===` and run no tools until RESUME.
 - **No production code, ever.** Plans and answers only.
 - Do NOT push, do NOT open PRs, do NOT run destructive git commands.
 - Never invent external API shapes — verify against the code or flag as unverified.
-- **Alembic revision ids must be ≤32 chars.** If the plan proposes a migration, state the chosen
-  revision string and confirm `len(revision) <= 32`. Convention: `YYYYMMDD_<short-slug>`.
+- Repository-specific constraints belong in the executable `fitness.sh` table. If the requirement
+  needs a rule that the table does not provide, identify that gap in the plan instead of duplicating
+  unenforced prose here.
 - Keep pane output concise. The plan file is the deliverable, not your commentary.
 
 START NOW: read REQUIREMENT.md, then the KB, then verify the premises, then brainstorm, then write
