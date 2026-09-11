@@ -65,15 +65,23 @@ export function parseSessionList(stdout: string): Omit<TmuxSessionInfo, "kind" |
   return out;
 }
 
-/** `#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_title}\t#{@cowork-role}\t#{pane_active}` */
+/**
+ * Tabulado: `session\twindow\tpane_id\tcommand\ttitle\trole\tpane_active[\twindow_active]`.
+ * Dos puntos: `session:window:pane_id:pane_active[:window_active]:role:command:title…` — el título va
+ * al final porque puede llevar ":"; el campo `window_active` (0/1) se detecta por valor, porque un
+ * rol nunca es "0"/"1", y así las fixtures capturadas con el formato anterior siguen leyéndose.
+ */
 export function parsePaneList(stdout: string): Map<string, TmuxPaneInfo[]> {
   const m = new Map<string, TmuxPaneInfo[]>();
   for (const line of (stdout ?? "").split("\n")) {
     if (!line.trim()) continue;
     const fields = splitInventoryFields(line);
     const colonFormat = !line.includes("\t") && !line.includes("\\t") && line.includes(":");
-    const [session, win, id, command, title, role, active] = colonFormat
-      ? [fields[0], fields[1], fields[2], fields[5], fields.slice(6).join(":"), fields[4], fields[3]]
+    const colonHasWindowActive = colonFormat && (fields[4] === "0" || fields[4] === "1");
+    const [session, win, id, command, title, role, active, windowActive] = colonFormat
+      ? colonHasWindowActive
+        ? [fields[0], fields[1], fields[2], fields[6], fields.slice(7).join(":"), fields[5], fields[3], fields[4]]
+        : [fields[0], fields[1], fields[2], fields[5], fields.slice(6).join(":"), fields[4], fields[3], undefined]
       : fields;
     // Se exige que el id empiece por `%`: es la identidad estable del pane. Si la línea no la
     // trae, algo se desalineó, y materializarla daría un target inválido que alguien acabaría
@@ -86,6 +94,7 @@ export function parsePaneList(stdout: string): Map<string, TmuxPaneInfo[]> {
       title: title ?? "",
       role: role ? role : null, // "" (opción no seteada) → null, no cadena vacía
       active: active === "1",
+      ...(windowActive === "0" || windowActive === "1" ? { windowActive: windowActive === "1" } : {}),
     };
     const list = m.get(session);
     if (list) list.push(pane);

@@ -163,6 +163,8 @@ export interface TmuxPaneInfo {
   role: string | null;
   engine?: PaneEngine;
   active: boolean;
+  /** La ventana del pane es la actual de la sesión; ausente en inventarios anteriores al campo. */
+  windowActive?: boolean;
 }
 
 /** Espejo de server/src/engine-detect.ts; se deriva del contenido capturado del pane. */

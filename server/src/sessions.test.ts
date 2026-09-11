@@ -384,3 +384,19 @@ test("attachFlow: una gestionada sin nada anotado se marca para poder adoptarla"
   assert.equal(marcada.unrecorded, true);
   assert.equal("flow" in marcada, false);
 });
+
+test("parsePaneList: window_active viaja como windowActive en ambos formatos y el formato viejo sigue leyéndose", () => {
+  // formato nuevo con dos puntos: s:w:%id:pane_active:window_active:role:cmd:title(:con:dos:puntos)
+  const nuevo = parsePaneList("s:0:%1:1:0:conductor:claude:t\ns:1:%2:1:1::zsh:api:watcher");
+  assert.deepEqual(nuevo.get("s")!.map((p) => [p.id, p.active, p.windowActive, p.role, p.command, p.title]), [
+    ["%1", true, false, "conductor", "claude", "t"],
+    ["%2", true, true, null, "zsh", "api:watcher"],
+  ]);
+  // formato viejo (fixtures capturadas): sin window_active → undefined, no false
+  const viejo = parsePaneList("10:0:%4:1::zsh:api:watcher");
+  assert.equal(viejo.get("10")![0].windowActive, undefined);
+  assert.equal(viejo.get("10")![0].title, "api:watcher");
+  // tabulado: octavo campo
+  const tab = parsePaneList("10\\t0\\t%4\\tzsh\\tterminal\\t\\t1\\t0");
+  assert.equal(tab.get("10")![0].windowActive, false);
+});

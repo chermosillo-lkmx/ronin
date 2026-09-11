@@ -157,6 +157,8 @@ export interface TmuxPaneInfo {
   role: string | null;   // @cowork-role; null = sin rol asignado
   engine?: PaneEngine;   // derivado de una captura disponible; ausente sin señal confiable
   active: boolean;
+  /** La ventana del pane es la actual de la sesión; ausente en inventarios anteriores al campo. */
+  windowActive?: boolean;
 }
 
 /** Etiqueta local para operar una sesión sin alterar su identificador real en tmux. */
