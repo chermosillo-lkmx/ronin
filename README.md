@@ -192,17 +192,19 @@ El medidor muestra `etapas con verifyCmd / etapas totales`: cuenta gates determi
 no controles encendidos, texto abundante ni verificaciones ya ejecutadas. Por eso puede marcar
 `0 / N` aunque el riel y las etapas se vean llenos de guías, sensores inferenciales y chips de
 prosa. En un workflow global siempre queda en cero: `verifyCmd` y `maxRetries` sólo se conservan en
-el override por-repo. Incluso allí, el servidor sólo honra `verifyCmd` si arrancó con
-`COWORK_VERIFY_GATE=1`; sin esa bandera el medidor sigue describiendo configuración declarada, no
-comprobaciones realizadas.
+el override por-repo. Incluso allí, el servidor sólo honra `verifyCmd` con el gate encendido (lo
+está por defecto; `COWORK_VERIFY_GATE=0` lo apaga); apagado, el medidor sigue describiendo
+configuración declarada, no comprobaciones realizadas.
 
 ### Gate de etapa por `verifyCmd` (opcional)
 
 Una etapa del override por-repo puede declarar `verifyCmd` y `maxRetries`: cuando el worker marca
 esa etapa, un bucle en el servidor lo ejecuta en su worktree mientras el worker está ocioso, con
 reintentos y sin falsos verdes (agotados los intentos, el gate queda `failed` para siempre). Está
-**apagado por defecto**; se enciende con `COWORK_VERIFY_GATE=1`, igual que el planificador de
-reportes vive tras su propia variable.
+**encendido por defecto** (a diferencia del planificador de reportes, que sigue siendo opt-in) y se
+apaga con `COWORK_VERIFY_GATE=0`. Ojo: ejecuta shell dentro del worktree de las sesiones vivas del
+repo, así que sólo el override por-repo (gitignored) puede declarar `verifyCmd`; el workflow global y
+el catálogo lo rechazan.
 
 Si el repo declara `setupCommand`, Ronin lo corre en segundo plano al crear el worktree para armar
 su entorno (`.venv`, `node_modules`), y el gate espera a que termine; si la provisión falla, se
@@ -277,7 +279,8 @@ viven en el repo sino bajo `userData` — en macOS,
 variables opcionales hay que pasarlas lanzando el binario:
 
 ```bash
-COWORK_VERIFY_GATE=1 release/mac-arm64/Ronin.app/Contents/MacOS/Ronin
+COWORK_REPORT_SCHEDULE=1 release/mac-arm64/Ronin.app/Contents/MacOS/Ronin   # p.ej. encender los reportes
+COWORK_VERIFY_GATE=0 release/mac-arm64/Ronin.app/Contents/MacOS/Ronin       # o apagar el gate de verifyCmd
 ```
 
 Sin firma ni notarización todavía: la primera vez, macOS pide abrirla con clic derecho → Abrir.

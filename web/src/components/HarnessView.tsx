@@ -15,7 +15,7 @@ export interface HarnessViewProps {
   onBandToggle: (band: BandId, on: boolean) => void;
 }
 
-const GATE_DISABLED_DETAIL = "El servidor arrancó sin COWORK_VERIFY_GATE=1, así que ningún verifyCmd se ejecuta. Este número cuenta sensores declarados, no comprobaciones hechas.";
+const GATE_DISABLED_DETAIL = "El servidor arrancó con COWORK_VERIFY_GATE=0, así que ningún verifyCmd se ejecuta. Este número cuenta sensores declarados, no comprobaciones hechas.";
 const EXECUTOR_INITIALS = { claude: "C", codex: "X", agy: "A" } as const;
 const LEGEND = [
   { id: "guide", label: "Guía", hint: "antes de actuar" },
