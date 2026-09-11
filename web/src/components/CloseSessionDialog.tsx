@@ -4,7 +4,9 @@ import type { SessionCleanupReport, TmuxSessionInfo } from "../types";
 
 export interface CloseSessionDialogProps {
   session: TmuxSessionInfo;
-  onClosed: () => void;
+  /** Recibe el reporte de limpieza. El padre lo muestra: este diálogo se desmonta en cuanto la
+   *  sesión desaparece del inventario (5 s), así que no puede ser él quien lo enseñe. */
+  onClosed: (report: SessionCleanupReport) => void;
   onCancel: () => void;
 }
 
@@ -34,7 +36,6 @@ export function SessionCleanupSummary({ report, onDone }: { report: SessionClean
 export function CloseSessionDialog({ session, onClosed, onCancel }: CloseSessionDialogProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [report, setReport] = useState<SessionCleanupReport | null>(null);
 
   async function close() {
     setBusy(true);
@@ -50,12 +51,11 @@ export function CloseSessionDialog({ session, onClosed, onCancel }: CloseSession
       setError(`Sesión cerrada, pero la limpieza falló: ${(result.cleanup as { error?: string } | undefined)?.error ?? "sin detalle"}`);
       return;
     }
-    setReport(result.cleanup);
+    onClosed(result.cleanup);
   }
 
   return <div className="ronin-inline-modal" role="dialog" aria-modal="true" aria-label={`Cerrar ${session.name}`}>
     <div>
-      {report ? <SessionCleanupSummary report={report} onDone={onClosed} /> : <>
       <h2>Cerrar sesión tmux</h2>
       {session.kind === "managed"
         ? <p>Se cerrarán todos los panes de <code>{session.name}</code> y se limpiará lo que la sesión creó: su worktree y rama efímera (si no tienen trabajo sin integrar), su cycle dir en <code>/tmp</code> y los contenedores etiquetados con la sesión.</p>
@@ -65,7 +65,13 @@ export function CloseSessionDialog({ session, onClosed, onCancel }: CloseSession
         <button className="n-btn n-btn-secondary" disabled={busy} onClick={onCancel}>Cancelar</button>
         <button className="n-btn n-btn-danger" data-testid="confirm-close-session" disabled={busy} onClick={() => void close()}>{busy ? "Cerrando…" : "Cerrar sesión"}</button>
       </footer>
-      </>}
     </div>
+  </div>;
+}
+
+/** Modal del reporte, para montarlo en el padre (sobrevive a que la sesión salga del inventario). */
+export function SessionCleanupModal({ session, report, onDone }: { session: string; report: SessionCleanupReport; onDone: () => void }) {
+  return <div className="ronin-inline-modal" role="dialog" aria-modal="true" aria-label={`Sesión ${session} cerrada`}>
+    <div><SessionCleanupSummary report={report} onDone={onDone} /></div>
   </div>;
 }
