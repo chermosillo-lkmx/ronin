@@ -12,7 +12,7 @@ import { pendingDiscards, type BandId, type ControlId, type ControlValue } from 
 import { confirmWorkflowSave, workflowPayload } from "../workflow-save";
 import type { WorkflowAnalysis, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "../../types";
 
-export const NEW_WORKFLOW_TEMPLATE: WorkflowConfig = { stages: [{ key: "planning", label: "Plan", icon: "📋" }, { key: "implementing", label: "Impl", icon: "⌨️", role: "impl" }, { key: "tests", label: "Tests", icon: "🧪" }], verifyAfter: null };
+export const NEW_WORKFLOW_TEMPLATE: WorkflowConfig = { stages: [{ key: "planning", label: "Plan", icon: "📋" }, { key: "implementing", label: "Impl", icon: "⌨️", role: "impl" }, { key: "tests", label: "Tests", icon: "🧪" }], verifyAfter: [] };
 // workflow-catalog.ts:130 no persiste verifyCmd en el catálogo global.
 const CATALOG_ALLOW_VERIFY_CMD = false;
 async function confirmArmWarning(warning: ArmWarning): Promise<boolean> {

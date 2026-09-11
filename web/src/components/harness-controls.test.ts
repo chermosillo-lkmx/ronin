@@ -4,7 +4,7 @@ import * as harnessControls from "./harness-controls.js";
 import { bands, controlPatch, coverage, instructionControls, isPersistable, pendingDiscards, stageControls } from "./harness-controls.js";
 
 test("1 stageControls mapea cuatro controles togglables a sus ejes sin maxRetries", () => {
-  const controls = stageControls({ key: "plan", label: "Plan", icon: "📋" }, null, true)
+  const controls = stageControls({ key: "plan", label: "Plan", icon: "📋" }, [], true)
     .filter((control) => control.source === "field")
     .map(({ id, axis, kind }) => ({ id, axis, kind }));
 
@@ -20,7 +20,7 @@ test("1 stageControls mapea cuatro controles togglables a sus ejes sin maxRetrie
 test("2 el workflow global deshabilita verifyCmd y su maxRetries con motivo", () => {
   const verify = stageControls(
     { key: "test", label: "Test", icon: "🧪", verifyCmd: "npm test", maxRetries: 3 },
-    null,
+    [],
     false,
   ).find((control) => control.id === "verifyCmd");
 
@@ -65,13 +65,13 @@ test("5 apagar instruction escribe cadena vacía y stashea el texto", () => {
   assert.deepEqual(result.stash, { instruction: "Escribe el plan" });
 });
 
-test("6 el slot único de verificador en B deja A apagado", () => {
+test("6 el verificador por inclusión permite A y B encendidos", () => {
   const stageA = { key: "a", label: "A", icon: "A" };
   const stageB = { key: "b", label: "B", icon: "B" };
-  const verifierA = stageControls(stageA, "b", true).find((control) => control.id === "verifier");
-  const verifierB = stageControls(stageB, "b", true).find((control) => control.id === "verifier");
+  const verifierA = stageControls(stageA, ["a", "b"], true).find((control) => control.id === "verifier");
+  const verifierB = stageControls(stageB, ["a", "b"], true).find((control) => control.id === "verifier");
 
-  assert.equal(verifierA?.on, false);
+  assert.equal(verifierA?.on, true);
   assert.equal(verifierB?.on, true);
 });
 
@@ -96,26 +96,24 @@ test("7 coverage cuenta gates deterministas, guarda 0/0 y usa sus cuatro tramos"
   }
 });
 
-test("8 bands conserva las cuatro bandas, sus cuentas mixtas y la banda inerte", () => {
+test("8 bands conserva las cuatro bandas por control y sus cuentas mixtas", () => {
   const result = bands([
     { key: "a", label: "A", icon: "A", instruction: "Haz A", verifyCmd: "npm test" },
     { key: "b", label: "B", icon: "B", executor: "codex" },
-  ], "b", true);
+  ], ["b"], true);
 
   assert.deepEqual(result.map(({ id, label, note }) => ({ id, label, note })), [
-    { id: "guides", label: "Guías", note: "el texto que dice qué hacer, antes de actuar" },
-    { id: "deterministic-sensors", label: "Sensores deterministas", note: "artefactos que Ronin lee, no resúmenes" },
-    { id: "inferential-sensors", label: "Sensores inferenciales", note: "un modelo juzgando después del hecho" },
-    { id: "gates", label: "Gates de avance", note: "verifyCmd y maxRetries: exit code manda" },
+    { id: "gates", label: "Gate por comando", note: "exit code manda antes de avanzar" },
+    { id: "verifiers", label: "Revisión por modelo", note: "un modelo juzga después del hecho" },
+    { id: "instruction", label: "Instrucción", note: "qué debe hacer cada etapa" },
+    { id: "executor", label: "Ejecutor fijo", note: "qué herramienta ejecuta cada etapa" },
   ]);
   assert.deepEqual(result.map(({ active, total, mixed }) => ({ active, total, mixed })), [
-    { active: 2, total: 4, mixed: true },
-    { active: 0, total: 0, mixed: false },
+    { active: 1, total: 2, mixed: true },
+    { active: 1, total: 2, mixed: true },
     { active: 1, total: 2, mixed: true },
     { active: 1, total: 2, mixed: true },
   ]);
-  assert.equal(result[1].disabled, true);
-  assert.match(result[1].disabledReason ?? "", /nada aquí es configuración.*nadie lo comprueba/i);
 });
 
 test("B1a isPersistable rechaza comandos e instrucciones vacías y executor heredado", () => {
@@ -173,7 +171,7 @@ test("18 los chips de prosa son inertes y no mueven coverage", () => {
 test("executor claude sin modelo advierte que no cambia el prompt", () => {
   const executor = stageControls(
     { key: "impl", label: "Impl", icon: "⌨️", executor: "claude" },
-    null,
+    [],
     true,
   ).find((control) => control.id === "executor");
 
@@ -212,4 +210,39 @@ test("RETRY-1 maxRetries vacío usa default y cero explícito se conserva", () =
   assert.equal(parseMaxRetriesInput?.(""), undefined);
   assert.equal(parseMaxRetriesInput?.("0"), 0);
   assert.equal(parseMaxRetriesInput?.("3"), 3);
+});
+
+test("B1 v2: las bandas corresponden uno-a-uno con controles y cuentan etapas", () => {
+  const result = bands([
+    { key: "a", label: "A", icon: "A", instruction: "Haz A", verifyCmd: "npm test" },
+    { key: "b", label: "B", icon: "B", executor: "codex" },
+  ], ["b"] as any, true);
+
+  assert.deepEqual(result.map(({ id, label, active, total }) => ({ id, label, active, total })), [
+    { id: "gates", label: "Gate por comando", active: 1, total: 2 },
+    { id: "verifiers", label: "Revisión por modelo", active: 1, total: 2 },
+    { id: "instruction", label: "Instrucción", active: 1, total: 2 },
+    { id: "executor", label: "Ejecutor fijo", active: 1, total: 2 },
+  ]);
+});
+
+test("B1 v2: verifier usa inclusión y permite dos etapas encendidas", () => {
+  const selected = ["a", "b"] as any;
+  assert.equal(stageControls({ key: "a", label: "A", icon: "A" }, selected, true)
+    .find((control) => control.id === "verifier")?.on, true);
+  assert.equal(stageControls({ key: "b", label: "B", icon: "B" }, selected, true)
+    .find((control) => control.id === "verifier")?.on, true);
+});
+
+test("B1 v2: coverage conserva los cuatro tramos 0, 1, 2 y 3+", () => {
+  const stages = ["a", "b", "c", "d"].map((key, index) => ({
+    key,
+    label: key,
+    icon: key,
+    ...(index < 3 ? { verifyCmd: "npm test" } : {}),
+  }));
+  assert.equal(coverage([]).note.includes("Ninguna"), true);
+  assert.equal(coverage(stages.slice(0, 1)).note.includes("Una sola"), true);
+  assert.equal(coverage(stages.slice(0, 2)).note.includes("demás etapas"), true);
+  assert.equal(coverage(stages).note.includes("Tres o más"), true);
 });

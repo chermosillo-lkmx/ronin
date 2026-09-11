@@ -20,9 +20,9 @@ export function StageEditor({
   allowVerifyCmd = false,
 }: {
   stages: WfStage[];
-  verifyAfter: string | null;
+  verifyAfter: string[];
   onStages: (next: WfStage[]) => void;
-  onVerifyAfter: (va: string | null) => void;
+  onVerifyAfter: (va: string[]) => void;
   allowVerifyCmd?: boolean; // verifyCmd sólo tiene efecto en el override por-repo (gitignored)
 }) {
   function patch(i: number, p: Partial<WfStage>) {
@@ -108,7 +108,7 @@ export function StageEditor({
 
       <div className="wf-verify">
         <span>🔎 Verificador independiente tras la etapa:</span>
-        <select value={verifyAfter ?? ""} onChange={(e) => onVerifyAfter(e.target.value || null)}>
+        <select value={verifyAfter[0] ?? ""} onChange={(e) => onVerifyAfter(e.target.value ? [e.target.value] : [])}>
           <option value="">(ninguno)</option>
           {stages.filter((s) => s.key).map((s) => (
             <option key={s.key} value={s.key}>{s.icon} {s.label}</option>

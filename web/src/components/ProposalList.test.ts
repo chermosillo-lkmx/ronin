@@ -11,7 +11,7 @@ const P: WorkflowProposal = {
   name: "hotfix-rapido",
   rationale: "Tres tickets de hotfix cerraron sin etapa de plan.",
   evidence: ["CU-1", "9f3ac21"],
-  config: { stages: [{ key: "impl", label: "Impl", icon: "⌨️", role: "impl" }], verifyAfter: null },
+  config: { stages: [{ key: "impl", label: "Impl", icon: "⌨️", role: "impl" }], verifyAfter: [] },
   status: "proposed",
   createdAt: "2026-08-24T10:00:00.000Z",
 };
@@ -65,7 +65,7 @@ test("ProposalList renders the stage chain with instructions, in order", () => {
         { key: "plan", label: "Plan", icon: "📝" },
         { key: "impl", label: "Impl", icon: "⌨️", role: "impl", instruction: "Ejecuta pytest antes de abrir PR" },
       ],
-      verifyAfter: "impl",
+      verifyAfter: ["impl"],
     },
   };
   const html = renderToString(createElement(ProposalList, { proposals: [proposal], analysis: null, busy: false, onAccept: () => {}, onDismiss: () => {} }));

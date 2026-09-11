@@ -8,13 +8,13 @@ import type { RepoOverrideConfig, WorkflowConfig } from "../types.js";
 test("B4b workflowPayload incluye inputs", () => {
   const draft = createWorkflowDraft({
     stages: [{ key: "plan", label: "Plan", icon: "📋" }],
-    verifyAfter: null,
+    verifyAfter: [],
     inputs: [{ key: "ticket", label: "Ticket", required: true }],
   });
 
   assert.deepEqual(workflowPayload(draft), {
     stages: draft.stages,
-    verifyAfter: null,
+    verifyAfter: [],
     inputs: [{ key: "ticket", label: "Ticket", required: true }],
   });
 });
@@ -22,7 +22,7 @@ test("B4b workflowPayload incluye inputs", () => {
 test("B4c repoPayload conserva inputs, setupCommand y kbPath", () => {
   const draft = createWorkflowDraft({
     stages: [{ key: "plan", label: "Plan", icon: "📋" }],
-    verifyAfter: null,
+    verifyAfter: [],
     inputs: [{ key: "ticket", label: "Ticket" }],
   });
   const entry: RepoOverrideConfig = {
@@ -47,13 +47,13 @@ test("B4c repoPayload conserva inputs, setupCommand y kbPath", () => {
 test("SEC-1 Stepper, JSON y Harness atraviesan la misma confirmación al guardar verifyCmd", async (t) => {
   const base = createWorkflowDraft({
     stages: [{ key: "tests", label: "Pruebas", icon: "🧪" }],
-    verifyAfter: null,
+    verifyAfter: [],
   });
   const drafts = {
-    Stepper: setStages(base, [{ ...base.stages[0], verifyCmd: "npm test" }], null),
+    Stepper: setStages(base, [{ ...base.stages[0], verifyCmd: "npm test" }], []),
     JSON: setJsonText(
       switchView(base, "json"),
-      JSON.stringify({ stages: [{ ...base.stages[0], verifyCmd: "npm test" }], verifyAfter: null }),
+      JSON.stringify({ stages: [{ ...base.stages[0], verifyCmd: "npm test" }], verifyAfter: [] }),
     ),
     Harness: editControlValue(switchView(base, "harness"), "tests", {
       id: "verifyCmd",
@@ -90,7 +90,7 @@ test("SEC-1 Stepper, JSON y Harness atraviesan la misma confirmación al guardar
 test("B1-1 dos ediciones rápidas confirman una vez al guardar el comando completo más reciente", async () => {
   const base = createWorkflowDraft({
     stages: [{ key: "tests", label: "Pruebas", icon: "🧪" }],
-    verifyAfter: null,
+    verifyAfter: [],
   });
   const firstKey = editControlValue(base, "tests", { id: "verifyCmd", verifyCmd: "n" });
   const latest = editControlValue(firstKey, "tests", { id: "verifyCmd", verifyCmd: "npm test" });
@@ -120,10 +120,10 @@ test("B1-1 dos ediciones rápidas confirman una vez al guardar el comando comple
 test("FP1-1 el payload global elimina verifyCmd y maxRetries aunque entren por JSON", () => {
   const draft = setJsonText(createWorkflowDraft({
     stages: [{ key: "tests", label: "Pruebas", icon: "🧪" }],
-    verifyAfter: null,
+    verifyAfter: [],
   }), JSON.stringify({
     stages: [{ key: "tests", label: "Pruebas", icon: "🧪", verifyCmd: "npm test", maxRetries: 0 }],
-    verifyAfter: null,
+    verifyAfter: [],
   }));
   const globalWorkflowPayload = (workflowSave as {
     globalWorkflowPayload?: (value: typeof draft) => WorkflowConfig;
@@ -132,7 +132,7 @@ test("FP1-1 el payload global elimina verifyCmd y maxRetries aunque entren por J
   assert.equal(typeof globalWorkflowPayload, "function");
   assert.deepEqual(globalWorkflowPayload?.(draft), {
     stages: [{ key: "tests", label: "Pruebas", icon: "🧪" }],
-    verifyAfter: null,
+    verifyAfter: [],
   });
 });
 
@@ -142,7 +142,7 @@ test("SEC-1 restaurar verifyCmd individual o masivamente sigue bloqueado por Gua
       { key: "a", label: "A", icon: "A" },
       { key: "b", label: "B", icon: "B" },
     ],
-    verifyAfter: null,
+    verifyAfter: [],
   });
   const stashed = {
     ...base,
@@ -170,4 +170,40 @@ test("SEC-1 restaurar verifyCmd individual o masivamente sigue bloqueado por Gua
       assert.equal(saves, 0);
     });
   }
+});
+
+test("B1 v2: catálogo sin repo confirma verifyCmd nuevo y cancelar impide guardar", async () => {
+  const base = createWorkflowDraft({
+    stages: [{ key: "tests", label: "Pruebas", icon: "T" }],
+    verifyAfter: [],
+  } as any);
+  const draft = setStages(base, [{ ...base.stages[0], verifyCmd: "npm test" }], [] as any);
+  let warning: any;
+  let saves = 0;
+
+  const result = await confirmWorkflowSave(draft, null, {
+    getSessions: async () => { throw new Error("repo null no debe consultar sesiones"); },
+    confirm: async (value) => { warning = value; return false; },
+  }, async () => { saves++; return "saved"; });
+
+  assert.equal(result, null);
+  assert.equal(saves, 0);
+  assert.deepEqual(warning.targets, [{ stageKey: "tests", cmd: "npm test" }]);
+  assert.deepEqual(warning.reached, []);
+});
+
+test("B1 v2: sin cambios de verifyCmd guarda directo aunque repo sea null", async () => {
+  const draft = createWorkflowDraft({
+    stages: [{ key: "tests", label: "Pruebas", icon: "T", verifyCmd: "npm test" }],
+    verifyAfter: [],
+  } as any);
+  let confirms = 0;
+
+  const result = await confirmWorkflowSave(draft, null, {
+    getSessions: async () => [],
+    confirm: async () => { confirms++; return false; },
+  }, async () => "saved");
+
+  assert.equal(result, "saved");
+  assert.equal(confirms, 0);
 });

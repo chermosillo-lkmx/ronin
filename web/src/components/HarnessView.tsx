@@ -6,7 +6,7 @@ import { GAP_X, NODE_H, NODE_W, ROW_Y, VERIFY_ROW_Y } from "./workflow-layout.js
 
 export interface HarnessViewProps {
   stages: WfStage[];
-  verifyAfter: string | null;
+  verifyAfter: string[];
   allowVerifyCmd: boolean;
   arming: { stageKey: string; id: ControlId } | null;
   verifyGate: boolean | null;
@@ -189,7 +189,7 @@ export function HarnessView({
   onBandToggle,
 }: HarnessViewProps) {
   const sectionBands = bands(stages, verifyAfter, allowVerifyCmd);
-  const verifierIndex = stages.findIndex((stage) => stage.key === verifyAfter);
+  const verifierIndex = stages.findIndex((stage) => verifyAfter.includes(stage.key));
   const verifierStage = verifierIndex >= 0 ? stages[verifierIndex] : undefined;
   return (
     <div className="wf-harness">
@@ -241,7 +241,7 @@ export function HarnessView({
         const executorOpen = !stageDisabled && controlOpen(stage.key, "executor", executorOn, arming);
         const verifyOn = verifyControl.on;
         const verifyOpen = !stageDisabled && !verifyControl.disabled && controlOpen(stage.key, "verifyCmd", verifyOn, arming);
-        const verifierOn = verifyAfter === stage.key;
+        const verifierOn = verifyAfter.includes(stage.key);
         return (
           <div className="wf-harness-stage-run" key={`${stage.key}-${index}`}>
           <div className="wf-harness-stage-column" data-harness-stage={stage.key}>

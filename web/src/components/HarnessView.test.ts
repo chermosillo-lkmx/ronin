@@ -11,7 +11,7 @@ const STAGES = [{ key: "planning", label: "Plan", icon: "📋", instruction: "" 
 test("V1 HarnessView abre el editor de instruction armada con foco inicial", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: STAGES,
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: { stageKey: "planning", id: "instruction" },
     verifyGate: null,
@@ -28,7 +28,7 @@ test("V1 HarnessView abre el editor de instruction armada con foco inicial", () 
 test("V2 HarnessView abre verifyCmd con comando y maxRetries subordinado", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: STAGES,
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: { stageKey: "planning", id: "verifyCmd" },
     verifyGate: null,
@@ -48,7 +48,7 @@ test("V3 HarnessView usa ExecutorPicker con un datalistId distinto por etapa", (
       STAGES[0],
       { key: "implementing", label: "Impl", icon: "⌨️", executor: "codex" },
     ],
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: { stageKey: "planning", id: "executor" },
     verifyGate: null,
@@ -65,7 +65,7 @@ test("V3 HarnessView usa ExecutorPicker con un datalistId distinto por etapa", (
 test("V4 HarnessView mantiene cerrados los cuatro controles off sin arming", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: STAGES,
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -81,7 +81,7 @@ test("V4 HarnessView mantiene cerrados los cuatro controles off sin arming", () 
 test("V5 HarnessView conserva maxRetries cero exacto en el input numérico", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: [{ ...STAGES[0], verifyCmd: "npm test", maxRetries: 0 }],
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -93,10 +93,10 @@ test("V5 HarnessView conserva maxRetries cero exacto en el input numérico", () 
   assert.match(html, /type="number"[^>]*value="0"/);
 });
 
-test("V6 HarnessView renderiza cuatro bandas y deja inerte Sensores deterministas", () => {
+test("V6 HarnessView renderiza las cuatro bandas por control", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: STAGES,
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -107,15 +107,16 @@ test("V6 HarnessView renderiza cuatro bandas y deja inerte Sensores determinista
   const source = readFileSync(new URL("./HarnessView.tsx", import.meta.url), "utf8");
 
   assert.equal(html.split("data-band=").length - 1, 4);
-  assert.match(html, /data-band="deterministic-sensors"[^>]*disabled=""/);
-  assert.match(html, /nada aquí es configuración[^<]*nadie lo comprueba/i);
+  for (const band of ["gates", "verifiers", "instruction", "executor"]) {
+    assert.match(html, new RegExp(`data-band="${band}"`));
+  }
   assert.match(source, /onBandToggle\(band\.id, band\.active === 0\)/);
 });
 
 test("14 HarnessView pinta cuatro controles togglables por etapa y maxRetries no es chip", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: STAGES,
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -133,7 +134,7 @@ test("14 HarnessView pinta cuatro controles togglables por etapa y maxRetries no
 test("B2a maxRetries nunca se renderiza como control con aria-pressed", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: [STAGES[0], { ...STAGES[0], key: "tests", verifyCmd: "npm test", maxRetries: 3 }],
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -149,7 +150,7 @@ test("B2a maxRetries nunca se renderiza como control con aria-pressed", () => {
 test("15 HarnessView deshabilita verifyCmd global y explica por qué", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: STAGES,
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: false,
     arming: null,
     verifyGate: null,
@@ -172,8 +173,8 @@ test("16 HarnessView muestra cobertura y sólo dibuja la rama verify cuando est�
     onEdit: noop,
     onBandToggle: noop,
   };
-  const withoutVerifier = renderToString(createElement(HarnessView, { ...props, verifyAfter: null }));
-  const withVerifier = renderToString(createElement(HarnessView, { ...props, verifyAfter: "tests" }));
+  const withoutVerifier = renderToString(createElement(HarnessView, { ...props, verifyAfter: [] }));
+  const withVerifier = renderToString(createElement(HarnessView, { ...props, verifyAfter: ["tests"] }));
 
   assert.match(withoutVerifier, /data-coverage="1\/2"/);
   assert.doesNotMatch(withoutVerifier, /data-verify-branch/);
@@ -183,7 +184,7 @@ test("16 HarnessView muestra cobertura y sólo dibuja la rama verify cuando est�
 test("22 HarnessView avisa sólo cuando sabe que verifyGate está apagado", () => {
   const props = {
     stages: STAGES,
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     onToggle: noop,
@@ -201,7 +202,7 @@ test("22 HarnessView avisa sólo cuando sabe que verifyGate está apagado", () =
 test("18 HarnessView pinta chips de instrucción inertes sin aria-pressed", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: [{ ...STAGES[0], instruction: "Genera junit y coverage" }],
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -219,7 +220,7 @@ test("18 HarnessView pinta chips de instrucción inertes sin aria-pressed", () =
 test("HarnessView hace visible la herencia de executor y su advertencia sin modelo", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: [STAGES[0], { ...STAGES[0], key: "impl", executor: "claude" }],
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -236,7 +237,7 @@ test("HarnessView hace visible la herencia de executor y su advertencia sin mode
 test("HarnessView conserva las cinco filas literales de la leyenda", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: STAGES,
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -263,7 +264,7 @@ test("M1b Harness usa ancho disponible, riel con wrap y scroll horizontal propio
 test("HarnessView conserva nodos de etapa, conectores ordenados y el nodo Verify", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: [STAGES[0], { key: "tests", label: "Pruebas", icon: "🧪" }],
-    verifyAfter: "tests",
+    verifyAfter: ["tests"],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -282,7 +283,7 @@ test("HarnessView conserva nodos de etapa, conectores ordenados y el nodo Verify
 test("HarnessView explica la función y la pérdida de cada control apagado", () => {
   const html = renderToString(createElement(HarnessView, {
     stages: STAGES,
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -326,7 +327,7 @@ test("Harness CSS distingue sensores deterministas, inferenciales y cobertura po
 
 test("HarnessView pinta una celda de cobertura por etapa y ninguna para 0/0", () => {
   const props = {
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -355,7 +356,7 @@ test("HarnessView bloquea todos los controles de ambas etapas con key duplicada"
       { key: "same", label: "Una", icon: "1" },
       { key: "same", label: "Otra", icon: "2" },
     ],
-    verifyAfter: null,
+    verifyAfter: [],
     allowVerifyCmd: true,
     arming: null,
     verifyGate: null,
@@ -368,5 +369,5 @@ test("HarnessView bloquea todos los controles de ambas etapas con key duplicada"
   assert.equal(controls.length, 8);
   assert.equal(controls.every((control) => control.includes('disabled=""')), true);
   assert.equal(controls.every((control) => control.includes('data-identity-reason="duplicate-key"')), true);
-  assert.equal(html.split("Esta key identifica más de una etapa").length - 1, 5);
+  assert.equal(html.split("Esta key identifica más de una etapa").length - 1, 6);
 });

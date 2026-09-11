@@ -6,8 +6,8 @@ import { renderToString } from "react-dom/server";
 import { WorkflowWorkspace } from "./WorkflowWorkspace.js";
 import type { WorkflowCatalogItem } from "../../types.js";
 
-const only: WorkflowCatalogItem = { id: "default", name: "default", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }], verifyAfter: null } };
-const harnessCatalog: WorkflowCatalogItem[] = [{ id: "harness", name: "harness", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }, { key: "impl", label: "Impl", icon: "⌨️", instruction: "escribe plan.md", executor: "codex" }], verifyAfter: "impl" } }];
+const only: WorkflowCatalogItem = { id: "default", name: "default", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }], verifyAfter: [] } };
+const harnessCatalog: WorkflowCatalogItem[] = [{ id: "harness", name: "harness", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }, { key: "impl", label: "Impl", icon: "⌨️", instruction: "escribe plan.md", executor: "codex" }], verifyAfter: ["impl"] } }];
 
 function harnessHtml() {
   return renderToString(createElement(WorkflowWorkspace, { initialCatalog: harnessCatalog, initialView: "harness", onLaunch: () => {} }));
@@ -73,7 +73,7 @@ test("el medidor cuenta 0 sensores con campo detrás en el catálogo", () => {
 });
 
 test("el catálogo con inputs los conserva en el draft que se va a guardar", () => {
-  const catalog: WorkflowCatalogItem[] = [{ id: "inputs", name: "inputs", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }], verifyAfter: null, inputs: [{ key: "ticket", label: "Ticket" }] } }];
+  const catalog: WorkflowCatalogItem[] = [{ id: "inputs", name: "inputs", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }], verifyAfter: [], inputs: [{ key: "ticket", label: "Ticket" }] } }];
   const html = renderToString(createElement(WorkflowWorkspace, { initialCatalog: catalog, initialView: "json", onLaunch: () => {} }));
   const textarea = html.match(/<textarea\b[^>]*>([\s\S]*?)<\/textarea>/)?.[1];
   assert.ok(textarea);

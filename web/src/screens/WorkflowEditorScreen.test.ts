@@ -15,7 +15,7 @@ const CFG: WorkflowConfig = {
     { key: "implementing", label: "Impl", icon: "⌨️", role: "impl" },
     { key: "curl", label: "Curl", icon: "🌐" },
   ],
-  verifyAfter: "curl",
+  verifyAfter: ["curl"],
 };
 
 test("T14.113 round-trip renderizado: las tres vistas del MISMO borrador contienen el mismo conjunto de keys de etapa", () => {

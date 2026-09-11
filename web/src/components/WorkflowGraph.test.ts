@@ -13,7 +13,7 @@ const STAGES: WfStage[] = [
 ];
 
 test("WorkflowGraph sin callbacks se conserva de sólo lectura", () => {
-  const html = renderToString(createElement(WorkflowGraph, { stages: STAGES, verifyAfter: "impl" }));
+  const html = renderToString(createElement(WorkflowGraph, { stages: STAGES, verifyAfter: ["impl"] }));
 
   assert.doesNotMatch(html, /wf-graph-add/);
   assert.doesNotMatch(html, /wf-graph-node-interactive/);
@@ -24,7 +24,7 @@ test("WorkflowGraph con callbacks muestra inserciones y expone etapas interactiv
   const html = renderToString(
     createElement(WorkflowGraph, {
       stages: STAGES,
-      verifyAfter: "impl",
+      verifyAfter: ["impl"],
       onInsertStage: () => {},
       onStageClick: () => {},
     }),
@@ -33,8 +33,8 @@ test("WorkflowGraph con callbacks muestra inserciones y expone etapas interactiv
   assert.equal(html.split('aria-label="Insertar etapa después de').length - 1, STAGES.length - 1);
   assert.equal(html.split('aria-label="Agregar etapa al final"').length - 1, 1);
   for (const stage of STAGES) assert.match(html, new RegExp(`data-stage-key="${stage.key}"[^>]*wf-graph-node-interactive`));
-  assert.match(html, /data-stage-key="verify"/);
-  assert.doesNotMatch(html, /data-stage-key="verify"[^>]*wf-graph-node-interactive/);
+  assert.match(html, /data-stage-key="verify:impl"/);
+  assert.doesNotMatch(html, /data-stage-key="verify:impl"[^>]*wf-graph-node-interactive/);
 });
 
 test("WorkflowGraph muestra el ejecutor y el modelo, y hace visible la herencia", () => {
@@ -43,7 +43,7 @@ test("WorkflowGraph muestra el ejecutor y el modelo, y hace visible la herencia"
       { key: "impl", label: "Implementar", icon: "⌨️", executor: "codex", model: "gpt-5.3-codex" },
       { key: "curl", label: "Curl", icon: "🌐" },
     ],
-    verifyAfter: null,
+    verifyAfter: [],
   }));
 
   assert.match(html, /codex · gpt-5\.3-codex/);

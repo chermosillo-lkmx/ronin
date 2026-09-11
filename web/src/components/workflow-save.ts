@@ -16,7 +16,6 @@ export async function confirmWorkflowSave<T>(
   deps: Omit<ArmDeps, "apply">,
   save: () => Promise<T>,
 ): Promise<T | null> {
-  if (repo === null) return save();
   const targets = verifyCmdTargets(draft);
   if (targets.length === 0) return save();
   const result = await armVerifyCmds(targets, repo, { ...deps, apply: () => {} });
