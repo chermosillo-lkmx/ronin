@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -46,5 +46,19 @@ test("transition accepts once, then refuses with 409; unknown id is 404", () => 
     assert.throws(() => store.transition("prop-1", "dismissed"), (e: InsightsError) => e.status === 409);
     assert.throws(() => store.transition("nope", "dismissed"), (e: InsightsError) => e.status === 404);
     assert.deepEqual(store.listProposals("proposed"), []);
+  });
+});
+
+test("store: un journal legado con verifyAfter string o null en las propuestas se sirve como lista", () => {
+  withDir((dir) => {
+    const proposal = (id: string, verifyAfter: unknown) => ({
+      id, name: id, status: "proposed", createdAt: "c", analysisId: "an-1", rationale: "r", sources: [],
+      config: { stages: [{ key: "curl", label: "Curl", icon: "🌐", instruction: "" }], verifyAfter },
+    });
+    writeFileSync(join(dir, "workflow-proposals.json"), JSON.stringify({ analyses: [], proposals: [proposal("p-str", "curl"), proposal("p-null", null), proposal("p-arr", ["curl"])] }));
+    const store = createProposalStore(dir);
+    const byId = Object.fromEntries(store.listProposals().map((p) => [p.id, p.config.verifyAfter]));
+    assert.deepEqual(byId, { "p-str": ["curl"], "p-null": [], "p-arr": ["curl"] });
+    assert.deepEqual(store.getProposal("p-str")?.config.verifyAfter, ["curl"]);
   });
 });

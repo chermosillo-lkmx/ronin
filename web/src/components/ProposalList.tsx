@@ -3,6 +3,12 @@ import type { WorkflowAnalysis, WorkflowProposal } from "../types";
 /** Panel de propuestas del inspector. Puro: el estado (polling, aceptar/descartar) vive en
  *  `useWorkflowInsights` dentro de `DesktopApp`. `running` y "sin propuestas" son estados
  *  distintos: mientras el modelo corre no se afirma que no hay nada, sólo que aún no llega. */
+/** Una propuesta guardada antes de que verifyAfter fuera lista puede llegar como string o null: nunca debe tumbar el inspector. */
+function verifyAfterLabel(value: unknown): string {
+  const keys = Array.isArray(value) ? value : typeof value === "string" && value ? [value] : [];
+  return keys.join(", ") || "—";
+}
+
 export function ProposalList({ proposals, analysis, busy, onAccept, onDismiss }: {
   proposals: WorkflowProposal[];
   analysis: WorkflowAnalysis | null;
@@ -18,7 +24,7 @@ export function ProposalList({ proposals, analysis, busy, onAccept, onDismiss }:
       <strong>{proposal.name}</strong>
       <p>{proposal.rationale}</p>
       <ol className="ronin-proposal-stages">{proposal.config.stages.map((stage) => <li key={stage.key}><code>{stage.key}</code> {stage.label}{stage.role === "impl" ? " · impl" : ""}{stage.instruction && <small>{stage.instruction}</small>}</li>)}</ol>
-      <p>{`verifyAfter: ${proposal.config.verifyAfter.join(", ") || "—"}`}</p>
+      <p>{`verifyAfter: ${verifyAfterLabel(proposal.config.verifyAfter)}`}</p>
       <div className="ronin-proposal-evidence">{proposal.evidence.map((item, index) => <code key={`${proposal.id}-${index}`}>{item}</code>)}</div>
       <div className="ronin-proposal-actions">
         <button className="n-btn n-btn-primary" disabled={busy} onClick={() => onAccept(proposal.id)}>Aceptar</button>
