@@ -28,7 +28,7 @@ test("store persists analyses and proposals atomically and returns copies", () =
   withDir((dir) => {
     const store = createProposalStore(dir);
     store.upsertAnalysis({ id: "an-1", from: "a", to: "b", status: "running", createdAt: "c", proposalIds: [], discarded: [], signals: { tasks: 0, commits: 0, evidenceFiles: 0 } });
-    store.upsertProposal({ id: "prop-1", analysisId: "an-1", name: "fix-rapido", rationale: "r", evidence: ["CU-1"], config: { stages: [{ key: "planning", label: "Plan", icon: "📋" }], verifyAfter: null }, status: "proposed", createdAt: "c" });
+    store.upsertProposal({ id: "prop-1", analysisId: "an-1", name: "fix-rapido", rationale: "r", evidence: ["CU-1"], config: { stages: [{ key: "planning", label: "Plan", icon: "📋" }], verifyAfter: [] }, status: "proposed", createdAt: "c" });
     const again = createProposalStore(dir);
     assert.equal(again.getAnalysis("an-1")?.status, "running");
     assert.equal(again.listProposals("proposed").length, 1);
@@ -40,7 +40,7 @@ test("store persists analyses and proposals atomically and returns copies", () =
 test("transition accepts once, then refuses with 409; unknown id is 404", () => {
   withDir((dir) => {
     const store = createProposalStore(dir);
-    store.upsertProposal({ id: "prop-1", analysisId: "an-1", name: "fix-rapido", rationale: "r", evidence: ["CU-1"], config: { stages: [{ key: "planning", label: "Plan", icon: "📋" }], verifyAfter: null }, status: "proposed", createdAt: "c" });
+    store.upsertProposal({ id: "prop-1", analysisId: "an-1", name: "fix-rapido", rationale: "r", evidence: ["CU-1"], config: { stages: [{ key: "planning", label: "Plan", icon: "📋" }], verifyAfter: [] }, status: "proposed", createdAt: "c" });
     store.transition("prop-1", "accepted", "wf-9");
     assert.equal(store.getProposal("prop-1")?.catalogId, "wf-9");
     assert.throws(() => store.transition("prop-1", "dismissed"), (e: InsightsError) => e.status === 409);

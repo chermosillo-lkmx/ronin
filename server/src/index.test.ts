@@ -428,11 +428,11 @@ test("T12.97 POST /api/workflow/validate: entrada válida → {ok:true, config} 
   const app = createApp();
   const response = await invokeRequest(app, "POST", "/api/workflow/validate", {
     headers: { "x-ronin-capability": token },
-    body: { stages: [{ key: "planning", label: "  Plan  ", icon: "📋" }], verifyAfter: null },
+    body: { stages: [{ key: "planning", label: "  Plan  ", icon: "📋" }], verifyAfter: [] },
   });
   assert.equal(response.status, 200);
   assert.equal((response.body as any).ok, true);
-  assert.deepEqual((response.body as any).config, { stages: [{ key: "planning", label: "Plan", icon: "📋", instruction: "" }], verifyAfter: null });
+  assert.deepEqual((response.body as any).config, { stages: [{ key: "planning", label: "Plan", icon: "📋", instruction: "" }], verifyAfter: [] });
   assert.deepEqual(getWorkflow(), before); // sin efecto en el archivo real
 });
 
@@ -448,7 +448,7 @@ test("T12.98 POST /api/workflow/validate: entrada inválida → 400 {ok:false, e
         { key: "planning", label: "Plan", icon: "📋" },
         { key: "planning", label: "Otro", icon: "📋" },
       ],
-      verifyAfter: null,
+      verifyAfter: [],
     },
   });
   assert.equal(response.status, 400);
@@ -463,7 +463,7 @@ test("T12.99 POST /api/repo-config/:repo/validate: verifyCmd se CONSERVA (gitign
   const app = createApp();
   const response = await invokeRequest(app, "POST", "/api/repo-config/zz-test-validate-repo/validate", {
     headers: { "x-ronin-capability": token },
-    body: { workflow: { stages: [{ key: "curl", label: "Curl", icon: "🌐", verifyCmd: "npm test" }], verifyAfter: null } },
+    body: { workflow: { stages: [{ key: "curl", label: "Curl", icon: "🌐", verifyCmd: "npm test" }], verifyAfter: [] } },
   });
   assert.equal(response.status, 200);
   assert.equal((response.body as any).ok, true);
@@ -475,7 +475,7 @@ test("T12.100 POST /api/workflow/validate: verifyCmd → 400 VERIFY_CMD_NOT_ALLO
   const app = createApp();
   const response = await invokeRequest(app, "POST", "/api/workflow/validate", {
     headers: { "x-ronin-capability": token },
-    body: { stages: [{ key: "curl", label: "Curl", icon: "🌐", verifyCmd: "npm test" }], verifyAfter: null },
+    body: { stages: [{ key: "curl", label: "Curl", icon: "🌐", verifyCmd: "npm test" }], verifyAfter: [] },
   });
   assert.equal(response.status, 400);
   assert.equal((response.body as any).ok, false);
@@ -1036,7 +1036,7 @@ async function insightsApp() {
             { key: "diagnose", label: "Diagnóstico", icon: "🔎" },
             { key: "fix", label: "Arreglo", icon: "🛠", role: "impl" },
           ],
-          verifyAfter: null,
+          verifyAfter: [],
         },
       },
     ],
@@ -1087,7 +1087,7 @@ test("DELETE /api/workflows devuelve 200, 404 y 409 sin tocar el catálogo real"
   const headers = { "x-ronin-capability": token };
   try {
     const initial = loadWorkflowCatalog(directory).items[0]!;
-    const extra = createWorkflowCatalogItem("release", { stages: [{ key: "plan", label: "Plan", icon: "•" }], verifyAfter: null }, directory);
+    const extra = createWorkflowCatalogItem("release", { stages: [{ key: "plan", label: "Plan", icon: "•" }], verifyAfter: [] }, directory);
     const app = createApp({ catalogDirectory: directory });
     assert.deepEqual(await invokeRequest(app, "DELETE", `/api/workflows/${extra.id}`, { headers }), { status: 200, body: { ok: true } });
     assert.deepEqual(await invokeRequest(app, "DELETE", `/api/workflows/${extra.id}`, { headers }), { status: 404, body: { error: "WORKFLOW_NOT_FOUND", code: "WORKFLOW_NOT_FOUND" } });

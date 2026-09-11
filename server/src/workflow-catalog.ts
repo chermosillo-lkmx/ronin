@@ -24,7 +24,7 @@ function slug(value: unknown): string {
 function cloneConfig(config: WorkflowConfig): WorkflowConfig {
   return {
     stages: config.stages.map((stage) => ({ ...stage })),
-    verifyAfter: config.verifyAfter,
+    verifyAfter: [...config.verifyAfter],
     ...(config.inputs ? { inputs: config.inputs.map((input) => ({ ...input })) } : {}),
   };
 }

@@ -6,7 +6,7 @@ function sources(overrides: Partial<VerifyDriverDepSources> = {}): VerifyDriverD
   return {
     readTmuxInventory: async () => ({ sessions: [], diagnostic: null }),
     readLaunch: () => null,
-    resolveFlow: () => ({ stages: [], verifyAfter: null }),
+    resolveFlow: () => ({ stages: [], verifyAfter: [] }),
     cycleDirForSession: (name) => `/cycle/${name}`,
     detectStage: () => null,
     ...overrides,

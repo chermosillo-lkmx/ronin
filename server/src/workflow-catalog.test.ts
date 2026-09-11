@@ -1,11 +1,11 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createWorkflowCatalogItem, deleteWorkflowCatalogItem, loadWorkflowCatalog, updateWorkflowCatalogItem } from "./workflow-catalog.js";
 
-const valid = { stages: [{ key: "plan", label: "Plan", icon: "•" }], verifyAfter: null };
+const valid = { stages: [{ key: "plan", label: "Plan", icon: "•" }], verifyAfter: [] };
 
 test("workflow catalog migrates the legacy workflow and persists immutable ids", () => {
   const dir = mkdtempSync(join(tmpdir(), "cowork-workflows-"));
@@ -20,7 +20,7 @@ test("workflow catalog migrates the legacy workflow and persists immutable ids",
 test("workflow catalog rejects invalid configs and duplicate names", () => {
   const dir = mkdtempSync(join(tmpdir(), "cowork-workflows-"));
   try {
-    assert.throws(() => createWorkflowCatalogItem("broken", { stages: [], verifyAfter: null }, dir), /necesita al menos una etapa/);
+    assert.throws(() => createWorkflowCatalogItem("broken", { stages: [], verifyAfter: [] }, dir), /necesita al menos una etapa/);
     createWorkflowCatalogItem("release", valid, dir);
     assert.throws(() => createWorkflowCatalogItem("release", valid, dir), /WORKFLOW_NAME_EXISTS/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -46,6 +46,25 @@ test("workflow catalog conserva inputs declarados al volver a leer", () => {
     assert.deepEqual(loadWorkflowCatalog(dir).items.find((item) => item.id === created.id)?.config.inputs, [
       { key: "ticket", label: "Ticket", required: true },
     ]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("A2: el catálogo normaliza verifyAfter legado al cargar de disco", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cowork-workflows-"));
+  try {
+    writeFileSync(join(dir, "workflows.json"), JSON.stringify({
+      version: 1,
+      items: [{
+        id: "wf-legacy",
+        name: "legacy",
+        updatedAt: 1,
+        config: {
+          stages: [{ key: "curl", label: "Curl", icon: "🌐" }],
+          verifyAfter: "curl",
+        },
+      }],
+    }));
+    assert.deepEqual(loadWorkflowCatalog(dir).items[0]?.config.verifyAfter, ["curl"]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

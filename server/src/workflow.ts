@@ -47,7 +47,7 @@ export interface WfInput {
 
 export interface WorkflowConfig {
   stages: WfStage[];
-  verifyAfter: string | null; // spawn the independent verifier after this stage (null = none)
+  verifyAfter: string[]; // stages reviewed by the independent verifier (empty = none)
   /** Ausente conserva el lanzamiento histórico con una única petición libre. */
   inputs?: WfInput[];
 }
@@ -80,7 +80,7 @@ export function stripVerifyFields<T extends object>(stage: T): Omit<T, "verifyCm
 }
 
 const DEFAULT: WorkflowConfig = {
-  verifyAfter: "curl",
+  verifyAfter: ["curl"],
   stages: [
     { key: "planning", label: "Plan", icon: "📋", instruction: "Escribe un plan breve de la implementación y los artefactos a entregar." },
     { key: "implementing", label: "Impl", icon: "⌨️", role: "impl", instruction: "Implementa la solución." },
@@ -127,14 +127,14 @@ export function getStages(): WfStage[] {
   return load().stages;
 }
 
-export function getVerifyAfter(): string | null {
-  return load().verifyAfter;
+export function getVerifyAfter(): string[] {
+  return [...load().verifyAfter];
 }
 
 /** Full config (deep copy) — for the editor UI. */
 export function getWorkflow(): WorkflowConfig {
   const { stages, verifyAfter, inputs } = load();
-  return { stages: stages.map((s) => ({ ...s })), verifyAfter, ...(inputs ? { inputs: inputs.map((input) => ({ ...input })) } : {}) };
+  return { stages: stages.map((s) => ({ ...s })), verifyAfter: [...verifyAfter], ...(inputs ? { inputs: inputs.map((input) => ({ ...input })) } : {}) };
 }
 
 function slug(s: string): string {
@@ -156,8 +156,7 @@ export const WORKFLOW_PROMPT_RESERVED_KEYS = [
  * Stepper fijo del modo Driver (como RESEARCH_STAGES: desacoplado del workflow.json componible).
  *
  * Tres restricciones que dictan estas keys, todas con dientes:
- * 1. `verifyAfter: null` es OBLIGATORIO. Con valor no nulo, pollLive dispara spawnVerifier, que
- *    crea una sesión tmux ENTERA aparte — anulando en silencio el modelo de 4 panes.
+ * 1. `verifyAfter: []` es OBLIGATORIO: el Driver gestiona sus cuatro panes directamente.
  * 2. La etapa de verificación NO se llama "verify": sigue siendo RESERVED_KEY para no chocar
  *    con los sentinels de sesiones históricas.
  * 3. El switch de modelo (maybeSwitchModel teclea /model en el pane ACTIVO) NO debe correr aquí:
@@ -174,15 +173,17 @@ export const DRIVER_STAGES: WfStage[] = [
   { key: "verifying",    label: "Verify",      icon: "🔎", instruction: "verificas tú: KB, suites y rgr.log contra el objetivo del ticket." },
   { key: "done",         label: "Done",        icon: "✓",  instruction: "escribe {ev}/summary.md (comentario listo para el ticket)." },
 ];
-export const DRIVER_FLOW: { stages: WfStage[]; verifyAfter: string | null } = {
+export const DRIVER_FLOW: WorkflowConfig = {
   stages: DRIVER_STAGES,
-  verifyAfter: null,
+  verifyAfter: [],
 };
 
 export interface ValidateStagesOptions {
   allowVerifyCmd?: boolean; // P2/B3: verifyCmd only honored from the gitignored per-repo override.
   strict?: boolean;         // T11: strict=editing (throws WorkflowValidationError); tolerant=loading (never throws).
 }
+
+export type WorkflowConfigInput = Partial<Omit<WorkflowConfig, "verifyAfter">> & { verifyAfter?: unknown };
 
 /**
  * T11: strict-only pre-pass — runs BEFORE any normalization, so an editor save gets a
@@ -220,13 +221,20 @@ function assertStrict(rawStages: any[], verifyAfterRaw: unknown, allowVerifyCmd:
       );
     }
   }
-  if (typeof verifyAfterRaw === "string" && verifyAfterRaw.trim()) {
-    const va = slug(verifyAfterRaw.trim());
-    if (!seen.has(va)) {
+  if (verifyAfterRaw !== undefined && verifyAfterRaw !== null && typeof verifyAfterRaw !== "string" && !Array.isArray(verifyAfterRaw)) {
+    throw new WorkflowValidationError("verifyAfter", "VERIFY_AFTER_TYPE", "verifyAfter debe ser una lista de keys, una key legado o null");
+  }
+  const entries = Array.isArray(verifyAfterRaw) ? verifyAfterRaw : typeof verifyAfterRaw === "string" ? [verifyAfterRaw] : [];
+  for (let i = 0; i < entries.length; i++) {
+    if (typeof entries[i] !== "string") {
+      throw new WorkflowValidationError(`verifyAfter[${i}]`, "VERIFY_AFTER_TYPE", "cada entrada de verifyAfter debe ser una key string");
+    }
+    const va = slug(entries[i]);
+    if (va && !seen.has(va)) {
       throw new WorkflowValidationError(
-        "verifyAfter",
-        "VERIFY_AFTER_NOT_FOUND",
-        `verifyAfter "${verifyAfterRaw}" no coincide con ninguna etapa; keys válidas: ${Array.from(seen).join(", ")}`
+        `verifyAfter[${i}]`,
+        "VERIFY_AFTER_UNKNOWN",
+        `verifyAfter "${entries[i]}" no coincide con ninguna etapa; keys válidas: ${Array.from(seen).join(", ")}`
       );
     }
   }
@@ -247,7 +255,7 @@ function assertStrict(rawStages: any[], verifyAfterRaw: unknown, allowVerifyCmd:
  * repo-config.json would stop the app from starting. The tolerance on load is a resilience
  * decision ("distrust disk"); the strictness on save is a UX decision. Don't merge them.
  */
-export function validateStages(input: Partial<WorkflowConfig>, options: ValidateStagesOptions = {}): WorkflowConfig {
+export function validateStages(input: WorkflowConfigInput, options: ValidateStagesOptions = {}): WorkflowConfig {
   const { allowVerifyCmd = false, strict = false } = options;
   const rawStages: any[] = Array.isArray(input.stages) ? input.stages : [];
   if (strict) assertStrict(rawStages, input.verifyAfter, allowVerifyCmd);
@@ -282,15 +290,19 @@ export function validateStages(input: Partial<WorkflowConfig>, options: Validate
     // here in practice; kept as a defensive fallback rather than assuming assertStrict is airtight.
     if (strict) throw new WorkflowValidationError("stages", "NO_STAGES", "el workflow necesita al menos una etapa");
     // Tolerant: let the caller decide the fallback (load() falls back to DEFAULT wholesale).
-    return { stages: [], verifyAfter: null };
+    return { stages: [], verifyAfter: [] };
   }
   const bad = stages.find((s) => RESERVED_KEYS.includes(s.key));
   if (bad) {
     if (strict) throw new WorkflowValidationError(`stages.${bad.key}`, "RESERVED_KEY", `la key "${bad.key}" está reservada; usa otra (p. ej. "done", "summary")`);
     throw new Error(`la key "${bad.key}" está reservada; usa otra (p. ej. "done", "summary")`);
   }
-  const va = input.verifyAfter ? slug(input.verifyAfter) : null;
-  const verifyAfter = va && stages.some((s) => s.key === va) ? va : null;
+  const rawVerifyAfter: unknown = input.verifyAfter;
+  const verifyEntries = Array.isArray(rawVerifyAfter)
+    ? rawVerifyAfter.filter((entry): entry is string => typeof entry === "string")
+    : typeof rawVerifyAfter === "string" ? [rawVerifyAfter] : [];
+  const requested = new Set(verifyEntries.map(slug).filter(Boolean));
+  const verifyAfter = stages.filter((stage) => requested.has(stage.key)).map((stage) => stage.key);
   const seenInputs = new Set<string>();
   const inputs: WfInput[] = (Array.isArray(input.inputs) ? input.inputs : [])
     .map((raw: any) => {
@@ -312,14 +324,14 @@ export function validateStages(input: Partial<WorkflowConfig>, options: Validate
 }
 
 /** Validate + persist the workflow to disk, invalidating the cache. */
-export function saveWorkflow(input: Partial<WorkflowConfig>): WorkflowConfig {
+export function saveWorkflow(input: WorkflowConfigInput): WorkflowConfig {
   const cfg = validateStages(input, { strict: true });
   writeFileSync(
     WORKFLOW_PATH,
     JSON.stringify(
       {
         _comment:
-          "Etapas del workflow para tickets. Editable desde el dashboard (⚙ Workflow) o a mano. key=sentinel (touch), label/icon=stepper, instruction=qué pedirle (placeholders {cycle} {ev} {repo}). verifyAfter: etapa tras la cual abrir el verificador (null=ninguno). NOTA: verifyCmd/maxRetries (gate pass/fail por-stage) se IGNORAN aquí — este archivo es git-tracked y verifyCmd ejecuta shell; sólo el override por-repo (gitignored) los honra.",
+          "Etapas del workflow para tickets. Editable desde el dashboard (⚙ Workflow) o a mano. key=sentinel (touch), label/icon=stepper, instruction=qué pedirle (placeholders {cycle} {ev} {repo}). verifyAfter: lista de etapas tras las cuales pedir revisión ([]=ninguna). NOTA: verifyCmd/maxRetries (gate pass/fail por-stage) se IGNORAN aquí — este archivo es git-tracked y verifyCmd ejecuta shell; sólo el override por-repo (gitignored) los honra.",
         ...cfg,
       },
       null,
@@ -430,7 +442,7 @@ export function eligibleVerifyStages(
 export function resolveFlow(
   stageKeys?: string[],
   repo?: string
-): { stages: WfStage[]; verifyAfter: string | null } {
+): WorkflowConfig {
   const override = repo ? getRepoWorkflow(repo) : null;
   const all = override ? override.stages : getStages();
   const va = override ? override.verifyAfter : getVerifyAfter();
@@ -438,5 +450,5 @@ export function resolveFlow(
   const set = new Set(stageKeys);
   const stages = all.filter((s) => set.has(s.key));
   if (!stages.length) return { stages: all, verifyAfter: va };
-  return { stages, verifyAfter: va && set.has(va) ? va : null };
+  return { stages, verifyAfter: va.filter((key) => set.has(key)) };
 }

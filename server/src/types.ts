@@ -73,7 +73,7 @@ export interface AdoptionRecord {
   paneId: string;            // %N
   sessionCreatedAt: number;  // ms epoch — invalida un adopted.json rancio
   adoptedAt: number;
-  workflow: WorkflowConfig;  // flow congelado; verifyAfter forzado a null
+  workflow: WorkflowConfig;  // flow congelado; verifyAfter forzado a []
 }
 
 /** Ids de pane tmux (%N) de la ventana driver, por rol. Estables mientras viva el pane. */
@@ -113,7 +113,7 @@ export interface CustomAction {
   icon: string;                    // emoji
   prompt: string;                  // prompt propio (placeholders {title}{key}{repo}{body}{url}{ref}{cycle}{ev}{steps}{verifier}{var:KEY})
   stages: WfStage[];               // etapas propias (ignoradas si inheritWorkflow)
-  verifyAfter: string | null;
+  verifyAfter: string[];
   inheritWorkflow: boolean;        // true → usa el workflow global/por-repo (resolveFlow)
   readOnly: boolean;               // reforzado por el prompt; el flag es informativo (label)
   showOn: ("row" | "preview")[];   // dónde aparece el botón (default ambos)

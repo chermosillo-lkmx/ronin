@@ -12,7 +12,7 @@ type InventorySession = {
 export interface VerifyDriverDepSources {
   readTmuxInventory(): Promise<{ sessions: InventorySession[]; diagnostic: unknown | null }>;
   readLaunch(name: string): unknown | null | undefined;
-  resolveFlow(stageKeys: undefined, repo: string): { stages: GateStage[]; verifyAfter: string | null };
+  resolveFlow(stageKeys: undefined, repo: string): { stages: GateStage[]; verifyAfter: string[] };
   cycleDirForSession(name: string): string;
   detectStage(cycle: string, order: string[]): string | null;
 }

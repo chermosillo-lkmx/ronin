@@ -235,20 +235,62 @@ const VALID_TWO_STAGES = {
     { key: "planning", label: "Plan", icon: "📋" },
     { key: "done", label: "Done", icon: "✓" },
   ],
-  verifyAfter: null as string | null,
+  verifyAfter: [] as string[],
 };
 
-test("T11.80 strict: verifyAfter que no casa con ninguna etapa lanza con path 'verifyAfter' y las keys válidas en el mensaje", () => {
+const A2_STAGES = {
+  stages: [
+    { key: "curl", label: "Curl", icon: "🌐" },
+    { key: "done", label: "Done", icon: "✓" },
+  ],
+  verifyAfter: [] as string[],
+};
+
+test("T11.80 strict: verifyAfter que no casa con ninguna etapa señala su índice y las keys válidas", () => {
   assert.throws(
     () => validateStages({ ...VALID_TWO_STAGES, verifyAfter: "typo" }, { strict: true }),
     (e: unknown) => {
       assert.ok(e instanceof WorkflowValidationError);
-      assert.equal(e.path, "verifyAfter");
-      assert.equal(e.code, "VERIFY_AFTER_NOT_FOUND");
+      assert.equal(e.path, "verifyAfter[0]");
+      assert.equal(e.code, "VERIFY_AFTER_UNKNOWN");
       assert.match(e.message, /planning/);
       assert.match(e.message, /done/);
       return true;
     }
+  );
+});
+
+test("A2: validateStages normaliza verifyAfter legado string y null a arrays", () => {
+  assert.deepEqual(validateStages({ ...A2_STAGES, verifyAfter: "curl" }).verifyAfter, ["curl"]);
+  assert.deepEqual(validateStages({ ...A2_STAGES, verifyAfter: null }).verifyAfter, []);
+});
+
+test("A2: verifyAfter se deduplica y conserva el orden de las etapas", () => {
+  const out = validateStages({ ...A2_STAGES, verifyAfter: ["done", "curl", "done"] });
+  assert.deepEqual(out.verifyAfter, ["curl", "done"]);
+});
+
+test("A2: strict señala la entrada desconocida por índice", () => {
+  assert.throws(
+    () => validateStages({ ...A2_STAGES, verifyAfter: ["nope"] }, { strict: true }),
+    (error: unknown) => {
+      assert.ok(error instanceof WorkflowValidationError);
+      assert.equal(error.code, "VERIFY_AFTER_UNKNOWN");
+      assert.equal(error.path, "verifyAfter[0]");
+      return true;
+    },
+  );
+});
+
+test("A2: tolerante descarta entradas desconocidas y conserva las válidas", () => {
+  const out = validateStages({ ...A2_STAGES, verifyAfter: ["nope", "done", "curl"] });
+  assert.deepEqual(out.verifyAfter, ["curl", "done"]);
+});
+
+test("A2: strict rechaza tipos de verifyAfter fuera de string, array y null", () => {
+  assert.throws(
+    () => validateStages({ ...VALID_TWO_STAGES, verifyAfter: 42 as any }, { strict: true }),
+    (error: unknown) => error instanceof WorkflowValidationError && error.code === "VERIFY_AFTER_TYPE" && error.path === "verifyAfter",
   );
 });
 
@@ -346,10 +388,10 @@ test("T11.86 strict: una entrada válida devuelve el config normalizado, idénti
     { stages: [{ key: "planning", label: "  Plan  ", icon: " 📋 ", instruction: "x" }], verifyAfter: null },
     { strict: true }
   );
-  assert.deepEqual(out, { stages: [{ key: "planning", label: "Plan", icon: "📋", instruction: "x" }], verifyAfter: null });
+  assert.deepEqual(out, { stages: [{ key: "planning", label: "Plan", icon: "📋", instruction: "x" }], verifyAfter: [] });
 });
 
-test("T11.87 tolerante: normalizeLoadedWorkflow con verifyAfter inválido arranca con verifyAfter=null, sin lanzar", () => {
+test("T11.87 tolerante: normalizeLoadedWorkflow con verifyAfter inválido arranca con verifyAfter=[], sin lanzar", () => {
   const out = normalizeLoadedWorkflow({
     stages: [
       { key: "planning", label: "Plan", icon: "📋" },
@@ -357,7 +399,7 @@ test("T11.87 tolerante: normalizeLoadedWorkflow con verifyAfter inválido arranc
     ],
     verifyAfter: "typo",
   });
-  assert.equal(out.verifyAfter, null);
+  assert.deepEqual(out.verifyAfter, []);
   assert.equal(out.stages.length, 2);
 });
 
@@ -394,7 +436,7 @@ test("T11.91 tolerante: un workflow.json de ejemplo con TODAS las tolerancias a 
       verifyAfter: "no-existe",
     });
     assert.ok(out.stages.length >= 1);
-    assert.equal(out.verifyAfter, null);
+    assert.deepEqual(out.verifyAfter, []);
     assert.equal(out.stages.some((s) => s.verifyCmd), false);
     assert.equal(out.stages.some((s) => s.key === "meta"), false);
   });
