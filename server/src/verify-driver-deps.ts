@@ -1,5 +1,5 @@
 import { readLaunchRecord, readTmuxInventory } from "./sessions.js";
-import { cycleDirForSession, detectStage } from "./stages.js";
+import { cycleDirForSession, detectStage, readFlow } from "./stages.js";
 import { realGateDeps, type DriverDeps, type GateStage, type LaunchInfo } from "./verify-driver.js";
 import { resolveFlow } from "./workflow.js";
 
@@ -12,6 +12,7 @@ type InventorySession = {
 export interface VerifyDriverDepSources {
   readTmuxInventory(): Promise<{ sessions: InventorySession[]; diagnostic: unknown | null }>;
   readLaunch(name: string): unknown | null | undefined;
+  readFlow(cycle: string): { stages: GateStage[] } | null;
   resolveFlow(stageKeys: undefined, repo: string): { stages: GateStage[]; verifyAfter: string[] };
   cycleDirForSession(name: string): string;
   detectStage(cycle: string, order: string[]): string | null;
@@ -41,7 +42,7 @@ export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverD
         return null;
       }
     },
-    flowFor: (repo) => sources.resolveFlow(undefined, repo).stages,
+    flowFor: (session, repo) => sources.readFlow(sources.cycleDirForSession(session))?.stages ?? sources.resolveFlow(undefined, repo).stages,
     cycleFor: sources.cycleDirForSession,
     detect: sources.detectStage,
     ...realGateDeps,
@@ -52,6 +53,7 @@ export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverD
 export const realVerifyDriverDeps = createVerifyDriverDeps({
   readTmuxInventory,
   readLaunch: readLaunchRecord,
+  readFlow,
   resolveFlow,
   cycleDirForSession,
   detectStage,

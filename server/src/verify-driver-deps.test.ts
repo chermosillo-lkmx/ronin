@@ -6,6 +6,7 @@ function sources(overrides: Partial<VerifyDriverDepSources> = {}): VerifyDriverD
   return {
     readTmuxInventory: async () => ({ sessions: [], diagnostic: null }),
     readLaunch: () => null,
+    readFlow: () => null,
     resolveFlow: () => ({ stages: [], verifyAfter: [] }),
     cycleDirForSession: (name) => `/cycle/${name}`,
     detectStage: () => null,
@@ -103,4 +104,36 @@ test("launchOf lee los campos del launch.json real de un workflow", () => {
     repo: "monorepo",
     worktree: "/repos/monorepo/.worktrees/cowork-workflow",
   });
+});
+
+test("A4: flowFor prefiere el flow.json congelado de la sesión", () => {
+  let fallbacks = 0;
+  const frozen = [{ key: "tests", label: "Tests", verifyCmd: "npm test" }];
+  const deps = createVerifyDriverDeps(sources({
+    readFlow: (cycle) => cycle === "/cycle/cowork-frozen" ? { stages: frozen, verifyAfter: [] } : null,
+    resolveFlow: () => { fallbacks++; return { stages: [], verifyAfter: [] }; },
+  }));
+
+  assert.deepEqual(deps.flowFor("cowork-frozen", "monorepo"), frozen);
+  assert.equal(fallbacks, 0);
+});
+
+test("A4: flowFor cae al override por repo cuando flow.json no existe", () => {
+  const override = [{ key: "tests", label: "Tests", verifyCmd: "npm test" }];
+  const deps = createVerifyDriverDeps(sources({
+    readFlow: () => null,
+    resolveFlow: (_keys, repo) => ({ stages: repo === "monorepo" ? override : [], verifyAfter: [] }),
+  }));
+
+  assert.deepEqual(deps.flowFor("cowork-missing", "monorepo"), override);
+});
+
+test("A4: flowFor cae al override por repo cuando flow.json está corrupto", () => {
+  const override = [{ key: "tests", label: "Tests", verifyCmd: "npm test" }];
+  const deps = createVerifyDriverDeps(sources({
+    readFlow: () => null,
+    resolveFlow: () => ({ stages: override, verifyAfter: [] }),
+  }));
+
+  assert.deepEqual(deps.flowFor("cowork-corrupt", "monorepo"), override);
 });
