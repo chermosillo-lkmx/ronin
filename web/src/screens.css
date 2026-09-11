@@ -190,7 +190,8 @@
 .ron-exec-stepper-inherit { color: var(--color-neutral-600); }
 
 /* Harness v2: rail operativo + lista densa por etapa. */
-.wf-harness-v2 { min-width: 0; display: grid; grid-template-columns: 272px minmax(0, 1fr); gap: 22px; padding: 18px; color: var(--color-text); }
+/* Se desborda con scroll horizontal antes que recortar columnas: el shell web deja ~450px al workspace. */
+.wf-harness-v2 { min-width: 0; display: grid; grid-template-columns: 272px minmax(780px, 1fr); gap: 22px; padding: 18px; overflow-x: auto; color: var(--color-text); }
 .wf-harness-v2-rail { display: flex; flex-direction: column; gap: 10px; }
 .wf-harness-v2-meter, .wf-harness-v2-bands, .wf-harness-v2-legend { border: 1px solid var(--color-divider); border-radius: var(--radius-lg); background: var(--color-surface); }
 .wf-harness-v2-meter { display: flex; flex-direction: column; gap: 8px; padding: 14px; }
@@ -257,7 +258,7 @@
 .wf-harness-v2-retries > div { display: flex; overflow: hidden; height: 28px; border: 1px solid var(--color-divider); border-radius: var(--radius-sm); }
 .wf-harness-v2-retries button, .wf-harness-v2-retries input { width: 30px; height: 28px; padding: 0; border: 0; border-radius: 0; color: var(--color-neutral-300); background: transparent; text-align: center; }
 .wf-harness-v2-retries input { border-inline: 1px solid var(--color-divider); background: var(--color-bg); }
-@media (max-width: 1120px) { .wf-harness-v2 { grid-template-columns: 230px minmax(780px, 1fr); overflow-x: auto; } .wf-harness-v2-head, .wf-harness-v2-summary { grid-template-columns: 170px 155px minmax(150px, 1fr) 200px 100px; } }
+@media (max-width: 1120px) { .wf-harness-v2 { grid-template-columns: 230px minmax(780px, 1fr); } .wf-harness-v2-head, .wf-harness-v2-summary { grid-template-columns: 170px 155px minmax(150px, 1fr) 200px 100px; } }
 
 .wf-json-editor { display: flex; flex-direction: column; gap: var(--space-2); }
 .wf-json-textarea {
