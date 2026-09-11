@@ -84,3 +84,13 @@ test("B3 v2: ProposalList presenta verifyAfter plural con separación legible", 
   const html = renderToString(createElement(ProposalList, { proposals: [proposal], analysis: null, busy: false, onAccept: () => {}, onDismiss: () => {} }));
   assert.match(html, /verifyAfter: curl, done/);
 });
+
+test("ProposalList no se cae con una propuesta legada cuyo verifyAfter llega como string o null", () => {
+  const legacy = [
+    { ...P, id: "legacy-str", config: { ...P.config, verifyAfter: "curl" as unknown as string[] } },
+    { ...P, id: "legacy-null", config: { ...P.config, verifyAfter: null as unknown as string[] } },
+  ];
+  const html = renderToString(createElement(ProposalList, { proposals: legacy, analysis: null, busy: false, onAccept: () => {}, onDismiss: () => {} }));
+  assert.match(html, /verifyAfter: curl/);
+  assert.match(html, /verifyAfter: —/);
+});

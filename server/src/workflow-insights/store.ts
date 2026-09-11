@@ -30,11 +30,19 @@ function readJson<T>(file: string, fallback: T): T {
 export function createProposalStore(directory: string = dataPath("")) {
   const file = join(directory, "workflow-proposals.json");
 
+  // Propuestas escritas antes de que verifyAfter fuera lista (string | null): se normalizan al
+  // cargar para que ningún consumidor reciba el shape viejo — el inspector hacía `.join` y caía.
+  function legacyProposal(proposal: WorkflowProposal): WorkflowProposal {
+    const raw: unknown = (proposal.config as { verifyAfter?: unknown } | undefined)?.verifyAfter;
+    const verifyAfter = Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string") : typeof raw === "string" && raw ? [raw] : [];
+    return { ...proposal, config: { ...proposal.config, verifyAfter } };
+  }
+
   function load(): Journal {
     const raw = readJson<Partial<Journal>>(file, {});
     return {
       analyses: Array.isArray(raw?.analyses) ? raw.analyses : [],
-      proposals: Array.isArray(raw?.proposals) ? raw.proposals : [],
+      proposals: Array.isArray(raw?.proposals) ? raw.proposals.map(legacyProposal) : [],
     };
   }
 
