@@ -10,6 +10,13 @@ export interface TmuxInventoryResult {
   diagnostic: TmuxDiagnostic | null;
 }
 
+export interface SessionCleanupReport {
+  kind: "managed" | "foreign";
+  worktree: { status: "removed" | "kept" | "none"; path?: string; branch?: string; reason?: string };
+  cycleDir: { status: "removed" | "kept" | "none"; path?: string };
+  containers: { removed: string[]; failed: string[]; skipped?: string };
+}
+
 // Espejo de server/src/types.ts (T2). El detalle persistido de una adopción; la autoridad
 // real vive en tmux (@cowork-adopted), esto sólo informa a la UI.
 export interface AdoptionRecord {

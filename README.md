@@ -29,6 +29,8 @@ Elige un workflow y un repositorio, escribe una petición y Claude arranca el fl
 
 Las sesiones tmux son la fuente de verdad. La vista **⌘** lista sesiones gestionadas y externas, permite seleccionar panes, usar ttyd cuando está disponible y muestra un respaldo de sólo lectura por `capture-pane` mientras se resuelve la terminal.
 
+Al usar **Cerrar sesión**, Ronin termina tmux y limpia los recursos que creó; para que también recoja contenedores del worker, lánzalos con `--label cowork.session=<sesión>` o nómbralos `<sesión>-…`.
+
 Un workflow puede abrir una ventana Driver de cuatro panes (`driver | worker` arriba y `review | verify` abajo). El driver recibe el prompt inicial y coordina los demás panes mediante el skill; Ronin conserva la geometría, los IDs `%N` y los roles de tmux. El zoom de tmux es compartido por ventana.
 
 ### Reportes (📊)

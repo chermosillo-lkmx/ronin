@@ -668,6 +668,95 @@ test("DELETE /api/sessions/:name exige confirmación y mata sólo la sesión tmu
   });
 });
 
+test("DELETE /api/sessions/:name con cleanup mata antes y devuelve el reporte", async () => {
+  const token = ensureCapabilityToken();
+  const calls: string[] = [];
+  const report = {
+    kind: "managed" as const,
+    worktree: { status: "removed" as const, path: "/worktree", branch: "ronin/cowork-clean" },
+    cycleDir: { status: "removed" as const, path: "/tmp/cowork-cycle-cowork-clean" },
+    containers: { removed: ["abc"], failed: [] },
+  };
+  const app = createApp({ sessions: {
+    hasSession: async () => true,
+    killSession: async () => { calls.push("kill"); },
+    cleanupSession: async () => { calls.push("cleanup"); return report; },
+  } });
+
+  const response = await invokeRequest(app, "DELETE", "/api/sessions/cowork-clean", {
+    headers: { "x-ronin-capability": token },
+    body: { confirm: true, cleanup: true },
+  });
+
+  assert.deepEqual(calls, ["kill", "cleanup"]);
+  assert.deepEqual(response, { status: 200, body: { ok: true, cleanup: report } });
+});
+
+test("DELETE /api/sessions/:name sin cleanup conserva la respuesta actual", async () => {
+  const token = ensureCapabilityToken();
+  const calls: string[] = [];
+  const app = createApp({ sessions: {
+    hasSession: async () => true,
+    killSession: async () => { calls.push("kill"); },
+    cleanupSession: async () => { calls.push("cleanup"); throw new Error("no debe llamarse"); },
+  } });
+
+  const response = await invokeRequest(app, "DELETE", "/api/sessions/cowork-clean", {
+    headers: { "x-ronin-capability": token },
+    body: { confirm: true },
+  });
+
+  assert.deepEqual(calls, ["kill"]);
+  assert.deepEqual(response, { status: 200, body: { ok: true } });
+});
+
+test("DELETE /api/sessions/:name no falla el cierre si cleanup lanza", async () => {
+  const token = ensureCapabilityToken();
+  const app = createApp({ sessions: {
+    hasSession: async () => true,
+    killSession: async () => {},
+    cleanupSession: async () => { throw new Error("docker explotó"); },
+  } });
+
+  const response = await invokeRequest(app, "DELETE", "/api/sessions/cowork-clean", {
+    headers: { "x-ronin-capability": token },
+    body: { confirm: true, cleanup: true },
+  });
+
+  assert.deepEqual(response, { status: 200, body: { ok: true, cleanup: { error: "docker explotó" } } });
+});
+
+test("DELETE /api/sessions/:name conserva los 400 y 404 antes de limpiar", async () => {
+  const token = ensureCapabilityToken();
+  let cleanupCalls = 0;
+  const app = createApp({ sessions: {
+    hasSession: async () => false,
+    killSession: async () => { throw new Error("no debe llamarse"); },
+    cleanupSession: async () => { cleanupCalls += 1; throw new Error("no debe llamarse"); },
+  } });
+
+  const invalid = await invokeRequest(app, "DELETE", "/api/sessions/..%2funsafe", {
+    headers: { "x-ronin-capability": token },
+    body: { confirm: true, cleanup: true },
+  });
+  const unconfirmed = await invokeRequest(app, "DELETE", "/api/sessions/missing", {
+    headers: { "x-ronin-capability": token },
+    body: { cleanup: true },
+  });
+  const missing = await invokeRequest(app, "DELETE", "/api/sessions/missing", {
+    headers: { "x-ronin-capability": token },
+    body: { confirm: true, cleanup: true },
+  });
+
+  assert.equal(invalid.status, 400);
+  assert.equal((invalid.body as any).code, "INVALID_SESSION");
+  assert.equal(unconfirmed.status, 400);
+  assert.equal((unconfirmed.body as any).code, "CONFIRMATION_REQUIRED");
+  assert.equal(missing.status, 404);
+  assert.equal((missing.body as any).code, "SESSION_NOT_FOUND");
+  assert.equal(cleanupCalls, 0);
+});
+
 test("POST /api/sessions rechaza una petición de más de 8 KiB antes de lanzar", async () => {
   const token = ensureCapabilityToken();
   const app = createApp();

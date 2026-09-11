@@ -1,4 +1,4 @@
-import type { EngineChoice, KnowledgeBaseGeneration, KnowledgeBaseInfo, TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
+import type { EngineChoice, KnowledgeBaseGeneration, KnowledgeBaseInfo, TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionCleanupReport, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
 
 /** Carries the server's {path, code} (T11/T13) so a save failure can be shown per-field, or as
  *  a clear "someone is mid-flight on this stage" message (STAGE_IN_FLIGHT, T13), not just text. */
@@ -365,15 +365,17 @@ export async function getSessions(): Promise<TmuxSessionInfo[] | null> {
   return (await getTmuxInventory())?.sessions ?? null;
 }
 
-/** Mata sólo la sesión tmux indicada. La confirmación se vuelve a exigir en el servidor. */
-export async function closeTmuxSession(session: string): Promise<ApiErrorBody | null> {
+/** Cierra tmux y pide al servidor limpiar únicamente los recursos atribuidos a la sesión. */
+export async function closeTmuxSession(session: string, options: { cleanup: true }): Promise<{ ok: true; cleanup: SessionCleanupReport | { error: string } } | ApiErrorBody> {
   try {
     const r = await fetch(`/api/sessions/${encodeURIComponent(session)}`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirm: true }),
+      body: JSON.stringify({ confirm: true, cleanup: options.cleanup }),
     });
-    return r.ok ? null : ((await r.json().catch(() => null)) as ApiErrorBody | null) ?? { error: "fallo desconocido", code: "UNKNOWN" };
+    return r.ok
+      ? await r.json() as { ok: true; cleanup: SessionCleanupReport | { error: string } }
+      : ((await r.json().catch(() => null)) as ApiErrorBody | null) ?? { error: "fallo desconocido", code: "UNKNOWN" };
   } catch {
     return { error: "el server no respondió", code: "NETWORK_ERROR" };
   }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
@@ -106,4 +107,11 @@ test("SessionInspector: la sesión sin registrar dice por qué no tiene etapas",
     session: { ...sessionFixture(), unrecorded: true }, diagnostic: null,
   }));
   assert.match(html, /Sin flujo registrado/);
+});
+
+test("SessionWorkspace: el reporte de limpieza se monta en el propio workspace para sobrevivir a que la sesión salga del inventario (pin)", () => {
+  const source = readFileSync(new URL("./SessionWorkspace.tsx", import.meta.url), "utf8");
+  assert.match(source, /setClosedReport\(\{ session: session\.name, report \}\)/);
+  // Aparece también en la rama SIN sesión: tras cerrar, el inventario (5 s) deja `session` en null.
+  assert.match(source, /Nueva sesión<\/button>\{cleanupModal\}<\/div>/);
 });
