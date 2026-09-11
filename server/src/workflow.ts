@@ -2,7 +2,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./data-dir.js";
 import { getRepoWorkflow } from "./repo-config.js";
 import { sanitizeModel } from "./models.js";
-import type { TaskStatus, WorkerState } from "./types.js";
 
 /**
  * Composable workflow: the loop stages live in data/workflow.json so new
@@ -90,10 +89,6 @@ const DEFAULT: WorkflowConfig = {
   ],
 };
 
-// The synthetic step for the independent verifier (managed via verifyAfter, not
-// listed in stages). The verifier worker touches this sentinel in the main cycle.
-const VERIFY_STAGE: WfStage = { key: "verify", label: "Verify", icon: "🔎" };
-
 let cache: WorkflowConfig | null = null;
 
 /**
@@ -163,8 +158,8 @@ export const WORKFLOW_PROMPT_RESERVED_KEYS = [
  * Tres restricciones que dictan estas keys, todas con dientes:
  * 1. `verifyAfter: null` es OBLIGATORIO. Con valor no nulo, pollLive dispara spawnVerifier, que
  *    crea una sesión tmux ENTERA aparte — anulando en silencio el modelo de 4 panes.
- * 2. La etapa de verificación NO se llama "verify": es RESERVED_KEY y liveMapFor la trataría
- *    como el paso sintético del verificador, clavándola en review para siempre.
+ * 2. La etapa de verificación NO se llama "verify": sigue siendo RESERVED_KEY para no chocar
+ *    con los sentinels de sesiones históricas.
  * 3. El switch de modelo (maybeSwitchModel teclea /model en el pane ACTIVO) NO debe correr aquí:
  *    en modo driver los modelos los maneja el skill. OJO: omitir `role:"impl"` NO es suficiente —
  *    implStageIndex cae al match por key "implementing" (workflow.ts:164), así que esta etapa SÍ
@@ -425,123 +420,6 @@ export function eligibleVerifyStages(
   return out;
 }
 
-/** Insert the synthetic "verify" step right after verifyAfter (when it matches). */
-export function stepperFor(stages: WfStage[], verifyAfter: string | null): WfStage[] {
-  if (!verifyAfter || !stages.some((s) => s.key === verifyAfter)) return stages;
-  const out: WfStage[] = [];
-  for (const s of stages) {
-    out.push(s);
-    if (s.key === verifyAfter) out.push(VERIFY_STAGE);
-  }
-  return out;
-}
-
-export interface SpliceFlowOk {
-  ok: true;
-  stages: WfStage[];
-  verifyAfter: string | null;
-  inputs?: WfInput[];
-}
-export interface SpliceFlowRejected {
-  ok: false;
-  code: "STAGE_IN_FLIGHT";
-  message: string;
-}
-export type SpliceFlowResult = SpliceFlowOk | SpliceFlowRejected;
-
-/**
- * T13: hot-apply a workflow edit onto a LIVE worker's flow without ever orphaning a sentinel
- * it already wrote. `currentKey` is the furthest stage the worker has REACHED (from
- * `detectStage` against its real cycle dir) — everything at/before it is preserved VERBATIM
- * from `oldFlow` (not merely by key: a verifyCmd added to an already-passed stage in `next`
- * must never retroactively apply to a worker already past it, T13 test 105); everything after
- * it comes from `next`. Rejects (STAGE_IN_FLIGHT) instead of silently orphaning a sentinel
- * when the edit renamed, reordered, or removed anything at/before `currentKey` — the caller
- * (engine.ts's applyHot) surfaces this as a 409 BEFORE persisting the edit at all.
- */
-export function spliceFlow(oldFlow: WorkflowConfig, nextFlow: WorkflowConfig, currentKey: string | null): SpliceFlowResult {
-  if (!currentKey) return { ok: true, stages: nextFlow.stages, verifyAfter: nextFlow.verifyAfter, ...(nextFlow.inputs ? { inputs: nextFlow.inputs } : {}) };
-  // D5 (bug real, hallado en review): el "verify" sintético (stepperFor lo inserta justo tras
-  // verifyAfter) no vive en oldFlow.stages — un worker parado ahí ya alcanzó (o pasó) la etapa
-  // verifyAfter, así que el límite protegido se ancla AHÍ, nunca se trata como "nada que
-  // proteger" (eso saltaba STAGE_IN_FLIGHT justo para el caso donde el worker está más lejos).
-  const anchorKey = currentKey === "verify" ? oldFlow.verifyAfter : currentKey;
-  const idx = anchorKey ? oldFlow.stages.findIndex((s) => s.key === anchorKey) : -1;
-  if (idx < 0) {
-    // Un currentKey que no se puede ubicar de forma segura (ni una etapa real ni "verify"
-    // resoluble contra verifyAfter) se rechaza CONSERVADOR — proteger de más nunca es el bug;
-    // asumir "no hay nada que proteger" sí lo era.
-    return {
-      ok: false,
-      code: "STAGE_IN_FLIGHT",
-      message: `no se pudo ubicar de forma segura la etapa en curso ("${currentKey}") en el flow congelado; se rechaza el cambio en vez de asumir que no hay nada que proteger`,
-    };
-  }
-  const prefix = oldFlow.stages.slice(0, idx + 1);
-  for (let i = 0; i < prefix.length; i++) {
-    if (nextFlow.stages[i]?.key !== prefix[i].key) {
-      return {
-        ok: false,
-        code: "STAGE_IN_FLIGHT",
-        message: `la etapa "${prefix[i].key}" ya está en curso (sentinel escrito); no puede eliminarse, renombrarse ni reordenarse mientras un worker sigue en ella o más allá`,
-      };
-    }
-  }
-  const stages = [...prefix, ...nextFlow.stages.slice(prefix.length)];
-  const verifyAfter = nextFlow.verifyAfter && stages.some((s) => s.key === nextFlow.verifyAfter) ? nextFlow.verifyAfter : null;
-  return { ok: true, stages, verifyAfter, ...(nextFlow.inputs ? { inputs: nextFlow.inputs } : {}) };
-}
-
-export interface GraphNode {
-  key: string;
-  label: string;
-  icon: string;
-  role?: "impl";
-  gate?: boolean; // P2: has a verifyCmd gating advancement
-}
-export type GraphEdgeKind = "sequence" | "verify" | "retry";
-export interface GraphEdge {
-  from: string;
-  to: string;
-  kind: GraphEdgeKind;
-  maxRetries?: number; // only on kind:"retry"
-}
-export interface WorkflowGraph {
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-}
-
-/**
- * T12: pure derivation of {nodes, edges} for the graph view — draws only the THREE edge
- * classes that already exist in the engine's semantics today (sequence; the verifier branch
- * via stepperFor/VERIFY_STAGE; the retry self-loop via verifyGateCap/gateHoldsDone), never
- * persisted and never a new `WfStage.next[]`. The six engine functions that walk a flow by
- * INDEX (implStageIndex, shouldSwitchModel, verifyGateCap, eligibleVerifyStages, stepperFor,
- * liveMapFor) and detectStage's "furthest sentinel wins" model would all need rewriting to
- * support arbitrary branching that no workflow today expresses — this draws only what's real.
- */
-export function toGraph(cfg: WorkflowConfig): WorkflowGraph {
-  const nodes: GraphNode[] = cfg.stages.map((s) => ({
-    key: s.key,
-    label: s.label,
-    icon: s.icon,
-    ...(s.role === "impl" ? { role: "impl" as const } : {}),
-    ...(s.verifyCmd ? { gate: true as const } : {}),
-  }));
-  const edges: GraphEdge[] = [];
-  for (let i = 0; i < cfg.stages.length - 1; i++) {
-    edges.push({ from: cfg.stages[i].key, to: cfg.stages[i + 1].key, kind: "sequence" });
-  }
-  if (cfg.verifyAfter && cfg.stages.some((s) => s.key === cfg.verifyAfter)) {
-    nodes.push({ key: VERIFY_STAGE.key, label: VERIFY_STAGE.label, icon: VERIFY_STAGE.icon });
-    edges.push({ from: cfg.verifyAfter, to: VERIFY_STAGE.key, kind: "verify" });
-  }
-  for (const s of cfg.stages) {
-    if (s.verifyCmd) edges.push({ from: s.key, to: s.key, kind: "retry", maxRetries: s.maxRetries ?? 2 });
-  }
-  return { nodes, edges };
-}
-
 /**
  * Resolve the flow for a launch: optionally restricted to a subset of stage keys
  * (the per-launch on/off toggles). If `repo` has a workflow override it starts
@@ -561,46 +439,4 @@ export function resolveFlow(
   const stages = all.filter((s) => set.has(s.key));
   if (!stages.length) return { stages: all, verifyAfter: va };
   return { stages, verifyAfter: va && set.has(va) ? va : null };
-}
-
-/**
- * Stages for the stepper + live board: the configured stages with the synthetic
- * "verify" inserted right after verifyAfter (when it matches a real stage).
- */
-export function getStepperStages(): WfStage[] {
-  const { stages, verifyAfter } = load();
-  return stepperFor(stages, verifyAfter);
-}
-
-export interface LiveStage {
-  key: string;
-  label: string;     // "🌐 Curl" — shown as worker.stage
-  task: TaskStatus;
-  worker: WorkerState;
-}
-
-/** key → board state mapping for an arbitrary flow (drives pollLive). */
-export function liveMapFor(stages: WfStage[], verifyAfter: string | null): Map<string, LiveStage> {
-  const out = new Map<string, LiveStage>();
-  const stepper = stepperFor(stages, verifyAfter);
-  // The last configured (main) stage is terminal, regardless of its key — so
-  // renaming "done" to anything still completes the card.
-  const lastMain = stages[stages.length - 1]?.key;
-  for (const s of stepper) {
-    const isVerify = s.key === "verify";
-    const isDone = !isVerify && (s.key === "done" || s.key === lastMain);
-    out.set(s.key, {
-      key: s.key,
-      label: `${s.icon} ${s.label}`,
-      task: isDone ? "done" : isVerify ? "review" : "running",
-      worker: isDone ? "done" : isVerify ? "review" : "busy",
-    });
-  }
-  return out;
-}
-
-/** key → board state mapping for the full (global) workflow. */
-export function liveStageByKey(): Map<string, LiveStage> {
-  const { stages, verifyAfter } = load();
-  return liveMapFor(stages, verifyAfter);
 }

@@ -4,16 +4,12 @@ import {
   eligibleVerifyStages,
   gateHoldsDone,
   implStageIndex,
-  liveMapFor,
   normalizeLoadedWorkflow,
-  spliceFlow,
-  toGraph,
   DRIVER_FLOW,
   DRIVER_STAGES,
   RESERVED_KEYS,
   WORKFLOW_PROMPT_RESERVED_KEYS,
   shouldSwitchModel,
-  stepperFor,
   stripVerifyFields,
   validateStages,
   verifyGateCap,
@@ -404,192 +400,6 @@ test("T11.91 tolerante: un workflow.json de ejemplo con TODAS las tolerancias a 
   });
 });
 
-// ---- T12: grafo derivado (toGraph) — sólo dibuja lo que el engine ya recorre por índice ----
-
-const ABC: WfStage[] = [
-  { key: "a", label: "A", icon: "a" },
-  { key: "b", label: "B", icon: "b" },
-  { key: "c", label: "C", icon: "c" },
-];
-
-test("T12.92 toGraph: 3 etapas, verifyAfter:null → 3 nodos, 2 aristas de secuencia", () => {
-  const g = toGraph({ stages: ABC, verifyAfter: null });
-  assert.equal(g.nodes.length, 3);
-  assert.deepEqual(g.nodes.map((n) => n.key), ["a", "b", "c"]);
-  const seq = g.edges.filter((e) => e.kind === "sequence");
-  assert.equal(seq.length, 2);
-  assert.deepEqual(seq.map((e) => [e.from, e.to]), [["a", "b"], ["b", "c"]]);
-});
-
-test("T12.93 toGraph: verifyAfter:'b' → nodo sintético 'verify' + arista de bifurcación b→verify", () => {
-  const g = toGraph({ stages: ABC, verifyAfter: "b" });
-  assert.ok(g.nodes.some((n) => n.key === "verify"));
-  const branch = g.edges.find((e) => e.kind === "verify");
-  assert.deepEqual(branch && [branch.from, branch.to], ["b", "verify"]);
-});
-
-test("T12.94 toGraph: una etapa con verifyCmd → self-loop de reintento con maxRetries + marca de gate", () => {
-  const gated: WfStage[] = [
-    { key: "a", label: "A", icon: "a" },
-    { key: "curl", label: "Curl", icon: "🌐", verifyCmd: "npm test", maxRetries: 4 },
-  ];
-  const g = toGraph({ stages: gated, verifyAfter: null });
-  const retry = g.edges.find((e) => e.kind === "retry");
-  assert.deepEqual(retry && [retry.from, retry.to, retry.maxRetries], ["curl", "curl", 4]);
-  assert.equal(g.nodes.find((n) => n.key === "curl")?.gate, true);
-  assert.equal(g.nodes.find((n) => n.key === "a")?.gate, undefined);
-});
-
-test("T12.95 toGraph: una etapa con role:'impl' sale marcada", () => {
-  const g = toGraph({ stages: IMPL_FLOW, verifyAfter: null });
-  assert.equal(g.nodes.find((n) => n.key === "implementing")?.role, "impl");
-  assert.equal(g.nodes.find((n) => n.key === "planning")?.role, undefined);
-});
-
-test("T12.96 toGraph: es puro y no lee disco (misma entrada, misma salida, dos llamadas seguidas)", () => {
-  const cfg = { stages: ABC, verifyAfter: "b" };
-  assert.deepEqual(toGraph(cfg), toGraph(cfg));
-});
-
-// ---- T13: spliceFlow — hot-apply sin falso verde (nunca huérfano un sentinel ya escrito) ----
-
-const OLD_FLOW: WorkflowConfig = {
-  stages: [
-    { key: "planning", label: "Plan", icon: "📋" },
-    { key: "implementing", label: "Impl", icon: "⌨️", role: "impl" },
-    { key: "curl", label: "Curl", icon: "🌐" },
-    { key: "done", label: "Done", icon: "✓" },
-  ],
-  verifyAfter: null,
-};
-
-test("T13.101 spliceFlow: conserva el prefijo hasta currentKey INCLUSIVE y toma el sufijo nuevo", () => {
-  const next: WorkflowConfig = {
-    stages: [
-      { key: "planning", label: "Plan", icon: "📋" },
-      { key: "implementing", label: "Impl", icon: "⌨️", role: "impl" },
-      { key: "security", label: "Security", icon: "🔒" }, // nueva etapa insertada DESPUÉS de implementing
-      { key: "done", label: "Done", icon: "✓" },
-    ],
-    verifyAfter: null,
-  };
-  const out = spliceFlow(OLD_FLOW, next, "implementing");
-  assert.equal(out.ok, true);
-  assert.ok(out.ok);
-  assert.deepEqual(out.stages.map((s) => s.key), ["planning", "implementing", "security", "done"]);
-  // el prefijo son los objetos VIEJOS (por si el nuevo cambió algo del propio implementing/planning)
-  assert.deepEqual(out.stages[1], OLD_FLOW.stages[1]);
-});
-
-test("T13.101b spliceFlow: currentKey null (nada en curso todavía) → reemplazo completo por el nuevo flow", () => {
-  const next: WorkflowConfig = { stages: [{ key: "solo", label: "Solo", icon: "x" }], verifyAfter: null };
-  const out = spliceFlow(OLD_FLOW, next, null);
-  assert.equal(out.ok, true);
-  assert.ok(out.ok);
-  assert.deepEqual(out.stages.map((s) => s.key), ["solo"]);
-});
-
-test("T13.102 spliceFlow: rechaza eliminar una etapa cuyo sentinel ya existe (currentKey no sobrevive en next)", () => {
-  const next: WorkflowConfig = {
-    stages: [
-      { key: "planning", label: "Plan", icon: "📋" },
-      // "implementing" fue eliminada — el worker ya la pasó (currentKey)
-      { key: "curl", label: "Curl", icon: "🌐" },
-      { key: "done", label: "Done", icon: "✓" },
-    ],
-    verifyAfter: null,
-  };
-  const out = spliceFlow(OLD_FLOW, next, "implementing");
-  assert.equal(out.ok, false);
-  assert.ok(!out.ok);
-  assert.equal(out.code, "STAGE_IN_FLIGHT");
-});
-
-test("T13.102b spliceFlow: rechaza renombrar una etapa cuyo sentinel ya existe", () => {
-  const next: WorkflowConfig = {
-    stages: [
-      { key: "planning", label: "Plan", icon: "📋" },
-      { key: "coding", label: "Coding", icon: "⌨️", role: "impl" }, // "implementing" renombrada a "coding"
-      { key: "curl", label: "Curl", icon: "🌐" },
-      { key: "done", label: "Done", icon: "✓" },
-    ],
-    verifyAfter: null,
-  };
-  const out = spliceFlow(OLD_FLOW, next, "implementing");
-  assert.equal(out.ok, false);
-  assert.ok(!out.ok);
-  assert.equal(out.code, "STAGE_IN_FLIGHT");
-});
-
-test("T13.105 spliceFlow: añadir verifyCmd a una etapa ya pasada no la aplica (el prefijo viene del flow VIEJO)", () => {
-  const next: WorkflowConfig = {
-    stages: [
-      { key: "planning", label: "Plan", icon: "📋" },
-      { key: "implementing", label: "Impl", icon: "⌨️", role: "impl", verifyCmd: "npm test" }, // nuevo verifyCmd en una etapa ya pasada
-      { key: "curl", label: "Curl", icon: "🌐" },
-      { key: "done", label: "Done", icon: "✓" },
-    ],
-    verifyAfter: null,
-  };
-  const out = spliceFlow(OLD_FLOW, next, "implementing");
-  assert.equal(out.ok, true);
-  assert.ok(out.ok);
-  assert.equal(out.stages[1].verifyCmd, undefined); // el objeto preservado es el VIEJO, sin el verifyCmd nuevo
-});
-
-test("D5 (bloqueante, hallado en review): currentKey='verify' (el sintético) se ancla a verifyAfter, NO se trata como 'nada que proteger'", () => {
-  const withVerify: WorkflowConfig = { ...OLD_FLOW, verifyAfter: "curl" };
-  // El worker está en el verificador sintético tras "curl" — renombrar/eliminar "planning"
-  // (que va ANTES de curl) debe seguir rechazándose: el worker ya pasó por ahí.
-  const renamedPlanning: WorkflowConfig = {
-    stages: [
-      { key: "kickoff", label: "Kickoff", icon: "📋" }, // "planning" renombrada
-      { key: "implementing", label: "Impl", icon: "⌨️", role: "impl" },
-      { key: "curl", label: "Curl", icon: "🌐" },
-      { key: "done", label: "Done", icon: "✓" },
-    ],
-    verifyAfter: "curl",
-  };
-  const out = spliceFlow(withVerify, renamedPlanning, "verify");
-  assert.equal(out.ok, false);
-  assert.ok(!out.ok);
-  assert.equal(out.code, "STAGE_IN_FLIGHT");
-});
-
-test("D5: currentKey='verify' con anclaje sano (nada antes de verifyAfter se toca) SÍ splicea, tomando el sufijo nuevo tras curl", () => {
-  const withVerify: WorkflowConfig = { ...OLD_FLOW, verifyAfter: "curl" };
-  const next: WorkflowConfig = {
-    stages: [
-      { key: "planning", label: "Plan", icon: "📋" },
-      { key: "implementing", label: "Impl", icon: "⌨️", role: "impl" },
-      { key: "curl", label: "Curl", icon: "🌐" },
-      { key: "security", label: "Security", icon: "🔒" }, // nueva etapa AGREGADA tras curl
-    ],
-    verifyAfter: "curl",
-  };
-  const out = spliceFlow(withVerify, next, "verify");
-  assert.equal(out.ok, true);
-  assert.ok(out.ok);
-  assert.deepEqual(out.stages.map((s) => s.key), ["planning", "implementing", "curl", "security"]);
-});
-
-test("D5: un currentKey desconocido (ni etapa real ni 'verify' resoluble) se rechaza CONSERVADOR — nunca vía libre", () => {
-  const out = spliceFlow(OLD_FLOW, { stages: [{ key: "solo", label: "Solo", icon: "x" }], verifyAfter: null }, "algo-que-no-existe-en-ningun-lado");
-  assert.equal(out.ok, false);
-  assert.ok(!out.ok);
-  assert.equal(out.code, "STAGE_IN_FLIGHT");
-});
-
-// ---- Modo Driver: el flow fijo debe mapear bien contra la maquinaria del workflow ----
-
-test("DRIVER_FLOW: verifyAfter null ⇒ stepperFor NO inserta el paso sintético 'verify'", () => {
-  // Si se colara, pollLive dispararía spawnVerifier y crearía una sesión tmux aparte,
-  // anulando en silencio el modelo de 4 panes.
-  const stepper = stepperFor(DRIVER_STAGES, DRIVER_FLOW.verifyAfter);
-  assert.equal(DRIVER_FLOW.verifyAfter, null);
-  assert.equal(stepper.length, DRIVER_STAGES.length);
-  assert.equal(stepper.some((s) => s.key === "verify"), false);
-});
 
 test("DRIVER_STAGES: ninguna key choca con RESERVED_KEYS", () => {
   for (const s of DRIVER_STAGES) assert.equal(RESERVED_KEYS.includes(s.key), false, s.key);
@@ -609,18 +419,6 @@ test("implStageIndex: encuentra 'implementing' por key aunque no haya role:'impl
 
 test("DRIVER_STAGES: ninguna etapa lleva verifyCmd (los gates P2 son del engine, no del driver)", () => {
   assert.equal(DRIVER_STAGES.some((s) => s.verifyCmd), false);
-});
-
-test("liveMapFor(DRIVER_FLOW): 'done' cierra la tarjeta; las intermedias la dejan corriendo", () => {
-  const map = liveMapFor(DRIVER_STAGES, DRIVER_FLOW.verifyAfter);
-  assert.deepEqual(
-    { task: map.get("done")!.task, worker: map.get("done")!.worker },
-    { task: "done", worker: "done" }
-  );
-  for (const k of ["planning", "plan-review", "implementing", "diff-review", "verifying"]) {
-    assert.equal(map.get(k)!.task, "running", k);
-    assert.equal(map.get(k)!.worker, "busy", k);
-  }
 });
 
 // El guard REAL nº1: launchDriverLive persiste switchEnabled:false (models.json), así que
