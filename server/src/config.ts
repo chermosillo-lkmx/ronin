@@ -51,10 +51,15 @@ export const PORT = resolvePort(process.env.PORT);
 // ---- Reportes de resumen (scheduler opt-in) ----
 export const REPORT_SCHEDULE = process.env.COWORK_REPORT_SCHEDULE === "1";
 /**
- * P2: el bucle que ejecuta los `verifyCmd` de las etapas. Opt-in como el de reportes, y por la
- * misma razón multiplicada: corre comandos declarados en el override por-repo. Apagado, el
- * servidor no abre el lazo; encendido, sigue inerte hasta que un repo declare un verifyCmd.
+ * P2: el bucle que ejecuta los `verifyCmd` de las etapas. Encendido por defecto: la app abierta
+ * desde el Finder no hereda el shell, así que un opt-in por variable dejaba el gate apagado en el
+ * uso normal y el medidor de Harness describía configuración declarada, nunca comprobaciones.
+ * Sigue inerte hasta que un repo declare un verifyCmd en su override (gitignored), y se apaga con
+ * `COWORK_VERIFY_GATE=0` — ojo: corre shell dentro de los worktrees de las sesiones vivas.
  */
-export const VERIFY_GATE = process.env.COWORK_VERIFY_GATE === "1";
+export function resolveVerifyGate(raw: string | undefined): boolean {
+  return raw !== "0";
+}
+export const VERIFY_GATE = resolveVerifyGate(process.env.COWORK_VERIFY_GATE);
 export const REPORT_DAILY_AT = process.env.COWORK_REPORT_DAILY_AT ?? "19:00";
 export const REPORT_WEEKLY_DAY = Number(process.env.COWORK_REPORT_WEEKLY_DAY ?? 5); // 0=Dom..6=Sáb, default vie
