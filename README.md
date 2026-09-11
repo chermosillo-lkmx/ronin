@@ -114,7 +114,7 @@ Los reportes diario/semanal se construyen a partir de sesiones, evidencia y comm
     (**gitignored**, nunca se commitean) y **no entran al catálogo** de workflows hasta que el
     operador las revisa y pulsa **Aceptar** en el panel de Propuestas; **Descartar** las cierra sin
     tocar nada más.
-  - Una propuesta que trae `verifyCmd` (shell arbitrario, sólo permitido en overrides por-repo) o que
+  - Una propuesta generada por el analizador que trae `verifyCmd` (shell arbitrario no confiable) o que
     choca de nombre con un workflow ya existente se **descarta automáticamente con un motivo legible**
     en vez de tumbar el análisis completo; el resto del lote se sigue procesando igual.
   - El prompt sólo lleva texto de historia/commits/evidencia del propio repo — **nunca tokens ni
@@ -173,15 +173,15 @@ Cada etapa declara **quién la ejecuta** y **con qué modelo**, y el prompt se g
 
 ### Vista Harness del editor
 
-La cuarta vista del editor lee cada etapa como un pequeño arnés: separa lo que guía al agente de
-lo que observa o bloquea su avance. En el shell de escritorio (Ronin) vive en `Workflows` → segmento
-`Grafo/Stepper/JSON/Harness`, sobre el catálogo de workflows; ahí `verifyCmd` sale deshabilitado porque el
-catálogo es git-tracked y el servidor lo rechaza (`VERIFY_CMD_NOT_ALLOWED`) — sólo se arma desde el override
-por-repo del dashboard web (⚙ Workflow). Hay cuatro controles con interruptor:
+La cuarta vista del editor presenta una lista compacta por etapa: cada fila mantiene visibles ejecutor,
+instrucción, gate y revisión, y se despliega in situ para editarlos. En el shell de escritorio (Ronin)
+vive en `Workflows` → segmento `Grafo/Stepper/JSON/Harness`, sobre el catálogo de workflows. El catálogo
+y los overrides por-repo permiten `verifyCmd`; el workflow global legacy lo mantiene deshabilitado.
+Hay cuatro controles con interruptor:
 
 - **Instrucción** edita `instruction`.
 - **Ejecutor/modelo** edita `executor` y `model` como una unidad.
-- **Verificador inferencial** elige la etapa de `verifyAfter`.
+- **Verificador inferencial** selecciona cero o varias etapas en `verifyAfter`.
 - **Gate de avance** edita `verifyCmd`; `maxRetries` es un parámetro del comando, no un quinto
   interruptor.
 
@@ -189,22 +189,24 @@ Los chips derivados de la instrucción —por ejemplo `junit.xml`, cobertura o i
 intención, pero no prueban que el artefacto exista.
 
 El medidor muestra `etapas con verifyCmd / etapas totales`: cuenta gates deterministas declarados,
-no controles encendidos, texto abundante ni verificaciones ya ejecutadas. Por eso puede marcar
-`0 / N` aunque el riel y las etapas se vean llenos de guías, sensores inferenciales y chips de
-prosa. En un workflow global siempre queda en cero: `verifyCmd` y `maxRetries` sólo se conservan en
-el override por-repo. Incluso allí, el servidor sólo honra `verifyCmd` con el gate encendido (lo
-está por defecto; `COWORK_VERIFY_GATE=0` lo apaga); apagado, el medidor sigue describiendo
-configuración declarada, no comprobaciones realizadas.
+no texto abundante ni revisiones por modelo. El servidor sólo ejecuta `verifyCmd` con el gate encendido
+(lo está por defecto; `COWORK_VERIFY_GATE=0` lo apaga); apagado, el medidor sigue describiendo
+configuración declarada, no comprobaciones realizadas. Al guardar un comando nuevo o cambiado, tanto
+el catálogo como el override muestran una confirmación porque el comando ejecutará shell.
+
+El botón «Probar ahora» y el último resultado del gate no forman parte de esta vista: requieren ejecución
+a demanda o datos de una sesión concreta. El inspector de sesiones conserva `failed` e intentos.
 
 ### Gate de etapa por `verifyCmd` (opcional)
 
-Una etapa del override por-repo puede declarar `verifyCmd` y `maxRetries`: cuando el worker marca
+Una etapa del catálogo o del override por-repo puede declarar `verifyCmd` y `maxRetries`: cuando el worker marca
 esa etapa, un bucle en el servidor lo ejecuta en su worktree mientras el worker está ocioso, con
 reintentos y sin falsos verdes (agotados los intentos, el gate queda `failed` para siempre). Está
 **encendido por defecto** (a diferencia del planificador de reportes, que sigue siendo opt-in) y se
 apaga con `COWORK_VERIFY_GATE=0`. Ojo: ejecuta shell dentro del worktree de las sesiones vivas del
-repo, así que sólo el override por-repo (gitignored) puede declarar `verifyCmd`; el workflow global y
-el catálogo lo rechazan.
+repo. El catálogo vive en `workflows.json`, que puede estar bajo git: revisar un cambio de catálogo
+es también revisar shell ejecutable. El workflow global legacy (`PUT /api/workflow`) y `actions.json`
+siguen rechazando `verifyCmd`; el catálogo y el override por-repo lo honran.
 
 Si el repo declara `setupCommand`, Ronin lo corre en segundo plano al crear el worktree para armar
 su entorno (`.venv`, `node_modules`), y el gate espera a que termine; si la provisión falla, se

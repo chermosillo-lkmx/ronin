@@ -32,16 +32,14 @@ export function WorkflowGraph({
   onStageClick,
 }: {
   stages: WfStage[];
-  verifyAfter: string | null;
+  verifyAfter: string[];
   onInsertStage?: (index: number) => void;
   onStageClick?: (index: number) => void;
 }) {
   const graph = deriveGraph(stages, verifyAfter);
   const mainKeys = stages.map((s) => s.key);
-  const verifyIndex = stages.findIndex((stage) => stage.key === verifyAfter);
-  const verifyX = verifyIndex >= 0 ? verifyIndex * (NODE_W + GAP_X) : 0;
   const width = Math.max(mainKeys.length * (NODE_W + GAP_X), NODE_W);
-  const hasVerify = graph.nodes.some((n) => n.key === "verify");
+  const hasVerify = graph.nodes.some((n) => n.key.startsWith("verify:"));
   const height = hasVerify ? VERIFY_ROW_Y + NODE_H + 16 : ROW_Y + NODE_H + 16;
 
   return (
@@ -67,6 +65,8 @@ export function WorkflowGraph({
       {graph.edges
         .filter((e) => e.kind === "verify")
         .map((e) => {
+          const verifyIndex = stages.findIndex((stage) => stage.key === e.from);
+          const verifyX = Math.max(verifyIndex, 0) * (NODE_W + GAP_X);
           const x = verifyX + NODE_W / 2;
           return (
             <line
@@ -86,7 +86,7 @@ export function WorkflowGraph({
         </marker>
       </defs>
       {graph.nodes
-        .filter((n) => n.key !== "verify")
+        .filter((n) => !n.key.startsWith("verify:"))
         .map((n, index) => (
           <g key={`${n.key}-${index}`} data-stage-key={n.key} className={`wf-graph-node${n.role === "impl" ? " wf-graph-node-impl" : ""}${onStageClick ? " wf-graph-node-interactive" : ""}`} transform={`translate(${index * (NODE_W + GAP_X)}, ${ROW_Y})`} role={onStageClick ? "button" : undefined} tabIndex={onStageClick ? 0 : undefined} onClick={onStageClick ? () => onStageClick(index) : undefined} onKeyDown={onStageClick ? (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onStageClick(index); } } : undefined}>
             <rect width={NODE_W} height={NODE_H} rx={8} />
@@ -113,9 +113,9 @@ export function WorkflowGraph({
         </g>
       )}
       {graph.nodes
-        .filter((n) => n.key === "verify")
+        .filter((n) => n.key.startsWith("verify:"))
         .map((n) => (
-          <g key={n.key} data-stage-key={n.key} className="wf-graph-node wf-graph-node-verify" transform={`translate(${verifyX}, ${VERIFY_ROW_Y})`}>
+          <g key={n.key} data-stage-key={n.key} className="wf-graph-node wf-graph-node-verify" transform={`translate(${Math.max(stages.findIndex((stage) => n.key === `verify:${stage.key}`), 0) * (NODE_W + GAP_X)}, ${VERIFY_ROW_Y})`}>
             <rect width={NODE_W} height={NODE_H} rx={8} />
             <text className="ron-exec-graph-title" x={14} y={25}>
               {nodeLabel(n)}

@@ -6,8 +6,8 @@ import { renderToString } from "react-dom/server";
 import { WorkflowWorkspace } from "./WorkflowWorkspace.js";
 import type { WorkflowCatalogItem } from "../../types.js";
 
-const only: WorkflowCatalogItem = { id: "default", name: "default", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }], verifyAfter: null } };
-const harnessCatalog: WorkflowCatalogItem[] = [{ id: "harness", name: "harness", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }, { key: "impl", label: "Impl", icon: "⌨️", instruction: "escribe plan.md", executor: "codex" }], verifyAfter: "impl" } }];
+const only: WorkflowCatalogItem = { id: "default", name: "default", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }], verifyAfter: [] } };
+const harnessCatalog: WorkflowCatalogItem[] = [{ id: "harness", name: "harness", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋", verifyCmd: "npm test", maxRetries: 2 }, { key: "impl", label: "Impl", icon: "⌨️", instruction: "escribe plan.md", executor: "codex" }], verifyAfter: ["impl"] } }];
 
 function harnessHtml() {
   return renderToString(createElement(WorkflowWorkspace, { initialCatalog: harnessCatalog, initialView: "harness", onLaunch: () => {} }));
@@ -48,32 +48,29 @@ test("initialView:'harness' marca activa esa pestaña", () => {
   assert.doesNotMatch(segment, /<button class="active">Grafo<\/button>/);
 });
 
-test("en vista Harness pinta los controles de campo de cada etapa del catálogo", () => {
+test("en vista Harness pinta una fila por etapa y los controles visibles", () => {
   const html = harnessHtml();
-  for (const stageKey of ["plan", "impl"]) for (const control of ["instruction", "executor", "verifyCmd", "verifier"]) controlButton(html, stageKey, control);
-  assert.match(controlButton(html, "plan", "instruction"), /aria-pressed="false"/);
-  assert.match(controlButton(html, "impl", "instruction"), /aria-pressed="true"/);
-  assert.match(controlButton(html, "impl", "executor"), /aria-pressed="true"/);
+  assert.equal(html.split('class="wf-harness-row"').length - 1, 2);
+  for (const stageKey of ["plan", "impl"]) for (const control of ["verifyCmd", "verifier"]) controlButton(html, stageKey, control);
   assert.match(controlButton(html, "impl", "verifier"), /aria-pressed="true"/);
+  assert.match(html, /codex/);
   assert.doesNotMatch(html, /class="wf-graph"/);
 });
 
-test("en el catálogo verifyCmd queda deshabilitado con su motivo y la banda Gates cerrada", () => {
+test("en el catálogo verifyCmd y la banda Gates están habilitados", () => {
   const html = harnessHtml();
-  for (const stageKey of ["plan", "impl"]) assert.match(controlButton(html, stageKey, "verifyCmd"), /disabled=""/);
-  assert.match(html, /sólo en el override por-repo/);
-  assert.match(bandButton(html, "gates"), /disabled=""/);
+  for (const stageKey of ["plan", "impl"]) assert.doesNotMatch(controlButton(html, stageKey, "verifyCmd"), /disabled=""/);
+  assert.doesNotMatch(bandButton(html, "gates"), /disabled=""/);
 });
 
-test("el medidor cuenta 0 sensores con campo detrás en el catálogo", () => {
+test("el medidor cuenta los gates configurados en el catálogo", () => {
   const html = harnessHtml();
-  assert.match(html, /data-coverage="0\/2"/);
-  assert.match(html, /Ninguna etapa deja evidencia verificable/);
-  assert.match(html, /workflow global: los sensores deterministas sólo viven en el override por-repo/);
+  assert.match(html, /data-coverage="1\/2"/);
+  assert.match(html, /Una sola etapa deja artefacto/);
 });
 
 test("el catálogo con inputs los conserva en el draft que se va a guardar", () => {
-  const catalog: WorkflowCatalogItem[] = [{ id: "inputs", name: "inputs", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }], verifyAfter: null, inputs: [{ key: "ticket", label: "Ticket" }] } }];
+  const catalog: WorkflowCatalogItem[] = [{ id: "inputs", name: "inputs", updatedAt: 0, config: { stages: [{ key: "plan", label: "Plan", icon: "📋" }], verifyAfter: [], inputs: [{ key: "ticket", label: "Ticket" }] } }];
   const html = renderToString(createElement(WorkflowWorkspace, { initialCatalog: catalog, initialView: "json", onLaunch: () => {} }));
   const textarea = html.match(/<textarea\b[^>]*>([\s\S]*?)<\/textarea>/)?.[1];
   assert.ok(textarea);
@@ -87,4 +84,29 @@ test("el guardado del catálogo declara el pin de cableado sin pérdida", () => 
   const source = readFileSync(new URL("./WorkflowWorkspace.tsx", import.meta.url), "utf8");
   assert.match(source, /confirmWorkflowSave\(draft, null/);
   assert.match(source, /updateWorkflow\(id, \{ config: workflowPayload\(draft\) \}\)/);
+});
+
+test("B3 v2: el catálogo monta HarnessList y habilita gates en lista, Stepper y modal", () => {
+  const source = readFileSync(new URL("./WorkflowWorkspace.tsx", import.meta.url), "utf8");
+  assert.match(source, /import \{ HarnessList \}/);
+  assert.match(source, /<HarnessList/);
+  assert.match(source, /const CATALOG_ALLOW_VERIFY_CMD = true/);
+  assert.equal(source.match(/allowVerifyCmd=\{CATALOG_ALLOW_VERIFY_CMD\}/g)?.length, 3);
+  for (const prop of ["openStage", "onOpenStage", "onToggle", "onEdit", "onBandToggle"]) {
+    assert.match(source, new RegExp(`${prop}=`), `falta prop ${prop}`);
+  }
+});
+
+test("B3 v2: la vista Harness del catálogo pinta filas y cobertura de gates", () => {
+  const catalog: WorkflowCatalogItem[] = [{
+    ...harnessCatalog[0],
+    config: { ...harnessCatalog[0].config, stages: [
+      harnessCatalog[0].config.stages[0],
+      harnessCatalog[0].config.stages[1],
+    ] },
+  }];
+  const html = renderToString(createElement(WorkflowWorkspace, { initialCatalog: catalog, initialView: "harness", onLaunch: () => {} }));
+  assert.equal(html.split('class="wf-harness-row"').length - 1, 2);
+  assert.match(html, /data-coverage="1\/2"/);
+  assert.doesNotMatch(controlButton(html, "plan", "verifyCmd"), /disabled=""/);
 });

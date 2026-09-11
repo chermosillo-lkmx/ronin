@@ -61,7 +61,7 @@ export interface AdoptResult {
   cwd: string; // realpath resuelto y contenido en una raíz permitida
   paneId: string;
   sessionCreatedAt: number;
-  workflow: WorkflowConfig; // congelado: verifyAfter null, sin verifyCmd/maxRetries
+  workflow: WorkflowConfig; // congelado: verifyAfter vacío, sin verifyCmd/maxRetries
 }
 
 export function validateAdopt(input: AdoptInput, deps: AdoptDeps): AdoptResult {
@@ -97,7 +97,7 @@ export function validateAdopt(input: AdoptInput, deps: AdoptDeps): AdoptResult {
   const flow = deps.resolveFlow(input.repo);
   const workflow: WorkflowConfig = {
     stages: flow.stages.map((stage) => stripVerifyFields(stage) as WfStage),
-    verifyAfter: null,
+    verifyAfter: [],
   };
 
   if (entry.kind === "managed") throw new AdoptValidationError("ALREADY_MANAGED");

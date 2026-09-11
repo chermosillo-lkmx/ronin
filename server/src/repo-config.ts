@@ -139,7 +139,7 @@ function slugKey(s: string): string {
 export function getRepoWorkflow(repo: string): WorkflowConfig | null {
   const wf = S()[slugKey(repo)]?.workflow;
   return wf
-    ? { stages: wf.stages.map((s) => ({ ...s })), verifyAfter: wf.verifyAfter, ...(wf.inputs ? { inputs: wf.inputs.map((input) => ({ ...input })) } : {}) }
+    ? { stages: wf.stages.map((s) => ({ ...s })), verifyAfter: [...wf.verifyAfter], ...(wf.inputs ? { inputs: wf.inputs.map((input) => ({ ...input })) } : {}) }
     : null;
 }
 export function getRepoVars(repo: string): Record<string, string> {

@@ -30,7 +30,7 @@ Cada propuesta debe tener:
     - "icon": un ícono para la etapa.
     - "instruction" (opcional): qué debe hacer el worker en esta etapa.
     - "role" (opcional): solo puede ser "role": "impl", y debe aparecer en EXACTAMENTE una etapa de cada workflow propuesto (la etapa de implementación).
-  - "verifyAfter": la "key" de la etapa después de la cual correr verificación, o null si no aplica.
+  - "verifyAfter": lista de keys de etapas después de las cuales pedir revisión (puede ir vacía).
 
 No agregues ningún campo de verificación por comando de shell a las etapas: ese tipo de campo no se puede proponer, solo se configura manualmente por repo.
 

@@ -29,7 +29,7 @@ export interface FieldError {
 export interface WorkflowDraftState {
   saved: WorkflowConfig;   // last known-good config (from the server: initial load or a successful save)
   stages: WfStage[];       // the LIVE edit, shared by the Stepper and Grafo views
-  verifyAfter: string | null;
+  verifyAfter: string[];
   inputs?: WfInput[];
   stash: Record<string, HarnessStash>;
   identitySnapshot: WfStage[] | null;
@@ -40,7 +40,13 @@ export interface WorkflowDraftState {
   fieldError: FieldError | null; // last semantic error surfaced from /validate or a failed save
 }
 
-function stringifyFlow(flow: { stages: WfStage[]; verifyAfter: string | null; inputs?: WfInput[] }): string {
+function normalizeVerifyAfter(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  return [];
+}
+
+function stringifyFlow(flow: { stages: WfStage[]; verifyAfter: string[]; inputs?: WfInput[] }): string {
   return JSON.stringify({
     stages: flow.stages,
     verifyAfter: flow.verifyAfter,
@@ -49,15 +55,16 @@ function stringifyFlow(flow: { stages: WfStage[]; verifyAfter: string | null; in
 }
 
 export function createWorkflowDraft(cfg: WorkflowConfig, view: DraftView = "stepper"): WorkflowDraftState {
+  const normalized = { ...cfg, verifyAfter: normalizeVerifyAfter(cfg.verifyAfter) };
   return {
-    saved: cfg,
-    stages: cfg.stages,
-    verifyAfter: cfg.verifyAfter,
-    inputs: cfg.inputs,
+    saved: normalized,
+    stages: normalized.stages,
+    verifyAfter: normalized.verifyAfter,
+    inputs: normalized.inputs,
     stash: {},
     identitySnapshot: null,
     arming: null,
-    jsonText: stringifyFlow(cfg),
+    jsonText: stringifyFlow(normalized),
     view,
     jsonError: null,
     fieldError: null,
@@ -105,7 +112,7 @@ function identityFreeze(state: WorkflowDraftState, stages: WfStage[]) {
 }
 
 /** Structured edit (Stepper/Grafo) → re-serializes the JSON view so it never shows stale text. */
-export function setStages(state: WorkflowDraftState, stages: WfStage[], verifyAfter: string | null): WorkflowDraftState {
+export function setStages(state: WorkflowDraftState, stages: WfStage[], verifyAfter: string[]): WorkflowDraftState {
   const identity = identityFreeze(state, stages);
   const stableBefore = state.identitySnapshot ?? state.stages;
   const renames = identity.ambiguous ? new Map<string, string>() : renamedStageKeys(stableBefore, stages);
@@ -218,8 +225,12 @@ function jsonShapeError(parsed: unknown): JsonError | null {
     const stageError = stageShapeError(obj.stages[i], i);
     if (stageError) return stageError;
   }
-  if (obj.verifyAfter !== null && typeof obj.verifyAfter !== "string") {
-    return { path: "verifyAfter", message: '"verifyAfter" debe ser un string (key de etapa) o null' };
+  if (obj.verifyAfter !== null && typeof obj.verifyAfter !== "string" && !Array.isArray(obj.verifyAfter)) {
+    return { path: "verifyAfter", message: '"verifyAfter" debe ser un array de keys' };
+  }
+  if (Array.isArray(obj.verifyAfter)) {
+    const invalid = obj.verifyAfter.findIndex((item) => typeof item !== "string");
+    if (invalid >= 0) return { path: `verifyAfter[${invalid}]`, message: `verifyAfter[${invalid}] debe ser un string` };
   }
   if (obj.inputs !== undefined) {
     if (!Array.isArray(obj.inputs)) return { path: "inputs", message: '"inputs" debe ser un array de entradas' };
@@ -247,11 +258,12 @@ export function setJsonText(state: WorkflowDraftState, text: string): WorkflowDr
   }
   const shapeError = jsonShapeError(parsed);
   if (shapeError) return { ...state, jsonText: text, jsonError: shapeError };
-  const { stages, verifyAfter, inputs } = parsed as WorkflowConfig;
+  const { stages, inputs } = parsed as WorkflowConfig;
+  const verifyAfter = normalizeVerifyAfter((parsed as Record<string, unknown>).verifyAfter);
   const identity = identityFreeze(state, stages);
   return {
     ...state,
-    jsonText: text,
+    jsonText: stringifyFlow({ stages, verifyAfter, inputs }),
     stages,
     verifyAfter,
     inputs,
@@ -340,7 +352,9 @@ export function toggleHarnessControl(
   if (!state.stages.some((stage) => stage.key === stageKey)) return state;
   if (id === "verifyCmd" && !allowVerifyCmd) return state;
   if (id === "verifier") {
-    const verifyAfter = on ? stageKey : null;
+    const verifyAfter = on
+      ? [...state.verifyAfter, ...(!state.verifyAfter.includes(stageKey) ? [stageKey] : [])]
+      : state.verifyAfter.filter((key) => key !== stageKey);
     return {
       ...state,
       verifyAfter,
@@ -421,17 +435,36 @@ export function toggleHarnessSection(
   _allowVerifyCmd: boolean,
 ): WorkflowDraftState {
   if (stageIdentityProblem(state.stages)) return state;
-  if (band === "deterministic-sensors") return state;
-  if (band === "inferential-sensors") {
+  if (band === "verifiers") {
     if (!on) {
-      return state.verifyAfter
-        ? toggleHarnessControl(state, state.verifyAfter, "verifier", false, _allowVerifyCmd)
-        : state;
+      if (state.verifyAfter.length === 0) return state;
+      const stash = { ...state.stash };
+      for (const stageKey of state.verifyAfter) {
+        stash[stageKey] = { ...stash[stageKey], verifier: true };
+      }
+      const verifyAfter: string[] = [];
+      return {
+        ...state,
+        verifyAfter,
+        stash,
+        arming: null,
+        jsonText: stringifyFlow({ stages: state.stages, verifyAfter, inputs: state.inputs }),
+        jsonError: null,
+        fieldError: null,
+      };
     }
-    const stage = state.stages.find((item) => state.stash[item.key]?.verifier);
-    return stage
-      ? toggleHarnessControl(state, stage.key, "verifier", true, _allowVerifyCmd)
-      : state;
+    const verifyAfter = state.stages
+      .filter((stage) => state.stash[stage.key]?.verifier)
+      .map((stage) => stage.key);
+    if (verifyAfter.length === 0) return state;
+    return {
+      ...state,
+      verifyAfter,
+      arming: null,
+      jsonText: stringifyFlow({ stages: state.stages, verifyAfter, inputs: state.inputs }),
+      jsonError: null,
+      fieldError: null,
+    };
   }
   if (band === "gates") {
     if (!_allowVerifyCmd) return state;
@@ -448,15 +481,17 @@ export function toggleHarnessSection(
     });
     return withHarnessStages(state, stages, stash);
   }
-  if (band === "guides" && on) {
+  if ((band === "instruction" || band === "executor") && on) {
+    const ids: Array<"instruction" | "executor"> = [band];
     const stages = state.stages.map((stage) =>
-      restoreStashedControls(stage, state.stash[stage.key] ?? {}, ["instruction", "executor"]));
+      restoreStashedControls(stage, state.stash[stage.key] ?? {}, ids));
     return withHarnessStages(state, stages, state.stash);
   }
-  if (band === "guides" && !on) {
+  if ((band === "instruction" || band === "executor") && !on) {
+    const ids: Array<"instruction" | "executor"> = [band];
     const stash = { ...state.stash };
     const stages = state.stages.map((stage) => {
-      const result = turnOffControls(stage, stash[stage.key] ?? {}, ["instruction", "executor"]);
+      const result = turnOffControls(stage, stash[stage.key] ?? {}, ids);
       stash[stage.key] = result.stash;
       return result.stage;
     });
@@ -485,8 +520,6 @@ export interface DraftGraph {
   edges: DraftGraphEdge[];
 }
 
-const VERIFY_NODE: DraftGraphNode = { key: "verify", label: "Verify", icon: "🔎" };
-
 /**
  * Pure presentational derivation for the Grafo view — same three edge classes as the server's
  * toGraph (server/src/workflow.ts), duplicated here deliberately: this is layout/rendering, not
@@ -494,7 +527,7 @@ const VERIFY_NODE: DraftGraphNode = { key: "verify", label: "Verify", icon: "�
  * validateStages drifting from the server's). The topological order IS `stages`' array order,
  * so layout is deterministic with no separate positioning step.
  */
-export function deriveGraph(stages: WfStage[], verifyAfter: string | null): DraftGraph {
+export function deriveGraph(stages: WfStage[], verifyAfter: string[]): DraftGraph {
   const nodes: DraftGraphNode[] = stages.map((s) => ({
     key: s.key,
     label: s.label,
@@ -506,9 +539,12 @@ export function deriveGraph(stages: WfStage[], verifyAfter: string | null): Draf
   }));
   const edges: DraftGraphEdge[] = [];
   for (let i = 0; i < stages.length - 1; i++) edges.push({ from: stages[i].key, to: stages[i + 1].key, kind: "sequence" });
-  if (verifyAfter && stages.some((s) => s.key === verifyAfter)) {
-    nodes.push(VERIFY_NODE);
-    edges.push({ from: verifyAfter, to: VERIFY_NODE.key, kind: "verify" });
+  for (const stageKey of verifyAfter) {
+    const stage = stages.find((candidate) => candidate.key === stageKey);
+    if (!stage) continue;
+    const key = `verify:${stageKey}`;
+    nodes.push({ key, label: `Verify ${stage.label}`, icon: "🔎" });
+    edges.push({ from: stageKey, to: key, kind: "verify" });
   }
   for (const s of stages) if (s.verifyCmd) edges.push({ from: s.key, to: s.key, kind: "retry" });
   return { nodes, edges };

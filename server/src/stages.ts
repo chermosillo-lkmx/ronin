@@ -2,11 +2,11 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { join } from "node:path";
 import { writeJsonAtomic } from "./atomic.js";
 import { isSafeSessionName } from "./session-name.js";
-import { getStepperStages, type WorkflowConfig } from "./workflow.js";
+import { getStages, type WorkflowConfig } from "./workflow.js";
 
 /** Loop stages in order, derived from the composable workflow (data/workflow.json). */
 export function stageOrder(): string[] {
-  return getStepperStages().map((s) => s.key);
+  return getStages().map((s) => s.key);
 }
 
 /**

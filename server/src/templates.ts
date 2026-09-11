@@ -35,7 +35,7 @@ export function makeFill(cycleDir: string, repo: string, vars: Record<string, st
 
 /** {steps} desde el flow: cada etapa → paso numerado + sentinel (touch). fill() aplicado a la instrucción. */
 export function assembleSteps(
-  flow: { stages: WfStage[]; verifyAfter: string | null },
+  flow: { stages: WfStage[]; verifyAfter: string[] },
   cycleDir: string,
   fill: (s: string) => string
 ): string {
@@ -59,8 +59,18 @@ function executorDirective(stage: WfStage): string {
   return `Delega esta etapa a ${stage.executor}: ábrelo en una ventana tmux NUEVA de esta sesión con \`${command}\` y verifica su resultado por el log — «task started» no es resultado.${agyModelNote}`;
 }
 
+function verifierInstruction(stageKeys: string[]): string {
+  if (!stageKeys.length) return "";
+  if (stageKeys.length === 1) {
+    return `\nAl terminar la etapa "${stageKeys[0]}", un VERIFICADOR independiente (otro pane) revisará tus resultados contra el objetivo.`;
+  }
+  const quoted = stageKeys.map((key) => `"${key}"`);
+  const stages = quoted.length === 2 ? quoted.join(" y ") : `${quoted.slice(0, -1).join(", ")} y ${quoted.at(-1)}`;
+  return `\nAl terminar cada una de las etapas ${stages}, un VERIFICADOR independiente (otro pane) revisará tus resultados contra el objetivo.`;
+}
+
 export interface WorkflowPromptValuesInput {
-  workflow: { stages: WfStage[]; verifyAfter: string | null; inputs?: Array<{ key: string }> };
+  workflow: { stages: WfStage[]; verifyAfter: string[]; inputs?: Array<{ key: string }> };
   cycle: string;
   repo: string;
   kind: string;
@@ -88,9 +98,7 @@ export function buildWorkflowPromptValues(input: WorkflowPromptValuesInput): Rec
     ref: input.ref ?? "",
     desc: input.desc ?? "",
     steps: assembleSteps(input.workflow, input.cycle, fill),
-    verifier: input.workflow.verifyAfter
-      ? `\nAl terminar la etapa "${input.workflow.verifyAfter}", un VERIFICADOR independiente (otro pane) revisará tus resultados contra el objetivo.`
-      : "",
+    verifier: verifierInstruction(input.workflow.verifyAfter),
     cycle: input.cycle,
     ev,
     repo: input.repo,
@@ -102,7 +110,7 @@ export function buildWorkflowPromptValues(input: WorkflowPromptValuesInput): Rec
 
 /** Renderiza el workflow congelado para una petición creada desde Nueva sesión. */
 export function buildWorkflowRequestPrompt(input: {
-  workflow: { stages: WfStage[]; verifyAfter: string | null; inputs?: Array<{ key: string }> };
+  workflow: { stages: WfStage[]; verifyAfter: string[]; inputs?: Array<{ key: string }> };
   cycle: string;
   repo: string;
   request: string;
@@ -200,7 +208,7 @@ export function buildResearchPrompt(task: Task, cycleDir: string): string {
 export function buildWorkerPrompt(
   task: Task,
   cycleDir: string,
-  flow?: { stages: WfStage[]; verifyAfter: string | null },
+  flow?: { stages: WfStage[]; verifyAfter: string[] },
   vars: Record<string, string> = {}
 ): string {
   if (task.source === "pr") return buildPrReviewPrompt(task, cycleDir);
@@ -238,7 +246,7 @@ export function buildActionPrompt(
   action: CustomAction,
   task: Task,
   cycleDir: string,
-  flow: { stages: WfStage[]; verifyAfter: string | null },
+  flow: { stages: WfStage[]; verifyAfter: string[] },
   vars: Record<string, string> = {}
 ): string {
   const ev = `${cycleDir}/evidence`;
@@ -254,9 +262,7 @@ export function buildActionPrompt(
     cycle: cycleDir,
     ev,
     steps: assembleSteps(flow, cycleDir, fill),
-    verifier: flow.verifyAfter
-      ? `\nAl terminar la etapa "${flow.verifyAfter}", un VERIFICADOR independiente (otro pane) revisará tus resultados contra el objetivo.`
-      : "",
+    verifier: verifierInstruction(flow.verifyAfter),
   };
   return fill(renderPrompt(action.prompt, values));
 }

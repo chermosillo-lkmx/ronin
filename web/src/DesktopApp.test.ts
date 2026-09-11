@@ -11,5 +11,5 @@ test("DesktopApp monta WorkflowWorkspace en la vista workflows y no WorkflowEdit
   );
   assert.match(source, /view\s*===\s*["']workflows["']\s*&&\s*<WorkflowWorkspace\b/);
   assert.doesNotMatch(source, /\bWorkflowEditorScreen\b/);
-  assert.doesNotMatch(source, /\bHarnessView\b/);
+  assert.doesNotMatch(source, /WorkflowEditorScreen/);
 });

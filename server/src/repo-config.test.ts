@@ -13,7 +13,7 @@ test("T11.90 sanitizeEntry: un override con workflow inválido cae al default (n
   const entry = sanitizeEntry({
     workflow: {
       stages: [{ key: "", label: "", icon: "" }], // sin key válida → cero etapas sobreviven
-      verifyAfter: null,
+      verifyAfter: [],
     },
   });
   assert.equal(entry.workflow, undefined); // sin override → getRepoWorkflow hereda el default global
@@ -23,7 +23,7 @@ test("T11.90 sanitizeEntry: un workflow válido (incl. verifyCmd, gitignored) s�
   const entry = sanitizeEntry({
     workflow: {
       stages: [{ key: "curl", label: "Curl", icon: "🌐", verifyCmd: "npm test" }],
-      verifyAfter: null,
+      verifyAfter: [],
     },
   });
   assert.equal(entry.workflow?.stages[0].key, "curl");

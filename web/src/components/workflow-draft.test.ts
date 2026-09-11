@@ -24,7 +24,7 @@ const CFG: WorkflowConfig = {
     { key: "planning", label: "Plan", icon: "📋" },
     { key: "implementing", label: "Impl", icon: "⌨️", role: "impl" },
   ],
-  verifyAfter: null,
+  verifyAfter: [],
 };
 
 test("T14.108 createWorkflowDraft + setStages: editar en Stepper y cambiar a JSON muestra lo EDITADO, no lo guardado", () => {
@@ -68,7 +68,7 @@ test("insertStageAt inserta la etapa nueva en el índice indicado", () => {
 
 test("T14.109 setJsonText: editar en JSON y cambiar a Grafo muestra lo editado; JSON inválido NO contamina el borrador estructurado", () => {
   const draft = createWorkflowDraft(CFG);
-  const validEdit = JSON.stringify({ stages: [{ key: "solo", label: "Solo", icon: "x" }], verifyAfter: null });
+  const validEdit = JSON.stringify({ stages: [{ key: "solo", label: "Solo", icon: "x" }], verifyAfter: [] });
   const afterValid = setJsonText(draft, validEdit);
   assert.deepEqual(afterValid.stages.map((s) => s.key), ["solo"]);
   assert.equal(afterValid.jsonError, null);
@@ -82,12 +82,12 @@ test("T14.109 setJsonText: editar en JSON y cambiar a Grafo muestra lo editado; 
 
 test("D4 (bloqueante, hallado en review): JSON sintácticamente válido pero de forma inválida ({}) NO sustituye stages/verifyAfter en silencio, y jsonError queda seteado (Guardar deshabilitado)", () => {
   const draft = createWorkflowDraft(CFG); // CFG.verifyAfter es null; probamos con "curl" para distinguir de un default casual
-  const withVerify = setStages(draft, CFG.stages, "implementing");
+  const withVerify = setStages(draft, CFG.stages, ["implementing"]);
   const shapeInvalid = setJsonText(withVerify, "{}");
   // NO debe "colarse" como un config distinto y guardable: stages/verifyAfter quedan EXACTAMENTE
   // como estaban (mismos valores, no sustituidos por defaults silenciosos).
   assert.deepEqual(shapeInvalid.stages, withVerify.stages);
-  assert.equal(shapeInvalid.verifyAfter, "implementing");
+  assert.deepEqual(shapeInvalid.verifyAfter, ["implementing"]);
   // Y el borrador queda marcado como no-guardable — el mismo gate que un error de sintaxis.
   assert.ok(shapeInvalid.jsonError, "un JSON de forma inválida debe bloquear Guardar igual que uno con sintaxis rota");
   assert.match(shapeInvalid.jsonError!.message, /stages/i);
@@ -95,20 +95,20 @@ test("D4 (bloqueante, hallado en review): JSON sintácticamente válido pero de 
 
 test("D4: JSON con verifyAfter de un tipo inválido (no string, no null) también es un error de forma, no se sustituye por null en silencio", () => {
   const draft = createWorkflowDraft(CFG);
-  const withVerify = setStages(draft, CFG.stages, "implementing");
+  const withVerify = setStages(draft, CFG.stages, ["implementing"]);
   const shapeInvalid = setJsonText(withVerify, JSON.stringify({ stages: CFG.stages, verifyAfter: 42 }));
-  assert.equal(shapeInvalid.verifyAfter, "implementing"); // NO se convirtió en null
+  assert.deepEqual(shapeInvalid.verifyAfter, ["implementing"]); // NO se convirtió en []
   assert.ok(shapeInvalid.jsonError);
 });
 
 test("NEW-1 (major, hallado en review 2): stages[i] anidada inválida ({}) también bloquea Guardar, no sólo la forma de primer nivel", () => {
   const draft = createWorkflowDraft(CFG);
-  const withVerify = setStages(draft, CFG.stages, "implementing");
-  const nestedInvalid = setJsonText(withVerify, JSON.stringify({ stages: [{}], verifyAfter: null }));
+  const withVerify = setStages(draft, CFG.stages, ["implementing"]);
+  const nestedInvalid = setJsonText(withVerify, JSON.stringify({ stages: [{}], verifyAfter: [] }));
   // El primer nivel (stages es array, verifyAfter es null) pasa — pero la etapa ADENTRO no
   // tiene key/label/icon: debe bloquear igual, sin sustituir el borrador estructurado.
   assert.deepEqual(nestedInvalid.stages, withVerify.stages);
-  assert.equal(nestedInvalid.verifyAfter, "implementing");
+  assert.deepEqual(nestedInvalid.verifyAfter, ["implementing"]);
   assert.ok(nestedInvalid.jsonError, "una etapa anidada sin key/label/icon debe bloquear Guardar");
   assert.match(nestedInvalid.jsonError!.path ?? "", /stages\[0\]/);
 });
@@ -117,19 +117,19 @@ test("NEW-1: un role/verifyCmd/maxRetries de tipo incorrecto en una etapa anidad
   const draft = createWorkflowDraft(CFG);
   const badRole = setJsonText(
     draft,
-    JSON.stringify({ stages: [{ key: "a", label: "A", icon: "x", role: "admin" }], verifyAfter: null })
+    JSON.stringify({ stages: [{ key: "a", label: "A", icon: "x", role: "admin" }], verifyAfter: [] })
   );
   assert.ok(badRole.jsonError);
   const badMaxRetries = setJsonText(
     draft,
-    JSON.stringify({ stages: [{ key: "a", label: "A", icon: "x", maxRetries: "3" }], verifyAfter: null })
+    JSON.stringify({ stages: [{ key: "a", label: "A", icon: "x", maxRetries: "3" }], verifyAfter: [] })
   );
   assert.ok(badMaxRetries.jsonError);
 });
 
 test("T14.110 cancel(): restaura el último config GUARDADO sin llamar a la API", () => {
   const draft = createWorkflowDraft(CFG);
-  const edited = setStages(draft, [{ key: "changed", label: "Changed", icon: "x" }], null);
+  const edited = setStages(draft, [{ key: "changed", label: "Changed", icon: "x" }], []);
   assert.notDeepEqual(edited.stages, CFG.stages);
   const cancelled = cancel(edited);
   assert.deepEqual(cancelled.stages, CFG.stages);
@@ -145,7 +145,7 @@ test("B4a cancel(): restaura inputs desde el config guardado", () => {
   const draft = createWorkflowDraft(saved);
   const edited = setJsonText(draft, JSON.stringify({
     stages: CFG.stages,
-    verifyAfter: null,
+    verifyAfter: [],
     inputs: [{ key: "issue", label: "Issue" }],
   }));
   assert.deepEqual((edited as any).inputs, [{ key: "issue", label: "Issue" }]);
@@ -174,7 +174,7 @@ test("INPUT-1 inputs con forma inválida bloquea Guardar y preserva el draft est
   });
   const malformed = JSON.stringify({
     stages: CFG.stages,
-    verifyAfter: null,
+    verifyAfter: [],
     inputs: { key: "issue", label: "Issue" },
   });
 
@@ -202,16 +202,16 @@ test("T14.112 setFieldError: un error semántico se atribuye a una ruta de campo
   const next = setFieldError(draft, { path: "stages[2].key", code: "DUPLICATE_KEY", message: 'la key "x" ya está usada' });
   assert.deepEqual(next.fieldError, { path: "stages[2].key", code: "DUPLICATE_KEY", message: 'la key "x" ya está usada' });
   // editar de nuevo limpia el error semántico obsoleto
-  const edited = setStages(next, CFG.stages, null);
+  const edited = setStages(next, CFG.stages, []);
   assert.equal(edited.fieldError, null);
 });
 
 test("T14.114 adoptServerConfig: tras guardar, el borrador adopta el config DEVUELTO POR EL SERVIDOR, no el local", () => {
   const draft = createWorkflowDraft(CFG);
-  const editedLocally = setStages(draft, [{ key: "  Local Edit  " as any, label: "x", icon: "x" }], null);
+  const editedLocally = setStages(draft, [{ key: "  Local Edit  " as any, label: "x", icon: "x" }], []);
   const serverNormalized: WorkflowConfig = {
     stages: [{ key: "local-edit", label: "Local Edit", icon: "x" }], // normalizado por el servidor (T11, sólo trim)
-    verifyAfter: null,
+    verifyAfter: [],
   };
   const next = adoptServerConfig(editedLocally, serverNormalized);
   assert.deepEqual(next.saved, serverNormalized);
@@ -227,13 +227,13 @@ test("deriveGraph: nodos + aristas de secuencia, bifurcación de verify, y self-
     { key: "b", label: "B", icon: "b", role: "impl" },
     { key: "curl", label: "Curl", icon: "🌐", verifyCmd: "npm test" },
   ];
-  const g = deriveGraph(stages, "b");
-  assert.deepEqual(g.nodes.map((n) => n.key), ["a", "b", "curl", "verify"]);
+  const g = deriveGraph(stages, ["b"]);
+  assert.deepEqual(g.nodes.map((n) => n.key), ["a", "b", "curl", "verify:b"]);
   assert.equal(g.nodes.find((n) => n.key === "b")?.role, "impl");
   assert.equal(g.nodes.find((n) => n.key === "curl")?.gate, true);
   const seq = g.edges.filter((e) => e.kind === "sequence");
   assert.deepEqual(seq.map((e) => [e.from, e.to]), [["a", "b"], ["b", "curl"]]);
-  assert.deepEqual(g.edges.find((e) => e.kind === "verify"), { from: "b", to: "verify", kind: "verify" });
+  assert.deepEqual(g.edges.find((e) => e.kind === "verify"), { from: "b", to: "verify:b", kind: "verify" });
   assert.deepEqual(g.edges.find((e) => e.kind === "retry"), { from: "curl", to: "curl", kind: "retry" });
 });
 
@@ -272,7 +272,7 @@ test("B1c editar verifyCmd armado persiste comando, default de reintentos y qued
 test("B1d editar verifyCmd a vacío borra el campo y devuelve el control a OFF", () => {
   const draft = createWorkflowDraft({
     stages: [{ key: "test", label: "Test", icon: "🧪", verifyCmd: "npm test", maxRetries: 2 }],
-    verifyAfter: null,
+    verifyAfter: [],
   });
 
   const next = editControlValue(draft, "test", { id: "verifyCmd", verifyCmd: "  " });
@@ -299,7 +299,7 @@ test("B1e executor frío arma, codex persiste y hereda borra executor con model"
 test("B1f instruction fría queda armando sin escribir texto", () => {
   const draft = createWorkflowDraft({
     stages: [{ key: "plan", label: "Plan", icon: "📋", instruction: "" }],
-    verifyAfter: null,
+    verifyAfter: [],
   });
 
   const next = toggleHarnessControl(draft, "plan", "instruction", true, true);
@@ -356,7 +356,7 @@ test("B1g el verificador enciende directo sin pasar por arming", () => {
 
   const next = toggleHarnessControl(draft, "implementing", "verifier", true, true);
 
-  assert.equal(next.verifyAfter, "implementing");
+  assert.deepEqual(next.verifyAfter, ["implementing"]);
   assert.equal(next.arming, null);
   assert.equal(stageControls(next.stages[0], next.verifyAfter, true).find((item) => item.id === "verifier")?.on, false);
   assert.equal(stageControls(next.stages[1], next.verifyAfter, true).find((item) => item.id === "verifier")?.on, true);
@@ -365,7 +365,7 @@ test("B1g el verificador enciende directo sin pasar por arming", () => {
 test("9 encender con stash restaura el valor y queda ON sin arming", () => {
   const draft = createWorkflowDraft({
     stages: [{ key: "plan", label: "Plan", icon: "📋", instruction: "" }],
-    verifyAfter: null,
+    verifyAfter: [],
   });
   const withStash = { ...draft, stash: { plan: { instruction: "Escribe el plan" } } };
 
@@ -396,7 +396,7 @@ test("11 el stash sobrevive switchView", () => {
 test("12 cancel, setJsonText y adoptServerConfig limpian stash y arming", () => {
   const armed = toggleHarnessControl(createWorkflowDraft(CFG), "planning", "instruction", true, true);
   const local = { ...armed, stash: { planning: { instruction: "Escribe el plan" } } };
-  const replacement = JSON.stringify({ stages: CFG.stages, verifyAfter: null });
+  const replacement = JSON.stringify({ stages: CFG.stages, verifyAfter: [] });
 
   for (const next of [
     cancel(local),
@@ -411,12 +411,12 @@ test("12 cancel, setJsonText y adoptServerConfig limpian stash y arming", () => 
 test("B3a apagar instruction, renombrar su etapa y encender restaura el texto", () => {
   const draft = createWorkflowDraft({
     stages: [{ key: "planning", label: "Plan", icon: "📋", instruction: "Escribe el plan" }],
-    verifyAfter: null,
+    verifyAfter: [],
   });
 
   const off = toggleHarnessControl(draft, "planning", "instruction", false, true);
   assert.equal(off.stages[0].instruction, "");
-  const renamed = setStages(off, [{ ...off.stages[0], key: "plan" }], null);
+  const renamed = setStages(off, [{ ...off.stages[0], key: "plan" }], []);
   assert.equal(renamed.stash.planning, undefined);
   assert.equal(renamed.stash.plan?.instruction, "Escribe el plan");
   const restored = toggleHarnessControl(renamed, "plan", "instruction", true, true);
@@ -434,7 +434,7 @@ test("B3b reordenar etapas no migra ni pierde entradas del stash", () => {
     },
   };
 
-  const next = setStages(withStash, [...withStash.stages].reverse(), null);
+  const next = setStages(withStash, [...withStash.stages].reverse(), []);
 
   assert.deepEqual(next.stash, withStash.stash);
 });
@@ -442,74 +442,73 @@ test("B3b reordenar etapas no migra ni pierde entradas del stash", () => {
 test("B3c borrar una etapa poda su stash y pendingDiscards no la menciona", () => {
   const draft = createWorkflowDraft({
     stages: [{ key: "plan", label: "Plan", icon: "📋", instruction: "Texto" }],
-    verifyAfter: null,
+    verifyAfter: [],
   });
   const off = toggleHarnessControl(draft, "plan", "instruction", false, true);
 
-  const next = setStages(off, [], null);
+  const next = setStages(off, [], []);
 
   assert.deepEqual(next.stash, {});
   assert.deepEqual(pendingDiscards(next.stages, next.stash), []);
 });
 
-test("M2a apagar Guías borra y stashea instruction/executor en todas las etapas", () => {
+test("M2a apagar Instrucción borra y stashea instruction en todas las etapas", () => {
   const draft = createWorkflowDraft({
     stages: [
       { key: "a", label: "A", icon: "A", instruction: "Haz A", executor: "codex", model: "gpt-5" },
       { key: "b", label: "B", icon: "B", instruction: "Haz B", executor: "agy" },
     ],
-    verifyAfter: null,
+    verifyAfter: [],
   });
 
-  const next = toggleHarnessSection(draft, "guides", false, true);
+  const next = toggleHarnessSection(draft, "instruction", false, true);
 
   assert.deepEqual(next.stages.map(({ instruction, executor, model }) => ({ instruction, executor, model })), [
-    { instruction: "", executor: undefined, model: undefined },
-    { instruction: "", executor: undefined, model: undefined },
+    { instruction: "", executor: "codex", model: "gpt-5" },
+    { instruction: "", executor: "agy", model: undefined },
   ]);
   assert.deepEqual(next.stash, {
-    a: { instruction: "Haz A", executor: "codex", model: "gpt-5" },
-    b: { instruction: "Haz B", executor: "agy" },
+    a: { instruction: "Haz A" },
+    b: { instruction: "Haz B" },
   });
 });
 
-test("M2b encender Guías sólo restaura etapas con stash y no inventa ON", () => {
+test("M2b encender Instrucción sólo restaura etapas con stash y no inventa ON", () => {
   const draft = createWorkflowDraft({
     stages: [
       { key: "a", label: "A", icon: "A", instruction: "" },
       { key: "b", label: "B", icon: "B", instruction: "" },
     ],
-    verifyAfter: null,
+    verifyAfter: [],
   });
   const withStash = {
     ...draft,
     stash: { a: { instruction: "Haz A", executor: "codex" as const } },
   };
 
-  const next = toggleHarnessSection(withStash, "guides", true, true);
+  const next = toggleHarnessSection(withStash, "instruction", true, true);
 
   assert.equal(next.stages[0].instruction, "Haz A");
-  assert.equal(next.stages[0].executor, "codex");
+  assert.equal(next.stages[0].executor, undefined);
   assert.equal(next.stages[1].instruction, "");
   assert.equal(next.stages[1].executor, undefined);
   assert.equal(next.arming, null);
 });
 
-test("M2c banda inerte no transiciona y banda inferencial restaura un único verifier", () => {
+test("M2c banda verifiers restaura todos los verifier", () => {
   const draft = createWorkflowDraft({
     stages: [
       { key: "a", label: "A", icon: "A" },
       { key: "b", label: "B", icon: "B" },
     ],
-    verifyAfter: "b",
+    verifyAfter: ["b"],
   });
 
-  assert.equal(toggleHarnessSection(draft, "deterministic-sensors", false, true), draft);
-  const off = toggleHarnessSection(draft, "inferential-sensors", false, true);
-  assert.equal(off.verifyAfter, null);
+  const off = toggleHarnessSection(draft, "verifiers", false, true);
+  assert.deepEqual(off.verifyAfter, []);
   assert.deepEqual(off.stash.b, { verifier: true });
-  const restored = toggleHarnessSection(off, "inferential-sensors", true, true);
-  assert.equal(restored.verifyAfter, "b");
+  const restored = toggleHarnessSection(off, "verifiers", true, true);
+  assert.deepEqual(restored.verifyAfter, ["b"]);
 });
 
 test("M2 Gates de avance apaga y restaura comandos stasheados en bloque", () => {
@@ -518,7 +517,7 @@ test("M2 Gates de avance apaga y restaura comandos stasheados en bloque", () => 
       { key: "a", label: "A", icon: "A", verifyCmd: "npm test", maxRetries: 0 },
       { key: "b", label: "B", icon: "B", verifyCmd: "npm run lint", maxRetries: 2 },
     ],
-    verifyAfter: null,
+    verifyAfter: [],
   });
 
   const off = toggleHarnessSection(draft, "gates", false, true);
@@ -539,19 +538,19 @@ test("STASH-1 una identidad ambigua congela stash y acciones masivas hasta resol
         { key: "planning", label: "Plan", icon: "P", instruction: "secreto" },
         { key: "tests", label: "Pruebas", icon: "T" },
       ],
-      verifyAfter: null,
+      verifyAfter: [],
     });
     const off = toggleHarnessControl(initial, "planning", "instruction", false, true);
     const ambiguous = setStages(off, [
       { ...off.stages[0], key: "tests" },
       off.stages[1],
-    ], null);
+    ], []);
 
     assert.equal(ambiguous.stash.planning?.instruction, "secreto");
     const resolved = setStages(ambiguous, [
       { ...ambiguous.stages[0], key: "plan-2" },
       ambiguous.stages[1],
-    ], null);
+    ], []);
     const restored = toggleHarnessControl(resolved, "plan-2", "instruction", true, true);
     assert.equal(restored.stages[0].instruction, "secreto");
   });
@@ -562,16 +561,15 @@ test("STASH-1 una identidad ambigua congela stash y acciones masivas hasta resol
         { key: "a", label: "A", icon: "A", instruction: "texto A" },
         { key: "b", label: "B", icon: "B", instruction: "texto B" },
       ],
-      verifyAfter: null,
+      verifyAfter: [],
     });
     const ambiguous = setStages(initial, [
       { ...initial.stages[0], key: "same" },
       { ...initial.stages[1], key: "same" },
-    ], null);
+    ], []);
 
-    assert.equal(toggleHarnessSection(ambiguous, "guides", false, true), ambiguous);
-    const actionableBands = bands(ambiguous.stages, null, true)
-      .filter((band) => band.id !== "deterministic-sensors");
+    assert.equal(toggleHarnessSection(ambiguous, "instruction", false, true), ambiguous);
+    const actionableBands = bands(ambiguous.stages, [], true);
     assert.equal(actionableBands.every((band) => band.disabled), true);
     assert.equal(actionableBands.every((band) => band.disabledReasonId === "duplicate-key"), true);
   });
@@ -580,12 +578,12 @@ test("STASH-1 una identidad ambigua congela stash y acciones masivas hasta resol
 test("WARN-1 restaurar el verificador no deja un aviso falso de texto descartado", () => {
   const draft = createWorkflowDraft({
     stages: [{ key: "tests", label: "Pruebas", icon: "T" }],
-    verifyAfter: "tests",
+    verifyAfter: ["tests"],
   });
-  const off = toggleHarnessSection(draft, "inferential-sensors", false, true);
-  const restored = toggleHarnessSection(off, "inferential-sensors", true, true);
+  const off = toggleHarnessSection(draft, "verifiers", false, true);
+  const restored = toggleHarnessSection(off, "verifiers", true, true);
 
-  assert.equal(restored.verifyAfter, "tests");
+  assert.deepEqual(restored.verifyAfter, ["tests"]);
   assert.deepEqual(pendingDiscards(restored.stages, restored.stash), []);
 });
 
@@ -595,7 +593,7 @@ test("STASH-1 JSON con keys duplicadas congela el stash mientras la identidad se
       { key: "planning", label: "Plan", icon: "P", instruction: "secreto" },
       { key: "tests", label: "Pruebas", icon: "T" },
     ],
-    verifyAfter: null,
+    verifyAfter: [],
   });
   const off = toggleHarnessControl(draft, "planning", "instruction", false, true);
   const duplicateJson = JSON.stringify({
@@ -603,11 +601,67 @@ test("STASH-1 JSON con keys duplicadas congela el stash mientras la identidad se
       { ...off.stages[0], key: "tests" },
       off.stages[1],
     ],
-    verifyAfter: null,
+    verifyAfter: [],
   });
 
   const ambiguous = setJsonText(off, duplicateJson);
 
   assert.equal(ambiguous.stash.planning?.instruction, "secreto");
   assert.deepEqual(ambiguous.identitySnapshot, off.stages);
+});
+
+test("B1 v2: verifier agrega y quita una key sin tocar las demás", () => {
+  const base = createWorkflowDraft({
+    stages: [
+      { key: "curl", label: "Curl", icon: "C" },
+      { key: "done", label: "Done", icon: "D" },
+    ],
+    verifyAfter: ["curl"],
+  } as any);
+
+  const both = toggleHarnessControl(base, "done", "verifier", true, true);
+  assert.deepEqual(both.verifyAfter, ["curl", "done"]);
+  const one = toggleHarnessControl(both, "curl", "verifier", false, true);
+  assert.deepEqual(one.verifyAfter, ["done"]);
+});
+
+test("B1 v2: sección verifiers vacía y restaura todas las etapas stasheadas", () => {
+  const base = createWorkflowDraft({
+    stages: [
+      { key: "curl", label: "Curl", icon: "C" },
+      { key: "done", label: "Done", icon: "D" },
+    ],
+    verifyAfter: ["curl", "done"],
+  } as any);
+
+  const off = toggleHarnessSection(base, "verifiers" as any, false, true);
+  assert.deepEqual(off.verifyAfter, []);
+  assert.deepEqual(off.stash, { curl: { verifier: true }, done: { verifier: true } });
+  assert.deepEqual(toggleHarnessSection(off, "verifiers" as any, true, true).verifyAfter, ["curl", "done"]);
+});
+
+test("B1 v2: JSON acepta arrays y normaliza string y null legados a array", () => {
+  const base = createWorkflowDraft({ stages: CFG.stages, verifyAfter: [] } as any);
+  const withArray = setJsonText(base, JSON.stringify({ stages: CFG.stages, verifyAfter: ["planning", "implementing"] }));
+  const withString = setJsonText(base, JSON.stringify({ stages: CFG.stages, verifyAfter: "planning" }));
+  const withNull = setJsonText(base, JSON.stringify({ stages: CFG.stages, verifyAfter: null }));
+
+  assert.equal(withArray.jsonError, null);
+  assert.deepEqual(withArray.verifyAfter, ["planning", "implementing"]);
+  assert.deepEqual(withString.verifyAfter, ["planning"]);
+  assert.deepEqual(withNull.verifyAfter, []);
+  assert.deepEqual(JSON.parse(withString.jsonText).verifyAfter, ["planning"]);
+});
+
+test("B1 v2: deriveGraph crea un nodo verify por cada etapa listada", () => {
+  const graph = deriveGraph([
+    { key: "curl", label: "Curl", icon: "C" },
+    { key: "done", label: "Done", icon: "D" },
+  ], ["curl", "done"] as any);
+
+  assert.deepEqual(graph.nodes.map(({ key }) => key), ["curl", "done", "verify:curl", "verify:done"]);
+  assert.deepEqual(graph.edges.filter(({ kind }) => kind === "verify"), [
+    { from: "curl", to: "verify:curl", kind: "verify" },
+    { from: "done", to: "verify:done", kind: "verify" },
+  ]);
 });

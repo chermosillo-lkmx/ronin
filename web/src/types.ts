@@ -49,7 +49,7 @@ export interface WfInput {
 
 export interface WorkflowConfig {
   stages: WfStage[];
-  verifyAfter: string | null;
+  verifyAfter: string[];
   inputs?: WfInput[];
 }
 

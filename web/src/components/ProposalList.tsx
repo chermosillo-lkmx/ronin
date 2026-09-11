@@ -18,7 +18,7 @@ export function ProposalList({ proposals, analysis, busy, onAccept, onDismiss }:
       <strong>{proposal.name}</strong>
       <p>{proposal.rationale}</p>
       <ol className="ronin-proposal-stages">{proposal.config.stages.map((stage) => <li key={stage.key}><code>{stage.key}</code> {stage.label}{stage.role === "impl" ? " · impl" : ""}{stage.instruction && <small>{stage.instruction}</small>}</li>)}</ol>
-      <p>{`verifyAfter: ${proposal.config.verifyAfter ?? "—"}`}</p>
+      <p>{`verifyAfter: ${proposal.config.verifyAfter.join(", ") || "—"}`}</p>
       <div className="ronin-proposal-evidence">{proposal.evidence.map((item, index) => <code key={`${proposal.id}-${index}`}>{item}</code>)}</div>
       <div className="ronin-proposal-actions">
         <button className="n-btn n-btn-primary" disabled={busy} onClick={() => onAccept(proposal.id)}>Aceptar</button>

@@ -12,7 +12,7 @@ const STAGES: WfStage[] = [
 
 test("StageEditor pinta una fila por etapa, cada una con su key", () => {
   const html = renderToString(
-    createElement(StageEditor, { stages: STAGES, verifyAfter: null, onStages: () => {}, onVerifyAfter: () => {} }),
+    createElement(StageEditor, { stages: STAGES, verifyAfter: [], onStages: () => {}, onVerifyAfter: () => {} }),
   );
   assert.equal(html.split('class="wf-row"').length - 1, STAGES.length);
   assert.match(html, /value="impl"/);
@@ -21,7 +21,7 @@ test("StageEditor pinta una fila por etapa, cada una con su key", () => {
 
 test("StageEditor: allowVerifyCmd=false deja el campo verifyCmd deshabilitado y con su placeholder de sólo-lectura", () => {
   const html = renderToString(
-    createElement(StageEditor, { stages: STAGES, verifyAfter: null, onStages: () => {}, onVerifyAfter: () => {}, allowVerifyCmd: false }),
+    createElement(StageEditor, { stages: STAGES, verifyAfter: [], onStages: () => {}, onVerifyAfter: () => {}, allowVerifyCmd: false }),
   );
   assert.match(html, /placeholder="verifyCmd — sólo por-repo \(ejecuta shell\)"/);
   assert.doesNotMatch(html, /placeholder="verifyCmd \(exit 0 = pass;/);
@@ -30,7 +30,7 @@ test("StageEditor: allowVerifyCmd=false deja el campo verifyCmd deshabilitado y 
 
 test("StageEditor: allowVerifyCmd=true habilita el campo verifyCmd", () => {
   const html = renderToString(
-    createElement(StageEditor, { stages: STAGES, verifyAfter: null, onStages: () => {}, onVerifyAfter: () => {}, allowVerifyCmd: true }),
+    createElement(StageEditor, { stages: STAGES, verifyAfter: [], onStages: () => {}, onVerifyAfter: () => {}, allowVerifyCmd: true }),
   );
   assert.match(html, /placeholder="verifyCmd \(exit 0 = pass; ⚠️ ejecuta shell\)"/);
   assert.doesNotMatch(html, /placeholder="verifyCmd \(exit 0 = pass; ⚠️ ejecuta shell\)"[^>]*disabled=""/);
@@ -43,7 +43,7 @@ test("StageEditor muestra ejecutor y modelo, o la herencia del flujo", () => {
         { key: "impl", label: "Implementar", icon: "⌨️", executor: "claude", model: "sonnet" },
         { key: "curl", label: "Curl", icon: "🌐" },
       ],
-      verifyAfter: null,
+      verifyAfter: [],
       onStages: () => {},
       onVerifyAfter: () => {},
     }),
@@ -53,4 +53,17 @@ test("StageEditor muestra ejecutor y modelo, o la herencia del flujo", () => {
   assert.match(html, /sonnet/);
   assert.match(html, /hereda/);
   assert.match(html, /— del flujo/);
+});
+
+test("B3 v2: StageEditor usa un checkbox por etapa y conserva selección plural", () => {
+  const html = renderToString(createElement(StageEditor, {
+    stages: STAGES,
+    verifyAfter: ["impl", "review"],
+    onStages: () => {},
+    onVerifyAfter: () => {},
+  }));
+  const checks = [...html.matchAll(/<input[^>]*data-verify-after[^>]*>/g)].map(([tag]) => tag);
+  assert.equal(checks.length, 2);
+  assert.equal(checks.every((tag) => tag.includes('type="checkbox"') && tag.includes('checked=""')), true);
+  assert.doesNotMatch(html, /<select[^>]*data-verify-after/);
 });

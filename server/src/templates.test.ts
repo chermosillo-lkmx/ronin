@@ -22,7 +22,7 @@ const TASK: Task = {
 const build = (tool: "codex" | "agent" = "codex", task: Task = TASK) =>
   buildDriverPrompt(task, CYCLE, PANES, tool);
 
-const stepFlow = (stage: WfStage) => ({ stages: [stage], verifyAfter: null });
+const stepFlow = (stage: WfStage) => ({ stages: [stage], verifyAfter: [] });
 
 test("assembleSteps: una etapa sin executor conserva exactamente la línea existente", () => {
   assert.equal(
@@ -72,7 +72,7 @@ test("assembleSteps: fill sólo procesa la instrucción del usuario", () => {
 test("buildWorkflowRequestPrompt: sustituye una entrada declarada en plantilla e instrucción", () => {
   const workflow = {
     stages: [{ key: "review", label: "Review", icon: "🔎", instruction: "Revisa el ticket {ticket}." }],
-    verifyAfter: null as null,
+    verifyAfter: [] as string[],
     inputs: [{ key: "ticket", label: "Ticket" }],
   };
   const prompt = buildWorkflowRequestPrompt({
@@ -93,7 +93,7 @@ test("buildWorkflowRequestPrompt: sustituye una entrada declarada en plantilla e
 test("buildWorkflowRequestPrompt: una entrada declarada sin valor queda vacía", () => {
   const workflow = {
     stages: [{ key: "review", label: "Review", icon: "🔎", instruction: "Revisa {ticket}." }],
-    verifyAfter: null as null,
+    verifyAfter: [] as string[],
     inputs: [{ key: "ticket", label: "Ticket" }],
   };
   const prompt = buildWorkflowRequestPrompt({
@@ -114,7 +114,7 @@ test("buildWorkflowRequestPrompt: una entrada declarada sin valor queda vacía",
 test("buildWorkflowRequestPrompt: el valor de una entrada no se re-sustituye", () => {
   const workflow = {
     stages: [{ key: "review", label: "Review", icon: "🔎", instruction: "Revisa {ticket}." }],
-    verifyAfter: null as null,
+    verifyAfter: [] as string[],
     inputs: [{ key: "ticket", label: "Ticket" }],
   };
   const prompt = buildWorkflowRequestPrompt({
@@ -130,6 +130,25 @@ test("buildWorkflowRequestPrompt: el valor de una entrada no se re-sustituye", (
     workflow, cycle: "/tmp/cycle", repo: "mi-repo", kind: "petición", reqline: "", title: "", key: "cowork-ticket", inputs: { ticket: "CU-42 {repo}" },
   })), "Ticket: CU-42 {repo}");
   assert.match(prompt, /Revisa CU-42 \{repo\}\./);
+});
+
+test("A2: el prompt enumera cada etapa con verificador", () => {
+  const prompt = buildWorkflowRequestPrompt({
+    workflow: {
+      stages: [
+        { key: "curl", label: "Curl", icon: "🌐" },
+        { key: "done", label: "Done", icon: "✓" },
+      ],
+      verifyAfter: ["curl", "done"],
+    },
+    cycle: "/tmp/cycle",
+    repo: "mi-repo",
+    request: "Verifica el cambio",
+    title: "",
+    key: "cowork-verify",
+  });
+  assert.match(prompt, /Al terminar cada una de las etapas/);
+  assert.match(prompt, /"curl" y "done"/);
 });
 
 test("buildDriverPrompt: incluye los 4 pane ids (targets fijos, no índices)", () => {

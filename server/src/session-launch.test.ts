@@ -13,7 +13,7 @@ function launchDeps(overrides: Partial<ManagedSessionLaunchDeps> = {}): ManagedS
         { key: "plan", label: "Plan", icon: "P", instruction: "planifica en {cycle}" },
         { key: "implement", label: "Implementa", icon: "I", instruction: "implementa {ticket} en {repo}" },
       ],
-      verifyAfter: "implement",
+      verifyAfter: ["implement"],
       inputs: [{ key: "ticket", label: "Ticket" }],
     },
   };
@@ -111,6 +111,15 @@ test("workflow crea el worktree desde la rama base resuelta", async () => {
   assert.equal(launched.baseRef, "develop");
 });
 
+test("A2: flow.json recibe verifyAfter como array", async () => {
+  let frozen: unknown;
+  const deps = launchDeps({ writeFlow: (_cycle, flow) => { frozen = flow; } });
+
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-flow-array" }, deps);
+
+  assert.deepEqual((frozen as { verifyAfter: unknown }).verifyAfter, ["implement"]);
+});
+
 test("workflow sin rama base resoluble lanza BASE_BRANCH_UNRESOLVED antes de crear recursos", async () => {
   let addWorktreeCalls = 0;
   const deps = launchDeps({
@@ -171,7 +180,7 @@ test("sin petición y sin entradas declaradas, o en terminal, no entrega un prom
     deliverPrompt: async () => { calls++; },
     findWorkflowCatalogItem: () => ({
       id: "wf-test", name: "sin-inputs", updatedAt: 1,
-      config: { stages: [{ key: "plan", label: "Plan", icon: "P" }], verifyAfter: null },
+      config: { stages: [{ key: "plan", label: "Plan", icon: "P" }], verifyAfter: [] },
     }),
   });
   await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-peticion" }, deps);

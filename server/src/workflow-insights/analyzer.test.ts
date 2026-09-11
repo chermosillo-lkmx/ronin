@@ -53,7 +53,7 @@ test("a valid response yields proposed proposals and a done analysis with counts
             name: "Hotfix Rápido",
             rationale: "r",
             evidence: ["CU-1"],
-            config: { stages: VALID_STAGES, verifyAfter: null },
+            config: { stages: VALID_STAGES, verifyAfter: [] },
           },
         ],
       })}</PROPOSALS>`;
@@ -77,10 +77,10 @@ test("invalid proposals are discarded with a reason, the rest survive", async ()
           name: "verificado",
           rationale: "r",
           evidence: [],
-          config: { stages: [{ key: "planning", label: "Plan", icon: "📋", verifyCmd: "rm -rf /" }, ...VALID_STAGES.slice(1)], verifyAfter: null },
+          config: { stages: [{ key: "planning", label: "Plan", icon: "📋", verifyCmd: "rm -rf /" }, ...VALID_STAGES.slice(1)], verifyAfter: [] },
         },
-        { name: "default", rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: null } },
-        { name: "revisión-doble", rationale: "r", evidence: ["CU-2"], config: { stages: VALID_STAGES, verifyAfter: "planning" } },
+        { name: "default", rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: [] } },
+        { name: "revisión-doble", rationale: "r", evidence: ["CU-2"], config: { stages: VALID_STAGES, verifyAfter: ["planning"] } },
       ]);
     const analyzer = createAnalyzer({ store, signals: async () => SIGNALS, catalogNames: () => ["default"], runClaude });
     const id = analyzer.start(range);
@@ -129,16 +129,16 @@ test("empty names, non-objects and in-batch duplicates are discarded; rationale 
     const runClaude = async () =>
       wrap([
         "no soy un objeto",
-        { name: "   ", rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: null } },
+        { name: "   ", rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: [] } },
         // un `name` que no es string NO se coerciona: "[object Object]" daría el slug plausible "object-object"
-        { name: {}, rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: null } },
+        { name: {}, rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: [] } },
         {
           name: "triage",
           rationale: "x".repeat(500),
           evidence: [...Array.from({ length: 25 }, (_, i) => `CU-${i}`), 42, null],
-          config: { stages: VALID_STAGES, verifyAfter: null },
+          config: { stages: VALID_STAGES, verifyAfter: [] },
         },
-        { name: "Triage", rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: null } },
+        { name: "Triage", rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: [] } },
       ]);
     const analyzer = createAnalyzer({ store, signals: async () => SIGNALS, catalogNames: () => [], runClaude });
     const id = analyzer.start(range);
@@ -225,7 +225,7 @@ test("a store that cannot write the terminal analysis still releases waiters and
         store,
         signals: async () => SIGNALS,
         catalogNames: () => [],
-        runClaude: async () => wrap([{ name: "triage", rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: null } }]),
+        runClaude: async () => wrap([{ name: "triage", rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: [] } }]),
       });
       const id = analyzer.start(range);
       await settlesWithin(analyzer.waitFor(id));
@@ -252,7 +252,7 @@ test("a write failing mid-batch still links the proposals that made it to disk",
       catalogNames: () => [],
       runClaude: async () =>
         wrap(
-          ["uno", "dos", "tres"].map((name) => ({ name, rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: null } }))
+          ["uno", "dos", "tres"].map((name) => ({ name, rationale: "r", evidence: [], config: { stages: VALID_STAGES, verifyAfter: [] } }))
         ),
     });
     const id = analyzer.start(range);

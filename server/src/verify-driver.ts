@@ -80,7 +80,7 @@ export interface GateReport {
 export interface DriverDeps {
   listSessions(): Promise<SessionSnapshot[]>;
   launchOf(session: string): LaunchInfo | null;
-  flowFor(repo: string): GateStage[];
+  flowFor(session: string, repo: string): GateStage[];
   cycleFor(session: string): string;
   detect(cycle: string, order: string[]): string | null;
   /** Estado del entorno del worktree; null = este repo no provisiona nada. */
@@ -113,7 +113,7 @@ export async function tickOnce(deps: DriverDeps, armed: Map<string, boolean>): P
       const launch = deps.launchOf(sesion.name);
       if (!launch || launch.mode !== "workflow" || !launch.worktree) continue;
 
-      const stages = deps.flowFor(launch.repo);
+      const stages = deps.flowFor(sesion.name, launch.repo);
       const cycle = deps.cycleFor(sesion.name);
 
       // Sin entorno no hay nada que probar. `running`: la instalación sigue en marcha. `failed`:

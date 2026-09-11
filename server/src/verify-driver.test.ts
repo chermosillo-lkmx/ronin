@@ -92,6 +92,26 @@ test("tickOnce: corre el gate en el WORKTREE de la sesión, no en la raíz del r
   }
 });
 
+test("A4: tickOnce pide el flow congelado usando sesión y repo", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-flow-"));
+  try {
+    const llamadas: Array<[string, string]> = [];
+    const d = deps({
+      cycle: dir,
+      flowFor: ((session: string, repo: string) => {
+        llamadas.push([session, repo]);
+        return session === "cowork-x" ? STAGES : [];
+      }) as DriverDeps["flowFor"],
+    });
+    const informes = await tickOnce(d, new Map());
+
+    assert.deepEqual(llamadas, [["cowork-x", "api"]]);
+    assert.deepEqual(informes.map((informe) => informe.stageKey), ["tests"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tickOnce: nunca corre mientras el worker está ocupado", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
   try {

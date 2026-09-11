@@ -475,11 +475,9 @@ h2.mt { margin-top: 26px; }
 }
 .add-stage:hover { border-color: color-mix(in srgb, var(--accent) 50%, transparent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .wf-verify { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: var(--ink); margin-bottom: 16px; }
-.wf-verify select, .wf-icon { cursor: pointer; }
-.wf-verify select {
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
-  color: var(--ink); font-family: inherit; font-size: 0.8rem; padding: 7px 10px;
-}
+.wf-icon { cursor: pointer; }
+.wf-verify-options { display: flex; flex-wrap: wrap; gap: 7px 12px; }
+.wf-verify-options label { display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); cursor: pointer; }
 .wf-err { color: var(--danger); }
 
 /* --- Vista de configuración --- */

@@ -43,7 +43,7 @@ test("cycleDirForSession: un nombre seguro produce la ruta de siempre", () => {
 
 test("writeFlow/readFlow: round-trip del flow congelado (T2/T4/T13)", () => {
   const cycle = freshCycle();
-  const flow = { stages: [{ key: "a", label: "A", icon: "x" }], verifyAfter: null };
+  const flow = { stages: [{ key: "a", label: "A", icon: "x" }], verifyAfter: [] };
   writeFlow(cycle, flow);
   assert.deepEqual(readFlow(cycle), flow);
 });

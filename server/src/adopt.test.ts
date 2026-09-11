@@ -34,7 +34,7 @@ function baseDeps(overrides: Partial<AdoptDeps> = {}): AdoptDeps {
     resolveCwd: () => ({ cwd: "/tmp", real: true }),
     allowedRoots: ["/tmp"],
     realpath: (p) => p,
-    resolveFlow: () => ({ stages: [{ key: "a", label: "A", icon: "x" }], verifyAfter: null }),
+    resolveFlow: () => ({ stages: [{ key: "a", label: "A", icon: "x" }], verifyAfter: [] }),
     ...overrides,
   };
 }
@@ -134,19 +134,19 @@ test("'..' en el valor mapeado que escapa su raíz → REPO_NOT_ALLOWED", () => 
   assert.equal(codeOf(() => validateAdopt(baseInput(), deps)), "REPO_NOT_ALLOWED");
 });
 
-test("el flow adoptado tiene verifyAfter === null aunque el repo traiga otro valor", () => {
+test("el flow adoptado tiene verifyAfter vacío aunque el repo traiga otro valor", () => {
   const deps = baseDeps({
-    resolveFlow: () => ({ stages: [{ key: "a", label: "A", icon: "x" }, { key: "b", label: "B", icon: "y" }], verifyAfter: "a" }),
+    resolveFlow: () => ({ stages: [{ key: "a", label: "A", icon: "x" }, { key: "b", label: "B", icon: "y" }], verifyAfter: ["a"] }),
   });
   const result = validateAdopt(baseInput(), deps);
-  assert.equal(result.workflow.verifyAfter, null);
+  assert.deepEqual(result.workflow.verifyAfter, []);
 });
 
 test("ninguna etapa del flow adoptado conserva verifyCmd/maxRetries", () => {
   const deps = baseDeps({
     resolveFlow: () => ({
       stages: [{ key: "a", label: "A", icon: "x", verifyCmd: "npm test", maxRetries: 3 }],
-      verifyAfter: null,
+      verifyAfter: [],
     }),
   });
   const result = validateAdopt(baseInput(), deps);

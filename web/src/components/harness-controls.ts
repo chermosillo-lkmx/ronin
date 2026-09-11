@@ -12,7 +12,7 @@ import type { WfStage } from "../types";
 export type ControlId = "instruction" | "executor" | "verifyCmd" | "verifier";
 export type Axis = "guide" | "sensor";
 export type Kind = "deterministic" | "inferential";
-export type BandId = "guides" | "deterministic-sensors" | "inferential-sensors" | "gates";
+export type BandId = "instruction" | "executor" | "gates" | "verifiers";
 
 export interface Band {
   id: BandId;
@@ -108,10 +108,10 @@ const INSTRUCTION_PATTERNS: ReadonlyArray<{ pattern: RegExp; id: string; axis: A
 ];
 
 const BAND_LABELS: Record<BandId, string> = {
-  guides: "Guías",
-  "deterministic-sensors": "Sensores deterministas",
-  "inferential-sensors": "Sensores inferenciales",
-  gates: "Gates de avance",
+  gates: "Gate por comando",
+  verifiers: "Revisión por modelo",
+  instruction: "Instrucción",
+  executor: "Ejecutor fijo",
 };
 
 function fieldControl(
@@ -147,7 +147,7 @@ export function stageIdentityProblem(stages: WfStage[]): StageIdentityReason | n
 
 export function stageControls(
   stage: WfStage,
-  verifyAfter: string | null,
+  verifyAfter: string[],
   allowVerifyCmd: boolean,
 ): HarnessControl[] {
   return [
@@ -184,7 +184,7 @@ export function stageControls(
       id: "verifier",
       axis: "sensor",
       kind: "inferential",
-      on: verifyAfter === stage.key,
+      on: verifyAfter.includes(stage.key),
       note: "un modelo juzga después del hecho",
       loss: "ningún verificador independiente revisa la etapa",
     }),
@@ -253,53 +253,52 @@ export function coverage(stages: WfStage[]): { covered: number; total: number; n
 
 export function bands(
   stages: WfStage[],
-  verifyAfter: string | null,
+  verifyAfter: string[],
   allowVerifyCmd: boolean,
 ): Band[] {
   const identityProblem = stageIdentityProblem(stages);
   const totalStages = stages.length;
-  const guidesActive = stages.reduce(
-    (sum, stage) => sum + Number(hasText(stage.instruction)) + Number(stage.executor !== undefined),
-    0,
-  );
-  const inferentialActive = stages.some((stage) => stage.key === verifyAfter) ? 1 : 0;
+  const instructionActive = stages.filter((stage) => hasText(stage.instruction)).length;
+  const executorActive = stages.filter((stage) => stage.executor !== undefined).length;
+  const verifierActive = stages.filter((stage) => verifyAfter.includes(stage.key)).length;
   const gatesActive = allowVerifyCmd
     ? stages.filter((stage) => hasText(stage.verifyCmd)).length
     : 0;
   return [
     makeBand(
-      "guides",
-      "el texto que dice qué hacer, antes de actuar",
-      guidesActive,
-      totalStages * 2,
-      identityProblem !== null,
-      identityProblem?.label,
-      identityProblem?.id,
-    ),
-    makeBand(
-      "deterministic-sensors",
-      "artefactos que Ronin lee, no resúmenes",
-      0,
-      0,
-      true,
-      "nada aquí es configuración: son artefactos que la instrucción pide y que nadie lo comprueba",
-    ),
-    makeBand(
-      "inferential-sensors",
-      "un modelo juzgando después del hecho",
-      inferentialActive,
-      totalStages,
-      identityProblem !== null,
-      identityProblem?.label,
-      identityProblem?.id,
-    ),
-    makeBand(
       "gates",
-      "verifyCmd y maxRetries: exit code manda",
+      "exit code manda antes de avanzar",
       gatesActive,
       totalStages,
       identityProblem !== null || !allowVerifyCmd,
       identityProblem?.label ?? (!allowVerifyCmd ? "sólo en el override por-repo, que está en el gitignore" : undefined),
+      identityProblem?.id,
+    ),
+    makeBand(
+      "verifiers",
+      "un modelo juzga después del hecho",
+      verifierActive,
+      totalStages,
+      identityProblem !== null,
+      identityProblem?.label,
+      identityProblem?.id,
+    ),
+    makeBand(
+      "instruction",
+      "qué debe hacer cada etapa",
+      instructionActive,
+      totalStages,
+      identityProblem !== null,
+      identityProblem?.label,
+      identityProblem?.id,
+    ),
+    makeBand(
+      "executor",
+      "qué herramienta ejecuta cada etapa",
+      executorActive,
+      totalStages,
+      identityProblem !== null,
+      identityProblem?.label,
       identityProblem?.id,
     ),
   ];
