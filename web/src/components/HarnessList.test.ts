@@ -41,6 +41,14 @@ test("B2: pinta una fila por etapa, ejecutores y los dos estados especiales de m
   assert.match(html, /hereda del flujo/);
 });
 
+test("B3 selector: cada fila emite los cuatro botones de control vinculantes", () => {
+  const html = render();
+  const buttons = [...html.matchAll(/<button\b[^>]*>/g)].map(([tag]) => tag);
+  for (const stage of STAGES) for (const control of ["instruction", "executor", "verifyCmd", "verifier"]) {
+    assert.ok(buttons.some((tag) => tag.includes(`data-control="${control}"`) && tag.includes(`data-stage-key="${stage.key}"`) && tag.includes("aria-pressed=")), `falta ${stage.key}.${control}`);
+  }
+});
+
 test("B2: pinta ambos verifiers, el gate con comando y reintentos", () => {
   const html = render();
   for (const key of ["curl", "done"]) {

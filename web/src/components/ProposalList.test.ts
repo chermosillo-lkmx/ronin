@@ -78,3 +78,9 @@ test("ProposalList renders the stage chain with instructions, in order", () => {
   assert.ok(implIndex < instructionIndex);
   assert.match(html, /verifyAfter: impl/);
 });
+
+test("B3 v2: ProposalList presenta verifyAfter plural con separación legible", () => {
+  const proposal = { ...P, config: { ...P.config, verifyAfter: ["curl", "done"] } };
+  const html = renderToString(createElement(ProposalList, { proposals: [proposal], analysis: null, busy: false, onAccept: () => {}, onDismiss: () => {} }));
+  assert.match(html, /verifyAfter: curl, done/);
+});

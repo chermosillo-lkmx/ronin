@@ -107,13 +107,25 @@ export function StageEditor({
       </div>
 
       <div className="wf-verify">
-        <span>🔎 Verificador independiente tras la etapa:</span>
-        <select value={verifyAfter[0] ?? ""} onChange={(e) => onVerifyAfter(e.target.value ? [e.target.value] : [])}>
-          <option value="">(ninguno)</option>
-          {stages.filter((s) => s.key).map((s) => (
-            <option key={s.key} value={s.key}>{s.icon} {s.label}</option>
+        <span>🔎 Verificador independiente tras:</span>
+        <div className="wf-verify-options">
+          {stages.filter((stage) => stage.key).map((stage) => (
+            <label key={stage.key}>
+              <input
+                type="checkbox"
+                data-verify-after={stage.key}
+                checked={verifyAfter.includes(stage.key)}
+                onChange={(event) => {
+                  const selected = new Set(verifyAfter);
+                  if (event.target.checked) selected.add(stage.key);
+                  else selected.delete(stage.key);
+                  onVerifyAfter(stages.filter((candidate) => selected.has(candidate.key)).map((candidate) => candidate.key));
+                }}
+              />
+              {stage.icon} {stage.label}
+            </label>
           ))}
-        </select>
+        </div>
       </div>
     </>
   );

@@ -56,12 +56,12 @@ test("19 WorkflowEditorScreen ofrece Harness como cuarta vista del mismo draft",
   assert.equal(source.match(/\{ key: "(?:stepper|graph|json|harness)", label:/g)?.length, 4);
 });
 
-test("WorkflowEditorScreen monta el contrato completo de Harness y lee verifyGate", () => {
+test("WorkflowEditorScreen monta el contrato completo de la lista Harness y lee verifyGate", () => {
   const source = readFileSync(new URL("./WorkflowEditorScreen.tsx", import.meta.url), "utf8");
 
   assert.match(source, /getHealth\(\)\.then/);
-  assert.match(source, /<HarnessView/);
-  for (const prop of ["stages", "verifyAfter", "allowVerifyCmd", "arming", "verifyGate", "onToggle", "onEdit", "onBandToggle"]) {
+  assert.match(source, /<HarnessList/);
+  for (const prop of ["stages", "verifyAfter", "allowVerifyCmd", "arming", "verifyGate", "openStage", "onOpenStage", "onToggle", "onEdit", "onBandToggle"]) {
     assert.match(source, new RegExp(`${prop}=`), `falta prop ${prop}`);
   }
   assert.match(source, /setDraft\(\(prev\) => prev \? toggleHarnessControl/);
@@ -81,4 +81,13 @@ test("WorkflowEditorScreen muestra antes de Guardar los textos que el stash perd
 
   assert.match(source, /pendingDiscards\(draft\.stages, draft\.stash\)/);
   assert.match(source, /controles apagados descartan su texto al guardar/);
+});
+
+test("B3 v2: WorkflowEditorScreen monta HarnessList con apertura controlada", () => {
+  const source = readFileSync(new URL("./WorkflowEditorScreen.tsx", import.meta.url), "utf8");
+  assert.match(source, /import \{ HarnessList \}/);
+  assert.match(source, /<HarnessList/);
+  for (const prop of ["openStage", "onOpenStage", "onToggle", "onEdit", "onBandToggle"]) {
+    assert.match(source, new RegExp(`${prop}=`), `falta prop ${prop}`);
+  }
 });

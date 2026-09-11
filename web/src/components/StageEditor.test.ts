@@ -54,3 +54,16 @@ test("StageEditor muestra ejecutor y modelo, o la herencia del flujo", () => {
   assert.match(html, /hereda/);
   assert.match(html, /— del flujo/);
 });
+
+test("B3 v2: StageEditor usa un checkbox por etapa y conserva selección plural", () => {
+  const html = renderToString(createElement(StageEditor, {
+    stages: STAGES,
+    verifyAfter: ["impl", "review"],
+    onStages: () => {},
+    onVerifyAfter: () => {},
+  }));
+  const checks = [...html.matchAll(/<input[^>]*data-verify-after[^>]*>/g)].map(([tag]) => tag);
+  assert.equal(checks.length, 2);
+  assert.equal(checks.every((tag) => tag.includes('type="checkbox"') && tag.includes('checked=""')), true);
+  assert.doesNotMatch(html, /<select[^>]*data-verify-after/);
+});

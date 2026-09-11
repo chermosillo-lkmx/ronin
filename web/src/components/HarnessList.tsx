@@ -1,4 +1,3 @@
-import React from "react";
 import type { WfStage } from "../types";
 import { ExecutorPicker } from "./ExecutorPicker";
 import {
@@ -60,21 +59,27 @@ function SwitchButton({
       className={`wf-harness-v2-switch ${on ? "on" : "off"}`}
       disabled={disabled}
       title={title}
+      aria-label={`${on ? "Apagar" : "Encender"} ${id}`}
       onClick={(event) => { event.stopPropagation(); onToggle(stageKey, id, !on); }}
     >
       <span aria-hidden="true" />
-      <span className="sr-only">{on ? "Apagar" : "Encender"} {id}</span>
     </button>
   );
 }
 
-function InstructionSummary({ stage }: { stage: WfStage }) {
+function InstructionSummary({ stage, on }: { stage: WfStage; on: boolean }) {
   const described = instructionControls(stage.instruction ?? "").map(({ id }) => id);
   return (
-    <div className="wf-harness-v2-instruction">
+    <button
+      type="button"
+      data-control="instruction"
+      data-stage-key={stage.key}
+      aria-pressed={on}
+      className="wf-harness-v2-instruction"
+    >
       <span>{stage.instruction?.trim() || "sin instrucción"}</span>
       <small>{described.length ? `pide ${described.join(" · ")}` : "sin evidencia descrita"}</small>
-    </div>
+    </button>
   );
 }
 
@@ -196,6 +201,8 @@ export function HarnessList(props: HarnessListProps) {
         </div>
         {props.stages.map((stage) => {
           const stageState = stageControls(stage, props.verifyAfter, props.allowVerifyCmd);
+          const instruction = stageState.find(({ id }) => id === "instruction")!;
+          const executor = stageState.find(({ id }) => id === "executor")!;
           const gate = stageState.find(({ id }) => id === "verifyCmd")!;
           const verifier = stageState.find(({ id }) => id === "verifier")!;
           const open = props.openStage === stage.key || props.arming?.stageKey === stage.key;
@@ -209,11 +216,11 @@ export function HarnessList(props: HarnessListProps) {
             >
               <div className="wf-harness-v2-summary">
                 <div className="wf-harness-v2-stage"><span>{stage.icon}</span><span><b>{stage.label}</b><code>{stage.key}{stage.role === "impl" ? " · impl" : ""}</code></span></div>
-                <div data-executor={stage.executor ?? "inherit"} className={`wf-harness-v2-executor${stage.executor === "claude" && !stage.model ? " warning" : ""}`}>
+                <button type="button" data-control="executor" data-stage-key={stage.key} aria-pressed={executor.on} data-executor={stage.executor ?? "inherit"} className={`wf-harness-v2-executor${stage.executor === "claude" && !stage.model ? " warning" : ""}`}>
                   <span>{stage.executor === "codex" ? "X" : stage.executor === "agy" ? "A" : stage.executor === "claude" ? "C" : "·"}</span>
                   <span>{executorLabel(stage)}</span>
-                </div>
-                <InstructionSummary stage={stage} />
+                </button>
+                <InstructionSummary stage={stage} on={instruction.on} />
                 <div className="wf-harness-v2-gate">
                   <SwitchButton stageKey={stage.key} id="verifyCmd" on={gate.on} disabled={gate.disabled} title={gate.disabledReason} onToggle={props.onToggle} />
                   <span>{stage.verifyCmd?.trim() ? <><code>{stage.verifyCmd}</code><small>{retriesLabel(stage.maxRetries)}</small></> : <small>{gate.disabledReason ?? "sin gate · avanza por autoreporte"}</small>}</span>

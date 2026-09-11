@@ -27,7 +27,7 @@ import {
 } from "../components/workflow-draft";
 import type { ArmWarning } from "../components/harness-arm";
 import { pendingDiscards, type BandId, type ControlId, type ControlValue } from "../components/harness-controls";
-import { HarnessView } from "../components/HarnessView";
+import { HarnessList } from "../components/HarnessList";
 import { confirmWorkflowSave, globalWorkflowPayload, repoPayload, workflowPayload } from "../components/workflow-save";
 import { StageEditor } from "../components/StageEditor";
 import { WorkflowGraph } from "../components/WorkflowGraph";
@@ -73,6 +73,7 @@ export function WorkflowEditorScreen() {
   const [saving, setSaving] = useState(false);
   const [saveNote, setSaveNote] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [verifyGate, setVerifyGate] = useState<boolean | null>(null);
+  const [openStage, setOpenStage] = useState<string | null>(null);
 
   useEffect(() => {
     getRepos().then(setRepos);
@@ -222,12 +223,14 @@ export function WorkflowEditorScreen() {
       {!inheritWorkflow && draft.view === "harness" && (
         <fieldset className="wf-harness-fieldset" disabled={draft.jsonError !== null}>
           {draft.jsonError && <p className="ron-msg err">Corrige el JSON antes de cambiar controles del harness.</p>}
-          <HarnessView
+          <HarnessList
             stages={draft.stages}
             verifyAfter={draft.verifyAfter}
             allowVerifyCmd={allowVerifyCmd}
             arming={draft.arming}
             verifyGate={verifyGate}
+            openStage={openStage}
+            onOpenStage={setOpenStage}
             onToggle={onHarnessToggle}
             onEdit={onHarnessEdit}
             onBandToggle={onHarnessBandToggle}

@@ -50,10 +50,15 @@ test("WorkflowGraph muestra el ejecutor y el modelo, y hace visible la herencia"
   assert.match(html, /hereda del flujo/);
 });
 
-test("WorkflowGraph y HarnessView comparten las constantes de geometría", () => {
+test("WorkflowGraph usa las constantes de geometría compartidas", () => {
   const graphSource = readFileSync(new URL("./WorkflowGraph.tsx", import.meta.url), "utf8");
-  const harnessSource = readFileSync(new URL("./HarnessView.tsx", import.meta.url), "utf8");
 
   assert.match(graphSource, /from "\.\/workflow-layout"/);
-  assert.match(harnessSource, /from "\.\/workflow-layout\.js"/);
+});
+
+test("B3 v2: WorkflowGraph pinta dos nodos verify independientes", () => {
+  const html = renderToString(createElement(WorkflowGraph, { stages: STAGES, verifyAfter: ["impl", "tests"] }));
+  assert.match(html, /data-stage-key="verify:impl"/);
+  assert.match(html, /data-stage-key="verify:tests"/);
+  assert.equal(html.split("wf-graph-node-verify").length - 1, 2);
 });
