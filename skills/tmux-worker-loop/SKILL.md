@@ -73,6 +73,8 @@ Communication channels:
 - `tmux capture-pane` — read pane output
 - Artifacts dir (`/tmp/tmux-worker-cycle-<id>/`) — `plan.md`, review reports, `sentinels.log`, watcher
 
+Label worker-created containers with `--label cowork.session=<session>` (or name them `<session>-…`) so Ronin removes them when the session is closed.
+
 One Monitor running `watch-multi.sh` covers all three panes: it reads the shared `sentinels.log`
 with a single cursor (no duplicate events) and tracks busy→idle **per pane**, emitting `IDLE <role>`.
 
