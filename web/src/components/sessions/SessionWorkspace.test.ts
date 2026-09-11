@@ -115,3 +115,31 @@ test("SessionWorkspace: el reporte de limpieza se monta en el propio workspace p
   // Aparece también en la rama SIN sesión: tras cerrar, el inventario (5 s) deja `session` en null.
   assert.match(source, /Nueva sesión<\/button>\{cleanupModal\}<\/div>/);
 });
+
+test("nextSelectedPane: al entrar a una sesión (o si el elegido se fue) elige el pane ACTIVO de tmux, no el primero", () => {
+  const panes = [{ id: "%214", active: false }, { id: "%215", active: true }, { id: "%216", active: false }];
+  assert.equal(nextSelectedPane(null, panes), "%215");
+  assert.equal(nextSelectedPane("%999", panes), "%215");
+  // la elección del operador dentro de la sesión se respeta aunque no sea el activo
+  assert.equal(nextSelectedPane("%216", panes), "%216");
+  // sin bandera de activo, el primero sigue siendo la reserva
+  assert.equal(nextSelectedPane(null, [{ id: "%214" }, { id: "%215" }]), "%214");
+});
+
+test("SessionWorkspace SSR: la lista marca el pane activo de tmux y lo abre por defecto", () => {
+  const session: TmuxSessionInfo = {
+    name: "s", kind: "managed", attached: false, adopted: false, windows: 2, createdAt: 0,
+    panes: [
+      { id: "%1", windowIndex: 0, command: "zsh", title: "", role: null, active: false },
+      { id: "%2", windowIndex: 1, command: "claude", title: "", role: "impl", active: true },
+    ],
+  };
+  const html = renderToString(createElement(SessionWorkspace, { session, diagnostic: null, terminalUrl: null, onRefresh: async () => {}, onNew: () => {} }));
+  const buttons = [...html.matchAll(/<button[^>]*data-pane-id="(%\d+)"[^>]*>/g)].map(([tag, id]) => ({ id, tag }));
+  assert.deepEqual(buttons.map((b) => b.id), ["%1", "%2"]);
+  assert.match(buttons[1].tag, /data-active="true"/);
+  assert.doesNotMatch(buttons[0].tag, /data-active="true"/);
+  assert.match(buttons[1].tag, /class="chosen"/, "el activo es el seleccionado al entrar");
+  assert.doesNotMatch(buttons[0].tag, /class="chosen"/);
+  assert.match(html, /activo/);
+});
