@@ -65,3 +65,16 @@ mergeadas (`fix/harness-tab-workspace`, `feat/verify-gate-default-on`, `feat/har
 2. Pulido: los botones del `ExecutorPicker` quedan apretados en la fila abierta; la variante web sigue con `.app` a 1200px.
 3. `workflows.json` real del app (`~/Library/Application Support/claude-cowork/data/`) sigue con `verifyAfter` string hasta el primer guardado.
 4. Riesgo aceptado y documentado: `server/data/workflows.json` es git-tracked y ahora puede llevar shell ejecutable.
+
+## Post-merge — pantalla blanca al entrar en Workflows (PR #5) y frontera de error (PR #6)
+
+- **Síntoma**: clic en Workflows dejaba la app en blanco. **Causa**: el inspector pinta `workflow-proposals.json` (12 propuestas
+  reales con `verifyAfter` string o `null`, anteriores al cambio a lista) y `ProposalList.tsx:21` hacía `.join` →
+  `TypeError: verifyAfter.join is not a function` → React sin boundary desmonta todo. El PR #4 migró tolerantemente catálogo,
+  workflow, repo-config y flow.json, pero no el journal de propuestas.
+- **PR #5 (`ff459f9`)**: el store normaliza `verifyAfter` de cada propuesta al cargar (RED contra main: `'p-null': null,
+  'p-str': 'curl'`); `ProposalList` tolera el shape viejo (RED reproduce el TypeError exacto). Verificado sirviendo una copia del
+  archivo real: 12 propuestas → listas; original intacto (md5 igual). App reempaquetada y relanzada: el 8787 sirve listas.
+- **PR #6 (`dd768e1`)**: `ViewErrorBoundary` por región (workspace/inspector/contexto en DesktopApp, vista en App) con
+  `key={view}`; fallback con el error y "Reintentar". Probado en el navegador con una propuesta `stages:null`: la región cae
+  con `TypeError: Cannot read properties of null (reading 'map')` y la navegación sigue (`evidence/error-boundary-fallback.jpg`).

@@ -76,13 +76,14 @@ Sesiones conserva el inventario actual y añade:
 
 Una sesión ajena sólo permite inspección mediante list-panes y capture-pane, más una terminal de lectura. Input, broadcast, lanzamiento y cambio de layout se rechazan tanto en UI como servidor hasta adoptar.
 
-### Terminales nativas
+### Terminales
 
-Terminales muestra cuadrícula de panes para la sesión seleccionada. Cada celda identifica pane %N, rol, modelo y estado (working, idle, shell o gone). El foco se refleja en el encabezado y la cuadrícula se sincroniza después del resize.
+La implementación real (`web/src/screens/SessionsScreen.tsx`) no monta "un cliente tmux que renderiza una ventana": son DOS superficies de terminal distintas, con requisitos de gesto y riesgo muy distintos entre sí.
 
-El renderer usa xterm.js y Electron main inicia/gestiona un cliente tmux local mediante node-pty. La salida viaja por puertos dedicados, el teclado sólo llega a destinos validados y las dimensiones se aplican al terminal. Focus pane utiliza los IDs %N que el backend verificó. Broadcast requiere confirmación, lista sus destinos y no existe para sesiones ajenas. Cerrar una pestaña mata sólo su PTY cliente, no la sesión tmux.
+1. **Render/input por pane (primaria)** — `web/src/components/PaneViewer.tsx` + `pane-terminal.ts`. Es sólo-lectura por diseño en su mecánica de lectura (`capture-pane` vía polling HTTP, 200 ms) y dirige el teclado con `send-keys -t %N`, validado en servidor; nunca muta sólo por abrirse (`capture-pane` es de sólo lectura), así que puede montarse sola en cuanto hay una sesión seleccionada — no requiere gesto explícito adicional. Está clavada al pane concreto (`%N`) que el usuario eligió en la tabla de panes, no a "el pane activo de la ventana". Es la superficie que la UI muestra por default para cada sesión (gestionada o ajena; en ajena, sólo lectura).
+2. **Attach de ventana completa vía PTY crudo (secundaria)** — `web/src/components/NativeTerminal.tsx`, sobre el contrato IPC `terminal.open/resize/write/close` sobre `node-pty` (ver "Contrato IPC" del KB de escritorio). A diferencia de la anterior, SÍ requiere un gesto explícito ("Abrir ventana completa (PTY crudo)"): nunca se monta sola, porque sus teclas van al pane ACTIVO de la ventana tmux completa, no al pane %N seleccionado — escribir aquí puede afectar un pane distinto del que el usuario está mirando en la tabla. La UI advierte esto literalmente antes de abrirla.
 
-La aplicación se adjunta a las sesiones reales: no las simula ni reinicia agentes. Si no puede crear un PTY, explica la causa y deja la sesión intacta.
+Cada celda de la tabla de panes identifica pane %N, comando y rol. Cerrar la ventana completa mata sólo su PTY cliente, no la sesión tmux. La aplicación se adjunta a las sesiones reales: no las simula ni reinicia agentes. Si no puede crear un PTY, explica la causa y deja la sesión intacta.
 
 ### Loops y nueva ejecución
 
