@@ -143,3 +143,19 @@ test("SessionWorkspace SSR: la lista marca el pane activo de tmux y lo abre por 
   assert.doesNotMatch(buttons[0].tag, /class="chosen"/);
   assert.match(html, /activo/);
 });
+
+test("nextSelectedPane: con un pane activo por ventana, gana el de la ventana actual de la sesión; el marcador «activo» sólo va en ése", () => {
+  const panes = [{ id: "%1", active: true, windowActive: false }, { id: "%2", active: true, windowActive: true }];
+  assert.equal(nextSelectedPane(null, panes), "%2");
+  const session: TmuxSessionInfo = {
+    name: "s", kind: "managed", attached: false, adopted: false, windows: 2, createdAt: 0,
+    panes: [
+      { id: "%1", windowIndex: 0, command: "zsh", title: "", role: null, active: true, windowActive: false },
+      { id: "%2", windowIndex: 1, command: "claude", title: "", role: "impl", active: true, windowActive: true },
+    ],
+  };
+  const html = renderToString(createElement(SessionWorkspace, { session, diagnostic: null, terminalUrl: null, onRefresh: async () => {}, onNew: () => {} }));
+  const tags = [...html.matchAll(/<button[^>]*data-pane-id="(%\d+)"[^>]*>/g)].map(([tag]) => tag);
+  assert.doesNotMatch(tags[0], /data-active="true"/);
+  assert.match(tags[1], /data-active="true"/);
+});

@@ -91,7 +91,7 @@ export async function listSessions(): Promise<string[]> {
 const INVENTORY_SESSION_FMT =
   "#{session_name}:#{session_windows}:#{session_created}:#{session_attached}:#{@cowork-adopted}";
 const INVENTORY_PANE_FMT =
-  "#{session_name}:#{window_index}:#{pane_id}:#{pane_active}:#{@cowork-role}:#{pane_current_command}:#{pane_title}";
+  "#{session_name}:#{window_index}:#{pane_id}:#{pane_active}:#{window_active}:#{@cowork-role}:#{pane_current_command}:#{pane_title}";
 
 /**
  * stdout crudo de `list-sessions` con los 4 campos del inventario. "" si no hay servidor tmux:
