@@ -60,6 +60,7 @@ import { InsightsError, parseRange, type ProposalStatus } from "./workflow-insig
 import { collectSignals, defaultSignalDeps } from "./workflow-insights/signals.js";
 import { createProposalStore, type ProposalStore } from "./workflow-insights/store.js";
 import { generateKb, readKbGenerationState, scanKb, zipKb } from "./kb.js";
+import { cleanupSession, realCleanupDeps, type CleanupReport } from "./session-cleanup.js";
 
 /** T11: an invalid workflow gets an actionable {path, code} alongside the message; any other
  *  thrown error keeps the plain {error} shape every other 400 in this file already uses. */
@@ -130,6 +131,12 @@ export interface CreateAppOptions {
     startTtyd?: typeof startTtyd;
     openTerminal?: typeof openTerminal;
   };
+  /** Costuras de cierre para probar kill + cleanup sin tocar tmux, Docker ni el filesystem real. */
+  sessions?: {
+    hasSession?: typeof hasSession;
+    killSession?: typeof killSession;
+    cleanupSession?: (name: string) => Promise<CleanupReport>;
+  };
   /** Seams del lanzamiento gestionado y el inventario para pruebas HTTP sin tmux. */
   launchManagedSession?: typeof launchManagedSession;
   readTmuxInventory?: typeof readTmuxInventory;
@@ -177,6 +184,11 @@ const terminal = {
   hasSession: options.terminal?.hasSession ?? hasSession,
   startTtyd: options.terminal?.startTtyd ?? startTtyd,
   openTerminal: options.terminal?.openTerminal ?? openTerminal,
+};
+const sessionActions = {
+  hasSession: options.sessions?.hasSession ?? hasSession,
+  killSession: options.sessions?.killSession ?? killSession,
+  cleanupSession: options.sessions?.cleanupSession ?? ((name: string) => cleanupSession(name, realCleanupDeps)),
 };
 const performLaunchManagedSession = options.launchManagedSession ?? launchManagedSession;
 const readInventory = options.readTmuxInventory ?? readTmuxInventory;
@@ -632,15 +644,21 @@ app.post("/api/sessions", async (req, res) => {
 
 // Cierra exactamente la sesión indicada. El gesto de confirmación se valida también aquí: el
 // renderer puede estar desactualizado, pero no puede convertir un DELETE accidental en un kill.
-// Sólo mata tmux; evidencia, worktrees y metadata existentes se preservan para no borrar datos
-// de trabajo como efecto lateral de cerrar una terminal.
+// La limpieza es opt-in para conservar compatibilidad con clientes anteriores.
 app.delete("/api/sessions/:name", async (req, res) => {
   const { name } = req.params;
   if (!isSafeSessionName(name)) return res.status(400).json({ error: "nombre de sesión inválido", code: "INVALID_SESSION" });
   if (req.body?.confirm !== true) return res.status(400).json({ error: "confirmación requerida", code: "CONFIRMATION_REQUIRED" });
-  if (!(await hasSession(name))) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
-  await killSession(name);
+  if (!(await sessionActions.hasSession(name))) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
+  await sessionActions.killSession(name);
   recordEvent({ type: "close", key: name, title: name, repo: "", source: "session" });
+  if (req.body?.cleanup === true) {
+    try {
+      return res.json({ ok: true, cleanup: await sessionActions.cleanupSession(name) });
+    } catch (error) {
+      return res.json({ ok: true, cleanup: { error: error instanceof Error ? error.message : "fallo desconocido" } });
+    }
+  }
   res.json({ ok: true });
 });
 

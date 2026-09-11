@@ -1,4 +1,8 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { readLaunchRecord } from "./sessions.js";
+import { cycleDirForSession, removeCycleDir } from "./stages.js";
+import { removeWorktree } from "./worktree.js";
 
 /**
  * Limpieza de lo que una sesión GESTIONADA creó al lanzarse: contenedores etiquetados con la
@@ -101,3 +105,39 @@ export async function cleanupSession(name: string, deps: CleanupDeps): Promise<C
   }
   return report;
 }
+
+function runDocker(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("docker", args, { timeout: 15_000, encoding: "utf8" }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
+    });
+  });
+}
+
+function containerRows(output: string): Array<{ id: string; name: string }> {
+  return output.split("\n").map((line) => {
+    const [id = "", name = ""] = line.trim().split("\t", 2);
+    return { id, name };
+  }).filter((row) => !!row.id && !!row.name);
+}
+
+export const realCleanupDeps: CleanupDeps = {
+  readLaunch: readLaunchRecord,
+  cycleFor: cycleDirForSession,
+  removeWorktree,
+  removeCycleDir,
+  listContainers: async (session) => {
+    const format = "{{.ID}}\t{{.Names}}";
+    const [labeled, named] = await Promise.all([
+      runDocker(["ps", "-a", "--format", format, "--filter", `label=cowork.session=${session}`]),
+      runDocker(["ps", "-a", "--format", format, "--filter", `name=${session}`]),
+    ]);
+    const ids = new Set(containerRows(labeled).map((row) => row.id));
+    for (const row of containerRows(named)) {
+      if (matchesSession(session, row.name)) ids.add(row.id);
+    }
+    return [...ids];
+  },
+  removeContainer: async (id) => { await runDocker(["rm", "-f", id]); },
+};
