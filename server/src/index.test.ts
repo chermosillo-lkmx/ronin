@@ -482,6 +482,45 @@ test("T12.100 POST /api/workflow/validate: verifyCmd → 400 VERIFY_CMD_NOT_ALLO
   assert.equal((response.body as any).error?.code, "VERIFY_CMD_NOT_ALLOWED");
 });
 
+test("A3: PUT de catálogo honra verifyCmd/maxRetries y el PUT global legacy los rechaza", async () => {
+  const { mkdirSync, mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { loadWorkflowCatalog } = await import("./workflow-catalog.js");
+  const directory = mkdtempSync(join(tmpdir(), "ronin-api-workflows-gates-"));
+  mkdirSync(directory, { recursive: true });
+  const token = ensureCapabilityToken();
+  const headers = { "x-ronin-capability": token };
+  try {
+    const id = loadWorkflowCatalog(directory).items[0]!.id;
+    const app = createApp({ catalogDirectory: directory });
+    const config = {
+      stages: [
+        { key: "tests", label: "Tests", icon: "✅", verifyCmd: "npm test", maxRetries: 2 },
+        { key: "deploy", label: "Deploy", icon: "🚀", verifyCmd: "true", maxRetries: 7 },
+      ],
+      verifyAfter: [],
+    };
+    const updated = await invokeRequest(app, "PUT", `/api/workflows/${id}`, { headers, body: { config } });
+    assert.equal(updated.status, 200);
+    assert.deepEqual((updated.body as any).config.stages.map((stage: any) => [stage.verifyCmd, stage.maxRetries]), [
+      ["npm test", 2],
+      ["true", 7],
+    ]);
+    const listed = await invokeRequest(app, "GET", "/api/workflows");
+    assert.deepEqual((listed.body as any).items[0].config.stages.map((stage: any) => [stage.verifyCmd, stage.maxRetries]), [
+      ["npm test", 2],
+      ["true", 7],
+    ]);
+
+    const legacy = await invokeRequest(app, "PUT", "/api/workflow", { headers, body: config });
+    assert.equal(legacy.status, 400);
+    assert.equal((legacy.body as any).code, "VERIFY_CMD_NOT_ALLOWED");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 // ---- T4: POST/DELETE /api/sessions/:name/adopt ----
 
 test("GET/PUT /api/trusted-roots devuelve, valida y respeta la política del entorno", async () => {

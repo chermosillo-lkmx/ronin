@@ -68,6 +68,27 @@ test("A2: el catálogo normaliza verifyAfter legado al cargar de disco", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("A3: el catálogo conserva verifyCmd y maxRetries al guardar y recargar", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cowork-workflows-"));
+  try {
+    const created = createWorkflowCatalogItem("gated", {
+      stages: [
+        { key: "tests", label: "Tests", icon: "✅", verifyCmd: "npm test", maxRetries: 2 },
+        { key: "deploy", label: "Deploy", icon: "🚀", verifyCmd: "true", maxRetries: 7 },
+      ],
+      verifyAfter: [],
+    }, dir);
+    assert.deepEqual(created.config.stages.map((stage) => [stage.verifyCmd, stage.maxRetries]), [
+      ["npm test", 2],
+      ["true", 7],
+    ]);
+    assert.deepEqual(loadWorkflowCatalog(dir).items.find((item) => item.id === created.id)?.config.stages.map((stage) => [stage.verifyCmd, stage.maxRetries]), [
+      ["npm test", 2],
+      ["true", 7],
+    ]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("workflow catalog deletes a named item while preserving the other workflows", () => {
   const dir = mkdtempSync(join(tmpdir(), "cowork-workflows-"));
   try {

@@ -51,7 +51,9 @@ function normalize(raw: unknown): WorkflowCatalog | null {
     const name = slug(item.name);
     if (!name || names.has(name) || !validId(item.id) || ids.has(item.id)) continue;
     try {
-      const config = validateStages(item.config ?? {}, { strict: true });
+      // Catalog workflows are executable by product decision; the legacy global workflow and
+      // actions.json keep their git-tracked shell rejection in their own validation paths.
+      const config = validateStages(item.config ?? {}, { strict: true, allowVerifyCmd: true });
       names.add(name);
       ids.add(item.id);
       items.push({ id: item.id, name, config, updatedAt: Number(item.updatedAt) || 0 });
@@ -108,7 +110,7 @@ export function createWorkflowCatalogItem(nameInput: unknown, configInput: unkno
   const item: WorkflowCatalogItem = {
     id: newId(),
     name,
-    config: validateStages((configInput ?? {}) as Partial<WorkflowConfig>, { strict: true }),
+    config: validateStages((configInput ?? {}) as Partial<WorkflowConfig>, { strict: true, allowVerifyCmd: true }),
     updatedAt: Date.now(),
   };
   catalog.items.push(item);
@@ -127,7 +129,7 @@ export function updateWorkflowCatalogItem(id: string, input: { name?: unknown; c
   const next: WorkflowCatalogItem = {
     id: previous.id,
     name,
-    config: input.config === undefined ? previous.config : validateStages(input.config as Partial<WorkflowConfig>, { strict: true }),
+    config: input.config === undefined ? previous.config : validateStages(input.config as Partial<WorkflowConfig>, { strict: true, allowVerifyCmd: true }),
     updatedAt: Date.now(),
   };
   catalog.items[index] = next;

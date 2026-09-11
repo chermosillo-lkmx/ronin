@@ -198,13 +198,14 @@ configuración declarada, no comprobaciones realizadas.
 
 ### Gate de etapa por `verifyCmd` (opcional)
 
-Una etapa del override por-repo puede declarar `verifyCmd` y `maxRetries`: cuando el worker marca
+Una etapa del catálogo o del override por-repo puede declarar `verifyCmd` y `maxRetries`: cuando el worker marca
 esa etapa, un bucle en el servidor lo ejecuta en su worktree mientras el worker está ocioso, con
 reintentos y sin falsos verdes (agotados los intentos, el gate queda `failed` para siempre). Está
 **encendido por defecto** (a diferencia del planificador de reportes, que sigue siendo opt-in) y se
 apaga con `COWORK_VERIFY_GATE=0`. Ojo: ejecuta shell dentro del worktree de las sesiones vivas del
-repo, así que sólo el override por-repo (gitignored) puede declarar `verifyCmd`; el workflow global y
-el catálogo lo rechazan.
+repo. El catálogo vive en `workflows.json`, que puede estar bajo git: revisar un cambio de catálogo
+es también revisar shell ejecutable. El workflow global legacy (`PUT /api/workflow`) y `actions.json`
+siguen rechazando `verifyCmd`; el catálogo y el override por-repo lo honran.
 
 Si el repo declara `setupCommand`, Ronin lo corre en segundo plano al crear el worktree para armar
 su entorno (`.venv`, `node_modules`), y el gate espera a que termine; si la provisión falla, se
