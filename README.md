@@ -174,7 +174,10 @@ Cada etapa declara **quién la ejecuta** y **con qué modelo**, y el prompt se g
 ### Vista Harness del editor
 
 La cuarta vista del editor lee cada etapa como un pequeño arnés: separa lo que guía al agente de
-lo que observa o bloquea su avance. Hay cuatro controles con interruptor:
+lo que observa o bloquea su avance. En el shell de escritorio (Ronin) vive en `Workflows` → segmento
+`Grafo/Stepper/JSON/Harness`, sobre el catálogo de workflows; ahí `verifyCmd` sale deshabilitado porque el
+catálogo es git-tracked y el servidor lo rechaza (`VERIFY_CMD_NOT_ALLOWED`) — sólo se arma desde el override
+por-repo del dashboard web (⚙ Workflow). Hay cuatro controles con interruptor:
 
 - **Instrucción** edita `instruction`.
 - **Ejecutor/modelo** edita `executor` y `model` como una unidad.
