@@ -82,6 +82,7 @@ feature branch → PR → main → AgileFlow tags → GitLab mirror
 - [ ] Type chosen matches intent (see version bump table above)
 - [ ] PR targets `main`
 - [ ] Let commitizen hooks run — do NOT use `--no-verify`
+- [ ] **Unit-test rule**: every `src/` change ships its unit tests in the same PR, new tests actually run and pass, and the service's full suite is green (`0 failed`) before opening the PR **and again before merging** — verify with `~/code/claude-cowork/scripts/unit-gate.sh <worktree>` (`UNIT-GATE: PASS`); never fix a red gate by deleting, skipping or weakening tests
 
 ---
 
