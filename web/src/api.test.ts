@@ -16,6 +16,23 @@ test("getHealth conserva false y trata verifyGate ausente como desconocido", asy
   }
 });
 
+test("getTestsRunCases returns the saved case file and null for historical runs", async () => {
+  const originalFetch = globalThis.fetch;
+  const file = { runId: "run-1", cases: [{ id: "::ok#0", name: "ok", status: "passed" }], truncated: false };
+  try {
+    globalThis.fetch = async (input) => {
+      assert.equal(input, "/api/tests/runs/run-1/cases");
+      return new Response(JSON.stringify(file));
+    };
+    assert.deepEqual(await api.getTestsRunCases("run-1"), file);
+
+    globalThis.fetch = async () => new Response(JSON.stringify({ code: "CASES_NOT_FOUND" }), { status: 404 });
+    assert.equal(await api.getTestsRunCases("run-old"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("closeTmuxSession solicita cleanup y devuelve el reporte del servidor", async () => {
   const originalFetch = globalThis.fetch;
   const report = {

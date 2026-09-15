@@ -46,12 +46,19 @@ Los reportes diario/semanal se construyen a partir de sesiones, evidencia y comm
 - **Procedencia**: cada corrida guarda si la midió Ronin (`harness`) o la reportó el agente
   (`agent`), y la UI lo distingue. Una corrida auto-declarada no se mezcla en silencio con una
   medida — la matriz la marca con `· agente` y el detalle lo dice con todas sus letras.
+- **Origen de la corrida**: el detalle registra sesión, ticket y commit/rama cuando están
+  disponibles. Ronin los deriva del worktree y su `launch.json`, acepta valores explícitos del
+  agente y deja visible si el origen es derivado, explícito o mixto.
 - Matriz **repo × suite** (`Unit · E2E · API/OpenAPI · Browser`) con una fila por repo de `repos.json`.
   Una celda sin configurar dice *sin configurar*; nunca cuenta como verde. La cobertura sólo se
   muestra si se leyó un **Cobertura XML** o **LCOV** real; si no, *no reportada* (jamás un 0%).
 - Cada corrida persiste conteos JUnit, cobertura, fallos, salida acotada y **copias** de los
   artefactos en `server/data/test-artifacts/<runId>/`, así el historial no cambia si el repo se
   vuelve a correr. Estados: `queued · running · passed · failed · error · timeout · cancelled · blocked`.
+- El detalle muestra un **mapa de casos individuales** tomado del JUnit: fallos y errores primero,
+  cuadros verdes/rojos/ámbar por estado, filtro de fallidas y un inspector con duración, mensaje,
+  stack y `stdout`. Los reportes se limitan a 5000 casos; una corrida histórica sin `cases.json`
+  sigue abriendo y se identifica como tal.
 - Los comandos son `program + args` — **sin shell** — en la carpeta del repo (o `cwd` relativa
   para monorepos), con un entorno mínimo (`PATH`, `HOME`, locale) más las **variables del
   perfil**. Los valores del perfil nunca vuelven a la UI ni al journal (se redactan antes de
@@ -128,7 +135,7 @@ Los reportes diario/semanal se construyen a partir de sesiones, evidencia y comm
 Ronin expone un **servidor MCP** propio en `POST /mcp` (JSON-RPC 2.0 sobre HTTP) con dos
 herramientas para el worker:
 
-- `reportar_pruebas(repo, suite, junitPath, coberturaPath?, profile?)`
+- `reportar_pruebas(repo, suite, junitPath, coberturaPath?, profile?, ticket?, commit?, session?)`
 - `estado_pruebas(repo?)`
 
 La idea es invertir la dirección: el agente ya corre la suite en un checkout que tiene su entorno

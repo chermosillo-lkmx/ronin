@@ -1,7 +1,7 @@
 import type { TestTrigger } from "./model.js";
 import { execFile } from "node:child_process";
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 export interface LaunchRecord {

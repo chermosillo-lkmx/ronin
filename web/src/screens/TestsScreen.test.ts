@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { TestsScreen, type TestsScreenData } from "./TestsScreen.js";
-import type { TestMatrixRow, TestRun } from "../types.js";
+import type { TestCasesFile, TestMatrixRow, TestRun } from "../types.js";
 
 const cells = (unit: TestMatrixRow["cells"]["unit"]): TestMatrixRow["cells"] => ({
   unit,
@@ -96,6 +96,45 @@ test("TestsScreen run detail lists failures and redacted output without the toke
   assert.match(html, /TOKEN=\*\*\*/);
   assert.match(html, /Reintentar/);
   assert.match(html, /La corrió el agente; Ronin no la ejecutó y leyó su JUnit/);
+});
+
+test("TestsScreen renders the case map in failure-first order with selected detail and run origin", () => {
+  const cases: TestCasesFile = {
+    runId: "run-1",
+    truncated: false,
+    cases: [
+      { id: "suite::pass#0", name: "passes", classname: "suite", status: "passed", durationMs: 3 },
+      { id: "suite::skip#1", name: "skips", status: "skipped" },
+      { id: "suite::error#2", name: "errors", status: "error", message: "error message", detail: "error stack", stdout: "debug line" },
+      { id: "suite::fail#3", name: "fails", status: "failed", message: "failure message", detail: "failure stack" },
+    ],
+  };
+  const run = { ...RUN, cases: { total: 4, truncated: false }, trigger: { session: "cowork-case-map", ticket: "CU-86abc1234", commit: "abc1234", branch: "feat/tests-case-map", source: "mixed" as const } };
+  const html = renderToString(createElement(TestsScreen, {
+    initial: { ...FIXTURE, runs: [run] },
+    selectedRunId: run.runId,
+    initialCases: { [run.runId]: cases },
+    initialSelectedCaseId: "suite::error#2",
+  }));
+
+  assert.equal((html.match(/class="ron-tests-case(?: selected)?"/g) ?? []).length, 4);
+  assert.deepEqual([...html.matchAll(/class="ron-tests-case(?: selected)?"[^>]*data-status="([^"]+)"/g)].map((match) => match[1]), ["failed", "error", "skipped", "passed"]);
+  assert.match(html, /data-case-id="suite::error#2"/);
+  assert.match(html, /aria-pressed="true"/);
+  assert.match(html, /error message/);
+  assert.match(html, /error stack/);
+  assert.match(html, /debug line/);
+  assert.match(html, /<dt>Origen<\/dt>/);
+  assert.match(html, /cowork-case-map/);
+  assert.match(html, /CU-86abc1234/);
+  assert.match(html, /abc1234 · feat\/tests-case-map/);
+  assert.match(html, />mixed<\/small>/);
+});
+
+test("TestsScreen labels an empty derived origin as not registered", () => {
+  const run = { ...RUN, trigger: { source: "derived" as const } };
+  const html = renderToString(createElement(TestsScreen, { initial: { ...FIXTURE, runs: [run] }, selectedRunId: run.runId }));
+  assert.match(html, /<dt>Origen<\/dt><dd>no registrado<\/dd>/);
 });
 
 /**

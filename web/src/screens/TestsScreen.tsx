@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { cancelTestRun, getTestsConfig, getTestsMatrix, getTestsRuns, retryTestRun, saveTestsConfig, startTests } from "../api";
+import { cancelTestRun, getTestsConfig, getTestsMatrix, getTestsRunCases, getTestsRuns, retryTestRun, saveTestsConfig, startTests } from "../api";
 import { ActivityHeatmap } from "../components/tests/ActivityHeatmap";
 import { buildHeatmap, monthSpans } from "../components/tests/heatmap";
-import type { TestCoverage, TestMatrixCell, TestMatrixRow, TestRepoConfig, TestRun, TestSuite, TestSuiteConfig, TestTotals } from "../types";
+import type { TestCase, TestCasesFile, TestCaseStatus, TestCoverage, TestMatrixCell, TestMatrixRow, TestRepoConfig, TestRun, TestSuite, TestSuiteConfig, TestTotals } from "../types";
 
 /**
  * Superficie Pruebas (test harness). Matriz repo × suite construida SÓLO con lo que el server
@@ -23,6 +23,8 @@ export interface TestsScreenProps {
   initial?: TestsScreenData;
   selectedRepo?: string;
   selectedRunId?: string;
+  initialCases?: Record<string, TestCasesFile>;
+  initialSelectedCaseId?: string;
 }
 
 const SUITES: { key: TestSuite; label: string }[] = [
@@ -76,7 +78,7 @@ function fmtDuration(ms?: number): string {
 const HEATMAP_DAYS = 90;
 const HEATMAP_RUN_LIMIT = 1000;
 
-export function TestsScreen({ initial, selectedRepo: initialRepo, selectedRunId: initialRunId }: TestsScreenProps) {
+export function TestsScreen({ initial, selectedRepo: initialRepo, selectedRunId: initialRunId, initialCases, initialSelectedCaseId }: TestsScreenProps) {
   const [matrix, setMatrix] = useState<TestMatrixRow[]>(initial?.matrix ?? []);
   const [config, setConfig] = useState<TestRepoConfig[]>(initial?.config ?? []);
   const [runs, setRuns] = useState<TestRun[]>(initial?.runs ?? []);
@@ -224,7 +226,7 @@ export function TestsScreen({ initial, selectedRepo: initialRepo, selectedRunId:
 
         <section className="card elev-sm ron-tests-detail">
           {selectedRun ? (
-            <RunDetail run={selectedRun} busy={busy} onClose={() => setSelectedRunId(null)} onCancel={() => act(() => cancelTestRun(selectedRun.runId), "cancelación enviada")} onRetry={() => act(() => retryTestRun(selectedRun.runId), "reintento encolado")} />
+            <RunDetail run={selectedRun} busy={busy} initialCases={initialCases?.[selectedRun.runId]} initialSelectedCaseId={initialSelectedCaseId} onClose={() => setSelectedRunId(null)} onCancel={() => act(() => cancelTestRun(selectedRun.runId), "cancelación enviada")} onRetry={() => act(() => retryTestRun(selectedRun.runId), "reintento encolado")} />
           ) : repoConfig ? (
             <RepoConfigForm key={repoConfig.repo} config={repoConfig} busy={busy} onSave={(input) => act(() => saveTestsConfig(repoConfig.repo, input), `configuración de ${repoConfig.repo} guardada`)} />
           ) : (
@@ -254,8 +256,46 @@ function MatrixCellView({ cell, canRun, busy, onOpen, onRun }: { cell: TestMatri
   );
 }
 
-function RunDetail({ run, busy, onCancel, onRetry, onClose }: { run: TestRun; busy: boolean; onCancel: () => void; onRetry: () => void; onClose: () => void }) {
+const CASE_ORDER: Record<TestCaseStatus, number> = { failed: 0, error: 1, skipped: 2, passed: 3 };
+
+function CaseDetail({ testCase }: { testCase: TestCase }) {
+  return <aside className="ron-tests-case-detail">
+    <strong>{testCase.name}</strong>
+    {testCase.classname && <code>{testCase.classname}</code>}
+    <dl><dt>estado</dt><dd>{testCase.status}</dd>{testCase.durationMs !== undefined && <><dt>duración</dt><dd>{fmtDuration(testCase.durationMs)}</dd></>}</dl>
+    {testCase.message && <p>{testCase.message}</p>}
+    {testCase.detail && <pre>{testCase.detail}</pre>}
+    {testCase.stdout && <details><summary>stdout</summary><pre>{testCase.stdout}</pre></details>}
+  </aside>;
+}
+
+function CaseMap({ runId, initialCases, initialSelectedCaseId }: { runId: string; initialCases?: TestCasesFile; initialSelectedCaseId?: string }) {
+  const [file, setFile] = useState<TestCasesFile | null | undefined>(initialCases);
+  const [filter, setFilter] = useState<"all" | "failed">("all");
+  const [selectedId, setSelectedId] = useState(initialSelectedCaseId);
+  useEffect(() => {
+    if (initialCases) { setFile(initialCases); return; }
+    let alive = true;
+    setFile(undefined);
+    void getTestsRunCases(runId).then((value) => { if (alive) setFile(value); });
+    return () => { alive = false; };
+  }, [runId, initialCases]);
+  if (file === undefined) return <p className="ron-note">cargando casos…</p>;
+  if (file === null) return <p className="ron-note">esta corrida no guardó casos</p>;
+  const ordered = file.cases.map((testCase, index) => ({ testCase, index })).sort((a, b) => CASE_ORDER[a.testCase.status] - CASE_ORDER[b.testCase.status] || a.index - b.index).map(({ testCase }) => testCase);
+  const visible = filter === "failed" ? ordered.filter((testCase) => testCase.status === "failed" || testCase.status === "error") : ordered;
+  const selected = visible.find((testCase) => testCase.id === selectedId) ?? visible[0];
+  const counts = file.cases.reduce<Record<TestCaseStatus, number>>((all, testCase) => ({ ...all, [testCase.status]: all[testCase.status] + 1 }), { passed: 0, failed: 0, error: 0, skipped: 0 });
+  return <section className="ron-tests-cases">
+    <div className="ron-tests-cases-head"><strong>Casos ({file.cases.length}){file.truncated ? " · recortados" : ""}</strong><span className="ron-tests-cases-legend"><i data-status="passed" />{counts.passed}<i data-status="failed" />{counts.failed}<i data-status="error" />{counts.error}<i data-status="skipped" />{counts.skipped}</span><span className="ron-pf-spacer" /><button className={filter === "all" ? "selected" : ""} onClick={() => setFilter("all")}>todas</button><button className={filter === "failed" ? "selected" : ""} onClick={() => setFilter("failed")}>fallidas</button></div>
+    <div className="ron-tests-cases-body"><div className="ron-tests-case-map">{visible.map((testCase) => <button key={testCase.id} className={`ron-tests-case${selected?.id === testCase.id ? " selected" : ""}`} data-status={testCase.status} data-case-id={testCase.id} title={testCase.name} aria-pressed={selected?.id === testCase.id} onClick={() => setSelectedId(testCase.id)} />)}</div>{selected && <CaseDetail testCase={selected} />}</div>
+  </section>;
+}
+
+function RunDetail({ run, busy, initialCases, initialSelectedCaseId, onCancel, onRetry, onClose }: { run: TestRun; busy: boolean; initialCases?: TestCasesFile; initialSelectedCaseId?: string; onCancel: () => void; onRetry: () => void; onClose: () => void }) {
   const live = run.status === "queued" || run.status === "running";
+  const hasOrigin = Boolean(run.trigger && (run.trigger.session || run.trigger.ticket || run.trigger.commit || run.trigger.branch || run.trigger.worktree));
+  const originText = [run.trigger?.ticket, run.trigger?.commit, run.trigger?.branch].filter(Boolean).join(" · ");
   return (
     <div className="ron-tests-run-detail">
       <div className="ron-tests-section-head">
@@ -273,6 +313,7 @@ function RunDetail({ run, busy, onCancel, onRetry, onClose }: { run: TestRun; bu
         <dt>run</dt><dd className="ron-mono">{run.runId}{run.batchId ? ` · lote ${run.batchId}` : ""}</dd>
         <dt>perfil</dt><dd>{run.profile}</dd>
         <dt>procedencia</dt><dd>{run.source === "agent" ? "La corrió el agente; Ronin no la ejecutó y leyó su JUnit." : "Ronin ejecutó esta suite."}</dd>
+        <dt>Origen</dt><dd>{hasOrigin ? <>{run.trigger!.session && <code>{run.trigger!.session}</code>}{run.trigger!.session && originText ? " · " : ""}{originText}{run.trigger!.worktree && <small className="ron-tests-origin-worktree">{run.trigger!.worktree}</small>}<small className="ron-tests-origin-source">{run.trigger!.source}</small></> : "no registrado"}</dd>
         {run.command && <><dt>comando</dt><dd className="ron-mono">{[run.command.program, ...run.command.args].join(" ")}</dd></>}
         {run.cwd && <><dt>cwd</dt><dd className="ron-mono">{run.cwd}</dd></>}
         <dt>resultado</dt>
@@ -285,6 +326,7 @@ function RunDetail({ run, busy, onCancel, onRetry, onClose }: { run: TestRun; bu
           <><dt>artefactos</dt><dd>{run.artifacts.map((a) => { const name = a.split("/").pop()!; return <a key={a} className="ron-tests-artifact" href={`/api/tests/runs/${encodeURIComponent(run.runId)}/artifacts/${encodeURIComponent(name)}`} target="_blank" rel="noreferrer">{name}</a>; })}</dd></>
         )}
       </dl>
+      <CaseMap key={run.runId} runId={run.runId} initialCases={initialCases} initialSelectedCaseId={initialSelectedCaseId} />
       {run.failures && run.failures.length > 0 && (
         <div className="ron-tests-failures">
           <strong>Fallos ({run.failures.length})</strong>
