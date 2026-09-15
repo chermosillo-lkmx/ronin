@@ -964,6 +964,14 @@ app.get("/api/tests/runs/:id", (req, res) => {
   res.json(run);
 });
 
+app.get("/api/tests/runs/:id/cases", (req, res) => {
+  const run = harness.getRun(req.params.id);
+  if (!run) return void res.status(404).json({ error: "run no encontrado", code: "RUN_NOT_FOUND" });
+  const cases = harness.readCases(req.params.id);
+  if (!cases) return void res.status(404).json({ error: "casos no encontrados", code: "CASES_NOT_FOUND" });
+  res.json(cases);
+});
+
 app.get("/api/tests/runs/:id/artifacts/:name", (req, res) => {
   try {
     res.sendFile(harness.artifactPath(req.params.id, req.params.name));

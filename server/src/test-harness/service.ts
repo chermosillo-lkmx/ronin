@@ -1,6 +1,6 @@
 import { randomBytes, createHash } from "node:crypto";
 import { copyFileSync, existsSync, realpathSync, rmSync, statSync } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolveCwd as defaultResolveCwd } from "../repos.js";
 import { isWithinTrustedRoot, trustedRoots as defaultTrustedRoots } from "../repo-roots.js";
 import { boundOutput, readCoverageFile, readJUnitFile, redactEvidence } from "./artifacts.js";
@@ -22,6 +22,7 @@ import {
   type TestTotals,
 } from "./model.js";
 import { runCommand, type RunCommandHandle } from "./runner.js";
+import { deriveTrigger, gitText, listLaunches, type LaunchRecord } from "./trigger.js";
 
 /**
  * Orquestación: convierte una selección declarada en corridas persistidas, las encola por repo
@@ -47,6 +48,8 @@ export interface ServiceOptions {
   maxAgentArtifactBytes?: number;
   /** Variables del entorno padre que SÍ se heredan (PATH y locale; nada más). */
   inheritEnv?: readonly string[];
+  git?: (dir: string, args: string[]) => Promise<string>;
+  listLaunches?: () => LaunchRecord[];
 }
 
 export type CellState = "unconfigured" | "never_run" | RunStatus;
@@ -106,6 +109,7 @@ export function createTestHarnessService(options: ServiceOptions) {
   const trustedRoots = options.trustedRoots ?? defaultTrustedRoots;
   const maxAgentArtifactBytes = options.maxAgentArtifactBytes ?? MAX_AGENT_ARTIFACT_BYTES;
   const inherit = options.inheritEnv ?? INHERIT_ENV_DEFAULT;
+  const triggerDeps = { git: options.git ?? gitText, listLaunches: options.listLaunches ?? listLaunches };
 
   const queues = new Map<string, Promise<void>>();
   const active = new Map<string, RunCommandHandle>();
@@ -171,6 +175,7 @@ export function createTestHarnessService(options: ServiceOptions) {
   }
 
   async function execute(run: Run, suite: SuiteConfig, profile: Profile, cwdReal: string): Promise<void> {
+    run.trigger = await deriveTrigger({ dir: cwdReal }, triggerDeps);
     clearStaleArtifacts(cwdReal, suite);
     run.status = "running";
     run.startedAt = now().toISOString();
@@ -197,6 +202,14 @@ export function createTestHarnessService(options: ServiceOptions) {
       if (parsed.summary) {
         run.totals = parsed.summary.totals;
         run.failures = parsed.summary.failures.map((f) => ({ ...f, message: redactEvidence(f.message, secrets) }));
+        const cases = parsed.summary.cases.map((testCase) => ({
+          ...testCase,
+          ...(testCase.message ? { message: redactEvidence(testCase.message, secrets) } : {}),
+          ...(testCase.detail ? { detail: redactEvidence(testCase.detail, secrets) } : {}),
+          ...(testCase.stdout ? { stdout: redactEvidence(testCase.stdout, secrets) } : {}),
+        }));
+        store.writeCases(run.runId, { runId: run.runId, cases, truncated: parsed.summary.casesTruncated });
+        run.cases = { total: cases.length, truncated: parsed.summary.casesTruncated };
       } else run.totalsReason = parsed.reason;
     } else run.totalsReason = junit.reason;
 
@@ -279,7 +292,7 @@ export function createTestHarnessService(options: ServiceOptions) {
   }
 
   /** Registra evidencia ya producida por el agente; aquí no se ejecuta ningún comando. */
-  function recordAgentRun(input: { repo: string; suite: TestSuite; profile?: string; junitPath: string; coberturaPath?: string }): Run {
+  async function recordAgentRun(input: { repo: string; suite: TestSuite; profile?: string; junitPath: string; coberturaPath?: string; ticket?: string; commit?: string; session?: string }): Promise<Run> {
     if (!store.listHarnessRepos().includes(input.repo)) {
       throw new HarnessError(`repo desconocido: ${input.repo}`, "REPO_NOT_FOUND", 404);
     }
@@ -321,8 +334,14 @@ export function createTestHarnessService(options: ServiceOptions) {
     const coverage = readCoverageFile(cobertura, "cobertura");
     const at = now().toISOString();
     const totals = parsed.summary.totals;
+    const runId = newId("run");
+    const trigger = await deriveTrigger({
+      dir: dirname(junit),
+      explicit: { ticket: input.ticket, commit: input.commit, session: input.session },
+    }, triggerDeps);
+    store.writeCases(runId, { runId, cases: parsed.summary.cases, truncated: parsed.summary.casesTruncated });
     return persist({
-      runId: newId("run"),
+      runId,
       source: "agent",
       repo: input.repo,
       suite: input.suite,
@@ -331,6 +350,8 @@ export function createTestHarnessService(options: ServiceOptions) {
       createdAt: at,
       finishedAt: at,
       totals,
+      cases: { total: parsed.summary.cases.length, truncated: parsed.summary.casesTruncated },
+      trigger,
       coverage,
       failures: parsed.summary.failures,
       fingerprint: fingerprintOf({ failures: parsed.summary.failures } as Run),
@@ -442,6 +463,7 @@ export function createTestHarnessService(options: ServiceOptions) {
     matrix,
     listRuns,
     getRun: (runId: string) => store.getRun(runId),
+    readCases: (runId: string) => store.readCases(runId),
     getBatch: (batchId: string) => store.getBatch(batchId),
     listBatches: () => store.listBatches(),
     artifactPath,

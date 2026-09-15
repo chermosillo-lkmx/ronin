@@ -89,6 +89,19 @@ test("run journal persists runs and batches, and artifactsDir is created lazily"
   });
 });
 
+test("writeCases and readCases persist the normalized cases file under the run artifacts", () => {
+  withDir((dir) => {
+    const store = createHarnessStore({ directory: dir, repos: () => [] });
+    const file = { runId: "r-cases", cases: [{ id: "::ok#0", name: "ok", status: "passed" as const }], truncated: false };
+
+    store.writeCases("r-cases", file);
+
+    assert.deepEqual(store.readCases("r-cases"), file);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "test-artifacts", "r-cases", "cases.json"), "utf8")), file);
+    assert.equal(store.readCases("missing"), null);
+  });
+});
+
 test("saveRepo keeps a stored variable value when the input sends null for that key (masked round-trip)", () => {
   withDir((dir) => {
     const store = createHarnessStore({ directory: dir, repos: () => ["api"] });

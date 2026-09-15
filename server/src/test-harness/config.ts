@@ -11,6 +11,7 @@ import {
   type RepoHarnessConfig,
   type Run,
   type SuiteConfig,
+  type TestCasesFile,
   type TestSuite,
 } from "./model.js";
 
@@ -223,6 +224,14 @@ export function createHarnessStore(options: HarnessStoreOptions = {}) {
     return dir;
   }
 
+  function writeCases(runId: string, file: TestCasesFile): void {
+    writeJsonAtomic(join(artifactsDir(runId), "cases.json"), file);
+  }
+
+  function readCases(runId: string): TestCasesFile | null {
+    return readJson<TestCasesFile | null>(join(artifactsRoot, parseId(runId, "runId"), "cases.json"), null);
+  }
+
   /** Re-lee disco (tests / edición manual). */
   function reload(): void {
     config = loadConfig();
@@ -243,6 +252,8 @@ export function createHarnessStore(options: HarnessStoreOptions = {}) {
     listBatches,
     upsertBatch,
     artifactsDir,
+    writeCases,
+    readCases,
     reload,
     hasArtifactsDir: (runId: string) => existsSync(join(artifactsRoot, runId)),
   };

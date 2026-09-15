@@ -9,11 +9,13 @@ import { createTestHarnessService, type TestHarnessService } from "./service.js"
 const NODE = process.execPath;
 
 /** Fixture: un "repo" cuyo `unit` escribe JUnit + Cobertura reales con node. */
-function writeFixtureRepo(root: string, opts: { fail?: boolean; coverage?: boolean; slow?: boolean; junit?: boolean } = {}): void {
+function writeFixtureRepo(root: string, opts: { fail?: boolean; coverage?: boolean; slow?: boolean; junit?: boolean; threeCases?: boolean } = {}): void {
   mkdirSync(join(root, "svc"), { recursive: true });
   const junit = opts.fail
     ? `<testsuite tests="2" failures="1"><testcase name="ok"/><testcase name="bad"><failure message="boom"/></testcase></testsuite>`
-    : `<testsuite tests="2"><testcase name="ok"/><testcase name="ok2"/></testsuite>`;
+    : opts.threeCases
+      ? `<testsuite tests="3"><testcase name="ok"/><testcase name="ok2"/><testcase name="ok3"/></testsuite>`
+      : `<testsuite tests="2"><testcase name="ok"/><testcase name="ok2"/></testsuite>`;
   const script = [
     "const fs = require('fs');",
     "fs.mkdirSync('reports', { recursive: true });",
@@ -75,7 +77,7 @@ test("declared argv creates a run with parsed JUnit and coverage, copies artifac
   }
 });
 
-test("recordAgentRun deriva el resultado del artefacto y lo marca como auto-declarado", () => {
+test("recordAgentRun deriva el resultado del artefacto y lo marca como auto-declarado", async () => {
   const { repoRoot, service, store, cleanup } = setup();
   try {
     mkdirSync(repoRoot, { recursive: true });
@@ -85,7 +87,7 @@ test("recordAgentRun deriva el resultado del artefacto y lo marca como auto-decl
     writeFileSync(coberturaPath, `<coverage line-rate="0.8" branch-rate="0.5"/>`);
     store.saveRepo("fixture", { profiles: [], suites: {} });
 
-    const run = service.recordAgentRun({ repo: "fixture", suite: "unit", profile: "ci", junitPath, coberturaPath });
+    const run = await service.recordAgentRun({ repo: "fixture", suite: "unit", profile: "ci", junitPath, coberturaPath });
 
     assert.equal(run.source, "agent");
     assert.equal(run.status, "failed");
@@ -100,7 +102,60 @@ test("recordAgentRun deriva el resultado del artefacto y lo marca como auto-decl
   }
 });
 
-test("recordAgentRun no persiste si el JUnit es ilegible o si un artefacto queda fuera de una raíz confiable", () => {
+test("harness and agent runs persist cases.json and advertise the saved case count", async () => {
+  const { repoRoot, service, store, cleanup } = setup();
+  try {
+    writeFixtureRepo(repoRoot, { threeCases: true });
+    store.saveRepo("fixture", { profiles: [{ name: "dev", variables: {} }], suites: { unit: UNIT } });
+    const started = await service.start({ kind: "suites", repo: "fixture", profile: "dev", suites: ["unit"] });
+    await service.waitFor(started.runIds[0]);
+    const harnessRun = service.getRun(started.runIds[0])!;
+
+    assert.deepEqual(harnessRun.cases, { total: 3, truncated: false });
+    assert.equal(store.readCases(harnessRun.runId)?.cases.length, 3);
+
+    const junitPath = join(repoRoot, "agent-junit.xml");
+    writeFileSync(junitPath, `<testsuites><testcase name="one"/><testcase name="two"/><testcase name="three"/></testsuites>`);
+    const agentRun = await service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath });
+
+    assert.deepEqual(agentRun.cases, { total: 3, truncated: false });
+    assert.equal(store.readCases(agentRun.runId)?.cases.length, 3);
+  } finally {
+    cleanup();
+  }
+});
+
+test("harness and agent runs derive their commit through the injected git seam", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-trigger-svc-"));
+  const repoRoot = join(dir, "repo");
+  const store = createHarnessStore({ directory: join(dir, "data"), repos: () => ["fixture"] });
+  const gitCalls: string[] = [];
+  const service = createTestHarnessService({
+    store,
+    resolveCwd: () => ({ cwd: repoRoot, real: true }),
+    trustedRoots: () => [realpathSync(dir)],
+    git: async (cwd, args) => { gitCalls.push(`${cwd}:${args.join(" ")}`); return args.includes("--short") ? "feed123" : "feat/origin"; },
+    listLaunches: () => [],
+  });
+  try {
+    writeFixtureRepo(repoRoot);
+    store.saveRepo("fixture", { profiles: [{ name: "dev", variables: {} }], suites: { unit: UNIT } });
+    const started = await service.start({ kind: "suites", repo: "fixture", profile: "dev", suites: ["unit"] });
+    await service.waitFor(started.runIds[0]);
+    assert.equal(service.getRun(started.runIds[0])?.trigger?.commit, "feed123");
+
+    const junitPath = join(repoRoot, "agent-junit.xml");
+    writeFileSync(junitPath, `<testsuite><testcase name="ok"/></testsuite>`);
+    const agentRun = await service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath });
+    assert.equal(agentRun.trigger?.commit, "feed123");
+    assert.ok(gitCalls.some((call) => call.startsWith(realpathSync(join(repoRoot, "svc")))));
+    assert.ok(gitCalls.some((call) => call.startsWith(realpathSync(repoRoot))));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recordAgentRun no persiste si el JUnit es ilegible o si un artefacto queda fuera de una raíz confiable", async () => {
   const { dir, repoRoot, service, store, cleanup } = setup();
   const outside = mkdtempSync(join(tmpdir(), "ronin-agent-outside-"));
   try {
@@ -108,20 +163,20 @@ test("recordAgentRun no persiste si el JUnit es ilegible o si un artefacto queda
     store.saveRepo("fixture", { profiles: [], suites: {} });
     const unreadable = join(repoRoot, "bad.xml");
     writeFileSync(unreadable, "<html/>");
-    assert.throws(() => service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: unreadable }), /JUnit/i);
+    await assert.rejects(service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: unreadable }), /JUnit/i);
     assert.equal(store.listRuns().length, 0);
-    assert.throws(() => service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: repoRoot }), /archivo regular/i);
+    await assert.rejects(service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: repoRoot }), /archivo regular/i);
     assert.equal(store.listRuns().length, 0);
 
     const tooSmall = createTestHarnessService({ store, trustedRoots: () => [realpathSync(dir)], maxAgentArtifactBytes: 64 });
     const largeButValid = join(repoRoot, "large.xml");
     writeFileSync(largeButValid, `<testsuite tests="1"><testcase name="ok"/></testsuite>${" ".repeat(128)}`);
-    assert.throws(() => tooSmall.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: largeButValid }), /demasiado grande/i);
+    await assert.rejects(tooSmall.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: largeButValid }), /demasiado grande/i);
     assert.equal(store.listRuns().length, 0);
 
     const outsideJUnit = join(outside, "junit.xml");
     writeFileSync(outsideJUnit, `<testsuite tests="1"><testcase name="ok"/></testsuite>`);
-    assert.throws(() => service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: outsideJUnit }), /raíz confiable/i);
+    await assert.rejects(service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath: outsideJUnit }), /raíz confiable/i);
     assert.equal(store.listRuns().length, 0);
     assert.ok(realpathSync(dir));
   } finally {
@@ -264,13 +319,13 @@ test("matrix shows unconfigured, blocked and latest terminal state per suite wit
     // el journal es la fuente: una instancia nueva ve lo mismo
     const again = createTestHarnessService({ store: createHarnessStore({ directory: store.directory, repos: () => ["fixture", "other"] }), resolveCwd: () => ({ cwd: repoRoot, real: true }) });
     assert.equal(again.matrix()[0].cells.unit.state, "passed");
-    assert.equal(readdirSync(store.artifactsDir(runIds[0])).length, 2);
+    assert.equal(readdirSync(store.artifactsDir(runIds[0])).length, 3);
   } finally {
     cleanup();
   }
 });
 
-test("matrix transports the source of an agent-reported latest run", () => {
+test("matrix transports the source of an agent-reported latest run", async () => {
   const { repoRoot, service, store, cleanup } = setup();
   try {
     mkdirSync(repoRoot, { recursive: true });
@@ -278,7 +333,7 @@ test("matrix transports the source of an agent-reported latest run", () => {
     writeFileSync(junitPath, `<testsuite tests="1"><testcase name="ok"/></testsuite>`);
     store.saveRepo("fixture", { profiles: [{ name: "dev" }], suites: { unit: UNIT } });
 
-    service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath });
+    await service.recordAgentRun({ repo: "fixture", suite: "unit", junitPath });
 
     assert.equal(service.matrix()[0].cells.unit.source, "agent");
   } finally {

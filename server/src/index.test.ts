@@ -1080,7 +1080,7 @@ async function harnessApp() {
   const dir = mkdtempSync(join(tmpdir(), "ronin-api-harness-"));
   const store = createHarnessStore({ directory: dir, repos: () => ["api"] });
   const harness = createTestHarnessService({ store, resolveCwd: () => ({ cwd: dir, real: true }) });
-  return { app: createApp({ harness }), harness, dir };
+  return { app: createApp({ harness }), harness, store, dir };
 }
 
 test("POST /api/tests/runs rejects a free shell command and accepts a declared selection with 202", async () => {
@@ -1102,6 +1102,27 @@ test("POST /api/tests/runs rejects a free shell command and accepts a declared s
     assert.equal((detail.body as any).status, "blocked"); // suite unit sin configurar
     const missing = await invokeRequest(app, "GET", `/api/tests/runs/run-nope`);
     assert.equal(missing.status, 404);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("GET /api/tests/runs/:id/cases serves saved cases and distinguishes missing runs from historical runs", async () => {
+  const { app, store, dir } = await harnessApp();
+  try {
+    store.upsertRun({ runId: "run-with-cases", repo: "api", suite: "unit", profile: "dev", status: "passed", createdAt: "2026-09-14T00:00:00.000Z" });
+    store.writeCases("run-with-cases", { runId: "run-with-cases", cases: [{ id: "::ok#0", name: "ok", status: "passed" }], truncated: false });
+    store.upsertRun({ runId: "run-historical", repo: "api", suite: "unit", profile: "dev", status: "passed", createdAt: "2026-09-13T00:00:00.000Z" });
+
+    const found = await invokeRequest(app, "GET", "/api/tests/runs/run-with-cases/cases");
+    assert.equal(found.status, 200);
+    assert.equal((found.body as any).cases[0].name, "ok");
+    const historical = await invokeRequest(app, "GET", "/api/tests/runs/run-historical/cases");
+    assert.equal(historical.status, 404);
+    assert.equal((historical.body as any).code, "CASES_NOT_FOUND");
+    const missing = await invokeRequest(app, "GET", "/api/tests/runs/run-missing/cases");
+    assert.equal(missing.status, 404);
+    assert.equal((missing.body as any).code, "RUN_NOT_FOUND");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
