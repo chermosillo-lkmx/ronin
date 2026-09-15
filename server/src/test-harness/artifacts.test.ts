@@ -23,6 +23,32 @@ test("summarizeJUnit walks nested testsuites and counts errors and skips (pytest
   assert.equal(result.failures[0].message, "kaboom");
 });
 
+test("summarizeJUnit includes loose node:test cases and exposes normalized case detail", () => {
+  const result = summarizeJUnit(`<?xml version="1.0"?>
+<testsuites>
+  <testcase name="a" time="0.0014"/>
+  <testcase name="b" classname="node.module" time="1.2346"><failure message="m">stack trace</failure><system-out>diagnostic output</system-out></testcase>
+  <testsuite name="nested"><testcase name="c"><skipped/></testcase></testsuite>
+</testsuites>`);
+
+  assert.deepEqual(result.totals, { total: 3, passed: 1, failed: 1, skipped: 1, errors: 0 });
+  assert.deepEqual(result.cases, [
+    { id: "::a#0", name: "a", status: "passed", durationMs: 1 },
+    { id: "node.module::b#1", name: "b", classname: "node.module", status: "failed", durationMs: 1235, message: "m", detail: "stack trace", stdout: "diagnostic output" },
+    { id: "::c#2", name: "c", status: "skipped" },
+  ]);
+  assert.equal(result.casesTruncated, false);
+});
+
+test("summarizeJUnit caps persisted cases while still counting the full report", () => {
+  const cases = Array.from({ length: 5_001 }, (_, i) => `<testcase name="case-${i}"/>`).join("");
+  const result = summarizeJUnit(`<testsuites>${cases}</testsuites>`);
+
+  assert.equal(result.totals.total, 5_001);
+  assert.equal(result.cases.length, 5_000);
+  assert.equal(result.casesTruncated, true);
+});
+
 test("summarizeJUnit rejects a document without testsuite", () => {
   assert.throws(() => summarizeJUnit("<html/>"), /JUnit/);
   assert.throws(() => summarizeJUnit("not xml <"), /JUnit/);

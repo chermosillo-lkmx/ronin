@@ -71,6 +71,34 @@ export interface FailedCase {
   message: string;
 }
 
+export type TestCaseStatus = "passed" | "failed" | "error" | "skipped";
+
+export interface TestCase {
+  id: string;
+  name: string;
+  classname?: string;
+  status: TestCaseStatus;
+  durationMs?: number;
+  message?: string;
+  detail?: string;
+  stdout?: string;
+}
+
+export interface TestCasesFile {
+  runId: string;
+  cases: TestCase[];
+  truncated: boolean;
+}
+
+export interface TestTrigger {
+  session?: string;
+  ticket?: string;
+  commit?: string;
+  branch?: string;
+  worktree?: string;
+  source: "explicit" | "derived" | "mixed";
+}
+
 export interface Run {
   runId: string;
   /** Ausente equivale a harness para que el journal histórico conserve su procedencia. */
@@ -92,6 +120,8 @@ export interface Run {
   totalsReason?: string;
   coverage?: Coverage;
   failures?: FailedCase[];
+  cases?: { total: number; truncated: boolean };
+  trigger?: TestTrigger;
   stdout?: string;
   stderr?: string;
   /** Copias locales bajo test-artifacts/<runId>/ — nunca rutas dentro del repo. */
