@@ -1,4 +1,4 @@
-import type { EngineChoice, KnowledgeBaseGeneration, KnowledgeBaseInfo, TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionCleanupReport, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
+import type { EngineChoice, KnowledgeBaseGeneration, KnowledgeBaseInfo, TestCasesFile, TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionCleanupReport, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
 
 /** Carries the server's {path, code} (T11/T13) so a save failure can be shown per-field, or as
  *  a clear "someone is mid-flight on this stage" message (STAGE_IN_FLIGHT, T13), not just text. */
@@ -555,6 +555,15 @@ export async function getTestsRuns(filter: { repo?: string; suite?: TestSuite; l
 export async function getTestsRun(runId: string): Promise<TestRun | null> {
   try {
     const r = await fetch(`/api/tests/runs/${encodeURIComponent(runId)}`);
+    return r.ok ? r.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getTestsRunCases(runId: string): Promise<TestCasesFile | null> {
+  try {
+    const r = await fetch(`/api/tests/runs/${encodeURIComponent(runId)}/cases`);
     return r.ok ? r.json() : null;
   } catch {
     return null;

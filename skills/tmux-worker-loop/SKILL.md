@@ -639,6 +639,7 @@ After `===IMPL:CYCLE-DONE===`:
 - Confirm the KB files actually mention the new flow (read them; don't trust the claim).
 - Re-run every `$TEST_CMD_*` declared in each `harness.<slot>.env`; report the format each stack
   actually emits rather than assuming pytest.
+- When `reportar_pruebas` is available, pass the requirement `ticket` and the current Ronin `session` so the saved run can be traced back to both.
 - Read `DEPS_OK` and `MISSING` from every slot contract. Missing affordances are declared limits,
   not silently successful checks.
 - Run `verify-rgr.sh` one final time and confirm its `## GATE` result before reporting success.

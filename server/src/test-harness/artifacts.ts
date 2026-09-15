@@ -1,7 +1,7 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
-import type { Coverage, FailedCase, TestTotals } from "./model.js";
+import type { Coverage, FailedCase, TestCase, TestCaseStatus, TestTotals } from "./model.js";
 
 /**
  * Lectura de artefactos (JUnit / Cobertura XML / LCOV) y redacción de evidencia. Este módulo no
@@ -13,10 +13,13 @@ import type { Coverage, FailedCase, TestTotals } from "./model.js";
 export interface JUnitSummary {
   totals: TestTotals;
   failures: FailedCase[];
+  cases: TestCase[];
+  casesTruncated: boolean;
 }
 
 export const MAX_OUTPUT_BYTES = 64 * 1024;
 export const MAX_FAILURES = 200;
+export const MAX_CASES = 5_000;
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -57,44 +60,76 @@ function messageOf(node: unknown): string {
   return "";
 }
 
-function walkSuites(node: Node, totals: TestTotals, failures: FailedCase[]): void {
-  for (const suite of asArray(node.testsuite as Node | Node[] | undefined)) {
-    for (const tc of asArray(suite.testcase as Node | Node[] | undefined)) {
-      totals.total++;
-      const name = attr(tc, "name") ?? "(sin nombre)";
-      const classname = attr(tc, "classname");
-      const record = (message: string): FailedCase => ({ name, ...(classname ? { classname } : {}), message });
-      if (tc.failure !== undefined) {
-        totals.failed++;
-        if (failures.length < MAX_FAILURES) failures.push(record(messageOf(asArray(tc.failure)[0])));
-      } else if (tc.error !== undefined) {
-        totals.errors++;
-        if (failures.length < MAX_FAILURES) failures.push(record(messageOf(asArray(tc.error)[0])));
-      } else if (tc.skipped !== undefined) {
-        totals.skipped++;
-      } else {
-        totals.passed++;
-      }
+function textOf(node: unknown): string {
+  if (typeof node === "string") return node.slice(0, 4000);
+  if (typeof node === "object" && node !== null) {
+    const text = (node as Node)["#text"];
+    return (typeof text === "string" ? text : "").slice(0, 4000);
+  }
+  return "";
+}
+
+function walkSuites(node: Node, totals: TestTotals, failures: FailedCase[], cases: TestCase[]): void {
+  for (const tc of asArray(node.testcase as Node | Node[] | undefined)) {
+    const index = totals.total++;
+    const name = attr(tc, "name") ?? "(sin nombre)";
+    const classname = attr(tc, "classname");
+    let status: TestCaseStatus = "passed";
+    let resultNode: unknown;
+    if (tc.failure !== undefined) {
+      status = "failed";
+      resultNode = asArray(tc.failure)[0];
+      totals.failed++;
+    } else if (tc.error !== undefined) {
+      status = "error";
+      resultNode = asArray(tc.error)[0];
+      totals.errors++;
+    } else if (tc.skipped !== undefined) {
+      status = "skipped";
+      totals.skipped++;
+    } else {
+      totals.passed++;
     }
-    walkSuites(suite, totals, failures);
+    const message = resultNode === undefined ? "" : messageOf(resultNode);
+    if ((status === "failed" || status === "error") && failures.length < MAX_FAILURES) {
+      failures.push({ name, ...(classname ? { classname } : {}), message });
+    }
+    if (cases.length < MAX_CASES) {
+      const duration = Number(attr(tc, "time"));
+      const detail = resultNode === undefined ? "" : textOf(resultNode);
+      const stdout = textOf(asArray(tc["system-out"])[0]);
+      cases.push({
+        id: `${classname ?? ""}::${name}#${index}`,
+        name,
+        ...(classname ? { classname } : {}),
+        status,
+        ...(Number.isFinite(duration) ? { durationMs: Math.round(duration * 1000) } : {}),
+        ...(message ? { message } : {}),
+        ...(detail ? { detail } : {}),
+        ...(stdout ? { stdout } : {}),
+      });
+    }
+  }
+  for (const suite of asArray(node.testsuite as Node | Node[] | undefined)) {
+    walkSuites(suite, totals, failures, cases);
   }
 }
 
 export function summarizeJUnit(text: string): JUnitSummary {
   const doc = parseXml(text, "JUnit");
-  const root: Node = {};
+  let root: Node;
   if (doc.testsuites !== undefined) {
-    const ts = asArray(doc.testsuites as Node | Node[]);
-    root.testsuite = ts.flatMap((t) => asArray(t.testsuite as Node | Node[] | undefined));
+    root = { testsuite: doc.testsuites };
   } else if (doc.testsuite !== undefined) {
-    root.testsuite = doc.testsuite;
+    root = { testsuite: doc.testsuite };
   } else {
     throw new Error("JUnit inválido: no hay <testsuite>");
   }
   const totals: TestTotals = { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0 };
   const failures: FailedCase[] = [];
-  walkSuites(root, totals, failures);
-  return { totals, failures };
+  const cases: TestCase[] = [];
+  walkSuites(root, totals, failures, cases);
+  return { totals, failures, cases, casesTruncated: totals.total > cases.length };
 }
 
 function pct(rate: number): number {

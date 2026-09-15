@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createHarnessStore } from "./test-harness/config.js";
 import { createTestHarnessService } from "./test-harness/service.js";
-import { handleMcp } from "./mcp.js";
+import { handleMcp, MCP_TOOLS } from "./mcp.js";
 import { ensureCapabilityToken } from "./capability.js";
 import { createApp } from "./index.js";
 
@@ -127,6 +127,27 @@ test("reportar_pruebas responde los números extraídos y estado_pruebas deja vi
     assert.match(state.result.content[0].text, /procedencia: agent/);
     assert.match(state.result.content[0].text, /fallos: 1/);
     assert.ok(state.result.content[0].text.length < 25_000);
+  } finally {
+    cleanup();
+  }
+});
+
+test("reportar_pruebas accepts explicit origin fields, persists them and mentions the origin", async () => {
+  const { root, store, harness, cleanup } = setup();
+  try {
+    const junitPath = join(root, "origin-junit.xml");
+    writeFileSync(junitPath, `<testsuite><testcase name="ok"/></testsuite>`);
+    const response: any = await handleMcp({
+      jsonrpc: "2.0", id: 8, method: "tools/call",
+      params: { name: "reportar_pruebas", arguments: { repo: "fixture", suite: "unit", junitPath, session: "cowork-origin", ticket: "CU-42", commit: "abc1234" } },
+    }, deps(harness));
+
+    assert.equal(response.result.isError, undefined);
+    assert.match(response.result.content[0].text, /origen: sesión cowork-origin · ticket CU-42 · commit abc1234/);
+    assert.deepEqual(store.listRuns()[0].trigger, { session: "cowork-origin", ticket: "CU-42", commit: "abc1234", source: "explicit" });
+    assert.equal((MCP_TOOLS[0].inputSchema.properties as any).ticket.type, "string");
+    assert.equal((MCP_TOOLS[0].inputSchema.properties as any).commit.type, "string");
+    assert.equal((MCP_TOOLS[0].inputSchema.properties as any).session.type, "string");
   } finally {
     cleanup();
   }

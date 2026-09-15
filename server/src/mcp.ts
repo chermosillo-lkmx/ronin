@@ -38,6 +38,9 @@ const REPORT_SCHEMA = {
     junitPath: { type: "string", description: "Ruta absoluta al junit.xml generado por la suite." },
     coberturaPath: { type: "string", description: "Ruta absoluta opcional a cobertura Cobertura XML." },
     profile: { type: "string", description: "Perfil con el que el agente ejecutó la suite." },
+    ticket: { type: "string", description: "Ticket que originó la corrida, si se conoce." },
+    commit: { type: "string", description: "Commit que originó la corrida, si se conoce." },
+    session: { type: "string", description: "Sesión de Ronin que originó la corrida, si se conoce." },
   },
   required: ["repo", "suite", "junitPath"],
   additionalProperties: false,
@@ -76,6 +79,15 @@ function sourceOf(run: Run): "harness" | "agent" {
   return run.source ?? "harness";
 }
 
+function originText(run: Run): string {
+  const parts = [
+    run.trigger?.session ? `sesión ${run.trigger.session}` : "",
+    run.trigger?.ticket ? `ticket ${run.trigger.ticket}` : "",
+    run.trigger?.commit ? `commit ${run.trigger.commit}` : "",
+  ].filter(Boolean);
+  return parts.length ? `origen: ${parts.join(" · ")}` : "";
+}
+
 /** Un resumen intencionalmente pequeño: sin stdout/stderr ni detalles de cada fallo. */
 function statusText(harness: TestHarnessService, repoFilter?: string): string {
   const repos = harness.readPublicConfig().map((repo) => repo.repo);
@@ -102,7 +114,7 @@ function statusText(harness: TestHarnessService, repoFilter?: string): string {
         ? `${run.totals.total} total, ${run.totals.passed} pasaron, ${run.totals.failed + run.totals.errors} fallaron, ${run.totals.skipped} omitidas`
         : "sin totales";
       const failures = Math.max(run.failures?.length ?? 0, (run.totals?.failed ?? 0) + (run.totals?.errors ?? 0));
-      lines.push(`${repo}/${run.suite}: ${run.status}; ${run.finishedAt ?? run.createdAt}; ${totals}; cobertura ${coverageText(run.coverage)}; fallos: ${failures}; procedencia: ${sourceOf(run)}`);
+      lines.push(`${repo}/${run.suite}: ${run.status}; ${run.finishedAt ?? run.createdAt}; ${totals}; cobertura ${coverageText(run.coverage)}; fallos: ${failures}; procedencia: ${sourceOf(run)}${originText(run) ? `; ${originText(run)}` : ""}`);
     }
   }
   // 200 filas sigue muy por debajo de 25k tokens; este corte conserva esa cota
@@ -112,16 +124,19 @@ function statusText(harness: TestHarnessService, repoFilter?: string): string {
   return visible.join("\n") || "sin corridas registradas";
 }
 
-function report(args: JsonRecord, harness: TestHarnessService): string {
+async function report(args: JsonRecord, harness: TestHarnessService): Promise<string> {
   const repo = requiredString(args, "repo");
   const suite = args.suite;
   if (!isSuite(suite)) throw new HarnessError("suite debe ser unit, e2e, api o browser", "TOOL_INPUT_INVALID", 400);
   const junitPath = requiredString(args, "junitPath");
   const coberturaPath = args.coberturaPath === undefined ? undefined : requiredString(args, "coberturaPath");
   const profile = args.profile === undefined ? undefined : requiredString(args, "profile");
-  const run = harness.recordAgentRun({ repo, suite: suite as TestSuite, junitPath, ...(coberturaPath ? { coberturaPath } : {}), ...(profile ? { profile } : {}) });
+  const ticket = args.ticket === undefined ? undefined : requiredString(args, "ticket");
+  const commit = args.commit === undefined ? undefined : requiredString(args, "commit");
+  const session = args.session === undefined ? undefined : requiredString(args, "session");
+  const run = await harness.recordAgentRun({ repo, suite: suite as TestSuite, junitPath, ...(coberturaPath ? { coberturaPath } : {}), ...(profile ? { profile } : {}), ...(ticket ? { ticket } : {}), ...(commit ? { commit } : {}), ...(session ? { session } : {}) });
   const totals = run.totals!;
-  return `registrado ${run.runId}: ${totals.passed} pasaron, ${totals.failed + totals.errors} fallaron, cobertura ${coverageText(run.coverage)}`;
+  return `registrado ${run.runId}: ${totals.passed} pasaron, ${totals.failed + totals.errors} fallaron, cobertura ${coverageText(run.coverage)}${originText(run) ? `; ${originText(run)}` : ""}`;
 }
 
 /** Adaptador JSON-RPC puro: no toca HTTP, sólo usa las dependencias inyectadas. */
@@ -151,7 +166,7 @@ export async function handleMcp(message: unknown, deps: McpDependencies): Promis
   try {
     const name = requiredString(params, "name");
     const args = isRecord(params.arguments) ? params.arguments : {};
-    if (name === "reportar_pruebas") return { jsonrpc: "2.0", id, result: toolResult(report(args, deps.harness)) };
+    if (name === "reportar_pruebas") return { jsonrpc: "2.0", id, result: toolResult(await report(args, deps.harness)) };
     if (name === "estado_pruebas") {
       const repo = params.arguments !== undefined ? (args.repo === undefined ? undefined : requiredString(args, "repo")) : undefined;
       return { jsonrpc: "2.0", id, result: toolResult(statusText(deps.harness, repo)) };

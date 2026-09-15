@@ -292,6 +292,34 @@ export interface TestTotals {
   errors: number;
 }
 
+export type TestCaseStatus = "passed" | "failed" | "error" | "skipped";
+
+export interface TestCase {
+  id: string;
+  name: string;
+  classname?: string;
+  status: TestCaseStatus;
+  durationMs?: number;
+  message?: string;
+  detail?: string;
+  stdout?: string;
+}
+
+export interface TestCasesFile {
+  runId: string;
+  cases: TestCase[];
+  truncated: boolean;
+}
+
+export interface TestTrigger {
+  session?: string;
+  ticket?: string;
+  commit?: string;
+  branch?: string;
+  worktree?: string;
+  source: "explicit" | "derived" | "mixed";
+}
+
 export interface TestRun {
   runId: string;
   source?: "harness" | "agent";
@@ -310,6 +338,8 @@ export interface TestRun {
   totalsReason?: string;
   coverage?: TestCoverage;
   failures?: { name: string; classname?: string; message: string }[];
+  cases?: { total: number; truncated: boolean };
+  trigger?: TestTrigger;
   stdout?: string;
   stderr?: string;
   artifacts?: string[];

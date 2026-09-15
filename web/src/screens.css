@@ -329,7 +329,29 @@
 .ron-tests-meta { display: grid; grid-template-columns: max-content 1fr; gap: 4px var(--space-3); margin: 0 0 var(--space-3); font-size: 13px; }
 .ron-tests-meta dt { color: var(--color-neutral-500); }
 .ron-tests-meta dd { margin: 0; overflow-wrap: anywhere; }
+.ron-tests-origin-worktree { display: block; color: var(--color-neutral-500); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ron-tests-origin-source { margin-left: 6px; color: var(--color-neutral-500); font-size: 10px; }
 .ron-tests-artifact { margin-right: var(--space-2); }
+.ron-tests-cases { margin: 0 0 var(--space-3); padding-top: var(--space-2); border-top: 1px solid var(--color-divider); }
+.ron-tests-cases-head { display: flex; align-items: center; gap: 6px; margin-bottom: var(--space-2); font-size: 11px; }
+.ron-tests-cases-head > button { padding: 2px 6px; border: 0; border-radius: 4px; color: var(--color-neutral-500); background: transparent; cursor: pointer; }
+.ron-tests-cases-head > button:hover, .ron-tests-cases-head > button.selected { color: var(--color-text); background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+.ron-tests-cases-legend { display: flex; align-items: center; gap: 4px; color: var(--color-neutral-500); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ron-tests-cases-legend i { width: 7px; height: 7px; border-radius: 2px; background: var(--color-neutral-500); }
+.ron-tests-cases-legend i[data-status="passed"], .ron-tests-case[data-status="passed"] { background: var(--status-ok); }
+.ron-tests-cases-legend i[data-status="failed"], .ron-tests-case[data-status="failed"] { background: var(--status-fail); }
+.ron-tests-cases-legend i[data-status="error"], .ron-tests-case[data-status="error"] { background: var(--status-fail); border: 1px solid var(--color-text); }
+.ron-tests-cases-legend i[data-status="skipped"], .ron-tests-case[data-status="skipped"] { background: var(--status-warn); }
+.ron-tests-cases-body { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(190px, 1fr); gap: var(--space-3); align-items: start; }
+.ron-tests-case-map { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 2px; max-height: 240px; overflow-y: auto; }
+.ron-tests-case { width: 10px; height: 10px; box-sizing: border-box; flex: 0 0 10px; padding: 0; border: 0; border-radius: 2px; cursor: pointer; transition: transform .1s ease, box-shadow .1s ease; }
+.ron-tests-case:hover, .ron-tests-case:focus-visible { transform: scale(1.35); position: relative; z-index: 1; }
+.ron-tests-case.selected { box-shadow: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent); }
+.ron-tests-case-detail { min-width: 0; display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+.ron-tests-case-detail > strong, .ron-tests-case-detail > p { margin: 0; overflow-wrap: anywhere; }
+.ron-tests-case-detail > code { color: var(--color-neutral-500); font-size: 10px; overflow-wrap: anywhere; }
+.ron-tests-case-detail dl { display: flex; gap: 6px; margin: 0; color: var(--color-neutral-500); }.ron-tests-case-detail dd { margin: 0; color: var(--color-text); }
+.ron-tests-case-detail pre { max-height: 150px; margin: 0; padding: 6px; overflow: auto; border-radius: 4px; background: color-mix(in srgb, var(--color-text) 5%, transparent); font-size: 10px; white-space: pre-wrap; }
 .ron-tests-failures ul { margin: var(--space-1) 0 0; padding-left: var(--space-4); font-size: 13px; }
 .ron-tests-output pre {
   margin: var(--space-2) 0 0; padding: var(--space-2); max-height: 320px; overflow: auto; font-size: 11px;
@@ -393,3 +415,4 @@
 .ron-tests-output { max-height: 220px; overflow-y: auto; }
 .ron-tests-run-detail { min-height: 0; }
 .ron-tests-section-head .n-btn-icon { margin-left: auto; }
+@media (max-width: 760px) { .ron-tests-cases-body { grid-template-columns: 1fr; } }
