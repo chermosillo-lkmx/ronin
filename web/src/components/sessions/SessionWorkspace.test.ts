@@ -159,3 +159,18 @@ test("nextSelectedPane: con un pane activo por ventana, gana el de la ventana ac
   assert.doesNotMatch(tags[0], /data-active="true"/);
   assert.match(tags[1], /data-active="true"/);
 });
+
+test("SessionInspector: con datos de memoria muestra el estado de la destilación y el repo", () => {
+  const html = renderToString(createElement(SessionInspector, {
+    session: { ...sessionFixture(), memory: { repo: "acme-api", pending: 1, distill: { status: "done", repo: "acme-api", at: 1, proposed: 1 } } },
+    diagnostic: null,
+  }));
+  assert.match(html, /1 propuesta para revisar/);
+  assert.match(html, /Destilar aprendizajes/);
+  assert.match(html, /<dd>acme-api<\/dd>/);
+});
+
+test("SessionInspector: sin datos de memoria no pinta el panel de destilación", () => {
+  const html = renderToString(createElement(SessionInspector, { session: sessionFixture(), diagnostic: null }));
+  assert.doesNotMatch(html, /Destilar aprendizajes/);
+});

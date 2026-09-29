@@ -54,3 +54,51 @@ test("closeTmuxSession solicita cleanup y devuelve el reporte del servidor", asy
     globalThis.fetch = originalFetch;
   }
 });
+
+test("memoria: cada acción llama a la ruta, el método y el cuerpo correctos", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  const view = { repo: "acme-api", enabled: true, globalEnabled: true, entries: [], kbSuggestions: [], preview: { text: "", bytes: 0, maxBytes: 2048, omitted: 0 } };
+  try {
+    globalThis.fetch = async (input, init) => {
+      calls.push({ url: String(input), method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      return new Response(JSON.stringify(view));
+    };
+    assert.deepEqual(await api.getRepoMemory("acme-api"), view);
+    await api.setRepoMemoryEnabled("acme-api", false);
+    await api.addRepoMemory("acme-api", { text: "Tests: usar make test-unit", kind: "comando" });
+    await api.resolveRepoMemory("acme-api", "m_1", "approve");
+    await api.resolveRepoMemory("acme-api", "m_2", "edit", "Texto editado");
+    await api.resolveRepoMemory("acme-api", "m_3", "discard");
+    await api.deleteRepoMemory("acme-api", "k_1");
+    assert.deepEqual(calls, [
+      { url: "/api/repos/acme-api/memory", method: "GET", body: undefined },
+      { url: "/api/repos/acme-api/memory/enabled", method: "PUT", body: { enabled: false } },
+      { url: "/api/repos/acme-api/memory", method: "POST", body: { text: "Tests: usar make test-unit", kind: "comando" } },
+      { url: "/api/repos/acme-api/memory/m_1", method: "PATCH", body: { action: "approve" } },
+      { url: "/api/repos/acme-api/memory/m_2", method: "PATCH", body: { action: "edit", text: "Texto editado" } },
+      { url: "/api/repos/acme-api/memory/m_3", method: "PATCH", body: { action: "discard" } },
+      { url: "/api/repos/acme-api/memory/k_1", method: "DELETE", body: undefined },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("memoria y destilación: un error del servidor llega como Error con su mensaje", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "sólo se puede aprobar una entrada pendiente", code: "MEMORY_INVALID" }), { status: 409 });
+    await assert.rejects(api.resolveRepoMemory("acme-api", "m_1", "approve"), /sólo se puede aprobar una entrada pendiente/);
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "ya hay una destilación en curso para esta sesión", code: "DISTILL_RUNNING" }), { status: 409 });
+    await assert.rejects(api.distillSession("cowork-csv"), /ya hay una destilación en curso/);
+    globalThis.fetch = async (input, init) => {
+      assert.equal(input, "/api/sessions/cowork-csv/distill");
+      assert.equal(init?.method, "POST");
+      return new Response(JSON.stringify({ status: "running", repo: "acme-api", at: 1 }), { status: 202 });
+    };
+    assert.deepEqual(await api.distillSession("cowork-csv"), { status: "running", repo: "acme-api", at: 1 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
