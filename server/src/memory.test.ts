@@ -40,6 +40,23 @@ test("normalizeMemoryText quita caracteres de control y colapsa espacios; dedupe
   assert.notEqual(dedupeKey("usar make"), dedupeKey("usar pnpm"));
 });
 
+test("normalizeMemoryText quita caracteres de formato Unicode (bidi, ancho cero) en propuestas y altas manuales", () => {
+  assert.equal(normalizeMemoryText("usar\u202E make\u200B test\u2066-unit\uFEFF"), "usar make test-unit");
+  assert.equal(dedupeKey("usar make\u200B test-unit\u202E"), dedupeKey("usar make test-unit"));
+  const { store, cleanup } = fixture();
+  try {
+    store.add("acme-api", { text: "Tests:\u202E usar make\u200B test-unit", kind: "comando" });
+    assert.equal(store.read("acme-api").entries[0].text, "Tests: usar make test-unit");
+    const added = store.propose("acme-api", [
+      { text: "Tests: usar\u200B make test-unit", kind: "comando" },
+      { text: "El puerto\u202E 5432\u200D lo usa docker", kind: "trampa" },
+    ], "cowork-a");
+    assert.deepEqual(added.map((e) => e.text), ["El puerto 5432 lo usa docker"]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("un repo sin archivo arranca habilitado y vacío, sin escribir nada", () => {
   const { directory, store, cleanup } = fixture();
   try {

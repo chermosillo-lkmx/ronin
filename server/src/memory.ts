@@ -92,9 +92,9 @@ export function isMemoryKind(value: unknown): value is MemoryKind {
 
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
-/** Sin caracteres de control y con los espacios colapsados: una entrada es una sola línea. */
+/** Sin caracteres de control ni de formato Unicode (bidi, ancho cero) y con los espacios colapsados: una entrada es una sola línea. */
 export function normalizeMemoryText(raw: string): string {
-  return raw.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim();
+  return raw.replace(CONTROL_CHARS, " ").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
 }
 
 /** Dos textos que sólo difieren en mayúsculas o espacios son el mismo aprendizaje. */

@@ -164,7 +164,9 @@ La URL de esa configuración es `/mcp?scope=agent`: con ese scope el endpoint s�
 las herramientas de pruebas, así que un worker no puede crear sesiones ni escribir en otras.
 Riesgo residual: un agente que corre con el mismo usuario del sistema aún podría leer el archivo
 del token de capability y llamar al endpoint sin scope; el scope es una barandilla, no un
-aislamiento.
+aislamiento. `scope=agent` oculta las herramientas de memoria, pero un agente que corre con el
+mismo usuario del sistema puede leer el token de capability y llegar a la memoria directamente
+(incluido `POST /api/repos/:repo/memory`, que crea entradas activas).
 
 ### Sesiones por MCP
 
@@ -184,7 +186,8 @@ arrancar, `0600`; el data dir es `COWORK_DATA_DIR` o `server/data`).
 - `memoria_pendiente(repo?)` → aprendizajes pendientes con `id`, `repo`, `text`, `kind` y `source`.
 - `resolver_memoria(id, accion, texto?)` → `accion` es `aprobar`, `descartar` o `editar` (con
   `texto`, que también aprueba). Errores: `MEMORY_NOT_FOUND` y `MEMORY_INVALID`. Ninguna de las dos
-  existe con `scope=agent`: un worker no puede leer ni modificar la memoria.
+  existe con `scope=agent`: un worker no ve ni puede llamar las herramientas de memoria (el token
+  compartido sigue siendo un riesgo residual; ver arriba).
 
 ### Memoria por repo
 

@@ -13,7 +13,7 @@ El usuario la aprueba y cada sesión nueva la recibe al arrancar.
 1. Al terminar un flujo, Ronin propone entre 0 y 5 aprendizajes. Nada entra en la memoria sin aprobación del usuario.
 2. Toda sesión nueva de un repo con memoria activa recibe un bloque de 2 KB como máximo con los aprendizajes aprobados. Ese bloque queda registrado en `launch.json`.
 3. Los aprendizajes de arquitectura no se inyectan: se sugieren a la siguiente regeneración de la knowledge base.
-4. Los agentes lanzados por Ronin (`scope=agent`) no pueden leer ni modificar la memoria.
+4. Los agentes lanzados por Ronin no ven ni pueden llamar las herramientas MCP de memoria (`scope=agent`); el token compartido sigue siendo un riesgo residual.
 
 ## 2. Decisiones
 
