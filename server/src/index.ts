@@ -26,10 +26,10 @@ import {
 } from "./tmux.js";
 import { classifySession } from "./sessions.js";
 import { isSafeSessionName } from "./session-name.js";
-import { readHistory, recordEvent } from "./history.js";
+import { isReplyText, readHistory, recordEvent, recordReply } from "./history.js";
 import { generateReport, listReports, readReport, BadRequest } from "./reports.js";
 import { startReportSchedule } from "./report-schedule.js";
-import { cycleDirForSession } from "./stages.js";
+import { cycleDirForSession, readCycleRepo } from "./stages.js";
 import { realVerifyDriverDeps } from "./verify-driver-deps.js";
 import { startVerifyDriver } from "./verify-driver.js";
 import { startTtyd } from "./ttyd.js";
@@ -144,6 +144,8 @@ export interface CreateAppOptions {
   readTmuxInventory?: typeof readTmuxInventory;
   /** Puerto de sesiones para /mcp; en producción se construye con las dependencias reales. */
   mcpSessions?: McpSessionPort;
+  /** Registro de respuestas del usuario (evento reply); las pruebas lo espían en vez de escribir history.jsonl. */
+  recordReply?: (session: string, text: string) => void;
   /** Costuras de las rutas KB para pruebas HTTP con un repositorio temporal. */
   kb?: {
     listRepos?: typeof listRepos;
@@ -165,6 +167,17 @@ export function runConfiguredClaude(
   run: typeof runClaudeP = runClaudeP,
 ): (prompt: string) => Promise<string> {
   return (prompt) => run(prompt, { timeoutMs: 300_000, maxBytes: 256 * 1024, ...engineInvocation(read()) });
+}
+
+/** Registra una respuesta con el repo del ciclo, si se conoce. Un nombre inseguro se registra sin repo. */
+function recordSessionReplyDefault(session: string, text: string): void {
+  let repo = "";
+  try {
+    repo = readCycleRepo(cycleDirForSession(session)) ?? "";
+  } catch {
+    /* cycleDirForSession rechaza nombres inseguros: sin repo, pero la respuesta se conserva */
+  }
+  recordReply(session, text, repo);
 }
 
 export function createApp(options: CreateAppOptions = {}): express.Express {
@@ -196,6 +209,7 @@ const sessionActions = {
 };
 const performLaunchManagedSession = options.launchManagedSession ?? launchManagedSession;
 const readInventory = options.readTmuxInventory ?? readTmuxInventory;
+const recordSessionReply = options.recordReply ?? recordSessionReplyDefault;
 const trustedRootsApi = options.trustedRoots ?? {
   read: () => ({ roots: trustedRoots(), source: process.env.COWORK_ALLOWED_ROOTS !== undefined ? "env" as const : "settings" as const }),
   save: (input: unknown) => {
@@ -235,6 +249,7 @@ const mcpSessions = options.mcpSessions ?? createSessionPort({
   deliver: (paneId, text, submit) => deliverText(paneId, text, submit),
   capture: (paneIds) => capturePanesTail(paneIds),
   now: () => Date.now(),
+  recordReply: recordSessionReply,
 });
 app.post("/mcp", async (req, res) => {
   // Los agentes que lanza Ronin usan /mcp?scope=agent (agent-mcp.ts): sin puerto de sesiones, así
@@ -829,6 +844,7 @@ app.post("/api/sessions/:name/panes/:paneId/keys", async (req, res) => {
   if (membership === "gone") return res.status(409).json({ error: "el pane ya no existe", code: "PANE_GONE" });
   const submit = req.body?.submit === true;
   await deliverText(paneId, text, submit);
+  if (isReplyText(text, submit)) recordSessionReply(name, text);
   res.json({ ok: true });
 });
 

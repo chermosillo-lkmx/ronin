@@ -983,6 +983,28 @@ test("POST …/panes/:paneId/keys: un %N que ya no existe → 409 PANE_GONE, sin
   });
 });
 
+test("POST …/panes/:paneId/keys registra reply sólo con texto + Enter, nunca teclas sueltas ni una opción de menú", async () => {
+  const token = ensureCapabilityToken();
+  await withIsolatedSocket(async (socket) => {
+    await createSession("t5-reply", "/tmp");
+    const expectedSessionCreatedAt = await liveSessionCreatedAt(socket, "t5-reply");
+    await adoptSession({ session: "t5-reply", confirm: true, repo: "monorepo", expectedSessionCreatedAt });
+    const { stdout } = await pexec("tmux", ["-L", socket, "list-panes", "-t", "t5-reply", "-F", "#{pane_id}"], { env: envWithoutTmux() });
+    const pane = encodeURIComponent(stdout.trim());
+    const replies: Array<[string, string]> = [];
+    const app = createApp({ recordReply: (session, text) => { replies.push([session, text]); } });
+    const send = (body: unknown) => invokeRequest(app, "POST", `/api/sessions/t5-reply/panes/${pane}/keys`, { headers: { "x-ronin-capability": token }, body });
+
+    assert.equal((await send({ text: "echo tecla-suelta" })).status, 200);
+    assert.equal((await send({ text: "2", submit: true })).status, 200);
+    assert.equal((await send({ text: "echo usa make test-unit", submit: true })).status, 200);
+    assert.deepEqual(replies, [["t5-reply", "echo usa make test-unit"]]);
+
+    await releaseAdoption("t5-reply");
+    rmSync(cycleDirForSession("t5-reply"), { recursive: true, force: true });
+  });
+});
+
 // ---- T7: broadcast ----
 
 test("POST …/broadcast: sin confirm:true → 400 CONFIRMATION_REQUIRED; sobre foreign → 403", async () => {
