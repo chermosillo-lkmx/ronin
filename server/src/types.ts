@@ -234,3 +234,26 @@ export interface PreflightCheck {
   detail: string;
   note?: string;   // qué hacer; sólo se rellena cuando level !== "ok"
 }
+
+// ---- Memoria por repo (spec 2026-09-29). Espejo manual en web/src/types.ts ----
+
+export type DistillStatus = "running" | "done" | "failed" | "skipped";
+
+export interface DistillState {
+  status: DistillStatus;
+  repo: string;
+  /** ms epoch del último cambio de estado. */
+  at: number;
+  /** Sólo en failed. */
+  error?: string;
+  /** Sólo en skipped: por qué no se destiló. */
+  reason?: string;
+  /** Sólo en done: entradas nuevas que quedaron pendientes. */
+  proposed?: number;
+}
+
+export interface SessionMemoryInfo {
+  repo: string;
+  pending: number;
+  distill: DistillState | null;
+}

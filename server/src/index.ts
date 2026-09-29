@@ -5,7 +5,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { PORT, REPORT_SCHEDULE, VERIFY_GATE } from "./config.js";
+import { MEMORY, PORT, REPORT_SCHEDULE, VERIFY_GATE } from "./config.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
 import { AdoptCommitError, AdoptValidationError, type AdoptErrorCode } from "./adopt.js";
 import {
@@ -30,6 +30,7 @@ import { isReplyText, readHistory, recordEvent, recordReply } from "./history.js
 import { generateReport, listReports, readReport, BadRequest } from "./reports.js";
 import { startReportSchedule } from "./report-schedule.js";
 import { cycleDirForSession, readCycleRepo } from "./stages.js";
+import { getDefaultDistiller, startMemoryDistiller } from "./memory-distiller.js";
 import { realVerifyDriverDeps } from "./verify-driver-deps.js";
 import { startVerifyDriver } from "./verify-driver.js";
 import { startTtyd } from "./ttyd.js";
@@ -1086,6 +1087,10 @@ async function startDefaultBackground(): Promise<Cleanup> {
     if (VERIFY_GATE) {
       const verifyDriver = startVerifyDriver(realVerifyDriverDeps);
       cleanups.push(() => verifyDriver.stop());
+    }
+    if (MEMORY) {
+      const memoryDistiller = startMemoryDistiller(getDefaultDistiller());
+      cleanups.push(() => memoryDistiller.stop());
     }
   } catch (error) {
     await Promise.allSettled(cleanups.reverse().map((cleanup) => cleanup()));
