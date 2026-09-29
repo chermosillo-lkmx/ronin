@@ -34,6 +34,7 @@ function launchDeps(overrides: Partial<ManagedSessionLaunchDeps> = {}): ManagedS
     writeFlow: () => {},
     writeJsonAtomic: (file, value) => writes.set(file, value),
     readWrite: (file) => writes.get(file),
+    memoryBlockFor: () => "",
     ...overrides,
   };
 }
@@ -264,4 +265,62 @@ test("origen de más de 200 caracteres se rechaza con ORIGIN_INVALID", () => {
     () => validateManagedSessionLaunch({ repo: "monorepo", workflowId: "wf-test", name: "cowork-x", origin: "a".repeat(201) }, { listRepos: () => ["monorepo"] }),
     (error: unknown) => error instanceof SessionLaunchError && error.code === "ORIGIN_INVALID",
   );
+});
+
+const BLOCK = "Memoria del repo monorepo (aprendizajes aprobados por el usuario; verifícalos si algo no cuadra):\n- [trampa] no expandas {repo} aquí";
+
+test("memoria: el bloque se antepone literal al prompt y queda en launch.json", async () => {
+  const delivered: string[] = [];
+  const deps = launchDeps({ memoryBlockFor: () => BLOCK, deliverPrompt: async (_session, prompt) => { delivered.push(prompt); } });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-memoria", request: "arregla el csv" }, deps);
+  const launch = deps.readWrite?.("/cycles/cowork-memoria/launch.json") as Record<string, unknown>;
+  assert.equal(launch.memory, BLOCK);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.length, 1);
+  assert.ok(delivered[0].startsWith(`${BLOCK}\n\n`));
+  assert.match(delivered[0], /no expandas \{repo\} aquí/);
+  assert.match(delivered[0], /arregla el csv/);
+});
+
+test("memoria: sin bloque no hay campo memory ni prefijo", async () => {
+  const delivered: string[] = [];
+  const deps = launchDeps({ memoryBlockFor: () => "", deliverPrompt: async (_session, prompt) => { delivered.push(prompt); } });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-memoria", request: "arregla el csv" }, deps);
+  const launch = deps.readWrite?.("/cycles/cowork-sin-memoria/launch.json") as Record<string, unknown>;
+  assert.equal("memory" in launch, false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered[0].startsWith("Memoria del repo"), false);
+});
+
+test("memoria: sin prompt que entregar (o en terminal) no se consulta, así que no suma usos", async () => {
+  let calls = 0;
+  const deps = launchDeps({
+    memoryBlockFor: () => { calls++; return BLOCK; },
+    deliverPrompt: async () => {},
+    findWorkflowCatalogItem: () => ({
+      id: "wf-test", name: "sin-inputs", updatedAt: 1,
+      config: { stages: [{ key: "plan", label: "Plan", icon: "P" }], verifyAfter: [] },
+    }),
+  });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-prompt" }, deps);
+  await launchManagedSession({ repo: "monorepo", name: "cowork-terminal-memoria", mode: "terminal", agent: "claude", request: "ignorada" }, deps);
+  assert.equal(calls, 0);
+  const launch = deps.readWrite?.("/cycles/cowork-sin-prompt/launch.json") as Record<string, unknown>;
+  assert.equal("memory" in launch, false);
+});
+
+test("memoria: si el bloque lanza, la sesión se lanza igual sin memoria y se registra el error", async () => {
+  const errors: unknown[] = [];
+  const delivered: string[] = [];
+  const deps = launchDeps({
+    memoryBlockFor: () => { throw new Error("EACCES"); },
+    deliverPrompt: async (_session, prompt) => { delivered.push(prompt); },
+    logError: (error) => { errors.push(error); },
+  });
+  const launched = await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-memoria-rota", request: "hazlo" }, deps);
+  assert.equal(launched.name, "cowork-memoria-rota");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].startsWith("Memoria del repo"), false);
+  assert.equal(errors.length, 1);
 });

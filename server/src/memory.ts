@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeJsonAtomic } from "./atomic.js";
+import { MEMORY } from "./config.js";
 import { DATA_DIR } from "./data-dir.js";
 import { listRepos } from "./repos.js";
 
@@ -402,4 +403,37 @@ let sharedStore: MemoryStore | null = null;
 /** Store de producción sobre <DATA_DIR>/memory. Crearlo no toca el disco. */
 export function defaultMemoryStore(): MemoryStore {
   return (sharedStore ??= createMemoryStore());
+}
+
+export interface MemoryLaunchDeps {
+  store?: Pick<MemoryStore, "knows" | "read" | "markUsed">;
+  /** COWORK_MEMORY; inyectable para pruebas. */
+  globalEnabled?: boolean;
+}
+
+/**
+ * Bloque a anteponer al prompt de una sesión nueva, o "" si no hay nada que inyectar (memoria global
+ * apagada, repo desactivado, desconocido o sin entradas activas). Suma `uses` a cada entrada incluida.
+ * Nunca lanza: la memoria no puede tumbar un lanzamiento. Si no se puede guardar el contador, el
+ * bloque se entrega igual.
+ */
+export function memoryBlockForLaunch(repo: string, deps: MemoryLaunchDeps = {}): string {
+  if (!(deps.globalEnabled ?? MEMORY)) return "";
+  const store = deps.store ?? defaultMemoryStore();
+  let block: MemoryBlock | null = null;
+  try {
+    if (!store.knows(repo)) return "";
+    const memory = store.read(repo);
+    if (!memory.enabled) return "";
+    block = buildMemoryBlock(repo, memory.entries);
+  } catch {
+    return "";
+  }
+  if (!block || !block.text) return "";
+  try {
+    store.markUsed(repo, block.included);
+  } catch {
+    /* el contador es una prioridad, no una garantía: mejor entregar el bloque que perderlo */
+  }
+  return block.text;
 }

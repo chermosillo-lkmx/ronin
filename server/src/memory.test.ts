@@ -10,6 +10,7 @@ import {
   isStorableRepo,
   MEMORY_BLOCK_MAX_BYTES,
   MemoryError,
+  memoryBlockForLaunch,
   memoryView,
   normalizeMemoryText,
   type MemoryEntry,
@@ -304,4 +305,46 @@ test("memoryView expone activas y pendientes (no descartadas), sugerencias y la 
   assert.equal(view.preview.maxBytes, 2048);
   assert.equal(view.preview.text, `${HEADER}\n- [comando] Tests: usar \`make test-unit\``);
   assert.equal(view.preview.bytes, Buffer.byteLength(view.preview.text, "utf8"));
+});
+
+test("memoryBlockForLaunch devuelve el bloque literal y suma uses a las entradas incluidas", () => {
+  const { store, cleanup } = fixture();
+  try {
+    store.add("acme-api", { text: "No expandas {repo} en los scripts", kind: "trampa" });
+    store.add("acme-api", { text: "Tests: usar make test-unit", kind: "comando" });
+    const block = memoryBlockForLaunch("acme-api", { store, globalEnabled: true });
+    assert.match(block, /^Memoria del repo acme-api/);
+    assert.match(block, /- \[trampa\] No expandas \{repo\} en los scripts/);
+    assert.deepEqual(store.read("acme-api").entries.map((e) => e.uses), [1, 1]);
+    memoryBlockForLaunch("acme-api", { store, globalEnabled: true });
+    assert.deepEqual(store.read("acme-api").entries.map((e) => e.uses), [2, 2]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("memoryBlockForLaunch no inyecta con COWORK_MEMORY=0, con el repo desactivado, vacío o desconocido", () => {
+  const { store, cleanup } = fixture();
+  try {
+    assert.equal(memoryBlockForLaunch("acme-api", { store, globalEnabled: true }), "");
+    store.add("acme-api", { text: "Tests: usar make test-unit", kind: "comando" });
+    assert.equal(memoryBlockForLaunch("acme-api", { store, globalEnabled: false }), "");
+    store.setEnabled("acme-api", false);
+    assert.equal(memoryBlockForLaunch("acme-api", { store, globalEnabled: true }), "");
+    assert.equal(memoryBlockForLaunch("acme-otro", { store, globalEnabled: true }), "");
+    assert.deepEqual(store.read("acme-api").entries.map((e) => e.uses), [0]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("memoryBlockForLaunch: si no se puede guardar el contador, igual devuelve el bloque y nunca lanza", () => {
+  const broken = {
+    knows: () => true,
+    read: () => ({ repo: "acme-api", enabled: true, entries: [entry()], kbSuggestions: [] }),
+    markUsed: () => { throw new Error("disco lleno"); },
+  };
+  assert.equal(memoryBlockForLaunch("acme-api", { store: broken, globalEnabled: true }), `${HEADER}\n- [comando] Tests: usar \`make test-unit\``);
+  const unreadable = { ...broken, read: () => { throw new Error("EACCES"); } };
+  assert.equal(memoryBlockForLaunch("acme-api", { store: unreadable, globalEnabled: true }), "");
 });
