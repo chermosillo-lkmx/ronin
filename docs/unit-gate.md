@@ -27,6 +27,7 @@ Las sesiones ya creadas conservan su `flow.json` congelado: el gate aplica a ses
    ningún test tocado.
 2. **Los tests tocados existen y se ejecutan**: cada archivo de tests cambiado debe tener al menos un
    caso en el `junit` que pase (un archivo que pytest no colecta, o que sólo tiene skips, falla).
+   Puede apoyarse en junits de corridas aparte vía `UNIT_GATE_EXTRA_JUNIT` (ver abajo).
 3. **La suite completa pasa**: `0 failed / 0 errors` y `> 0` tests. Python:
    `pytest tests -q -o addopts="" --continue-on-collection-errors -p no:cacheprovider --junitxml=reports/junit-gate.xml`
    (`ant-ms-cfdis` añade `-o log_cli=false -m "not functional"`); Node: `npx vitest run --reporter=junit`.
@@ -41,7 +42,39 @@ Sub‑repos sin cambios se omiten; `*-base` (checkouts de control) se ignoran.
 ~/code/claude-cowork/scripts/unit-gate.sh /ruta/al/worktree     # default: cwd
 UNIT_GATE_SKIP_SUITE=1 …   # sólo reglas 1‑2 (rápido, para depurar la clasificación de archivos)
 UNIT_GATE_BASE=origin/main # base de comparación
+UNIT_GATE_EXTRA_JUNIT=a.xml:b.xml … # junits extra para la regla 2 (ver abajo)
 ```
+
+### Evidencia extra para la regla 2: `UNIT_GATE_EXTRA_JUNIT`
+
+Por qué existe: en `ant-liebre-api` las pruebas de BD real se **saltan** si no hay un Postgres
+migrado en `localhost:5432` (`test_db`/`test_user`, ver `tests/conftest.py`), y la suite **no es
+hermética**: con esa BD disponible fallan ~267 pruebas unitarias ajenas (sólo está verde SIN BD).
+Un PR que tiene que editar un archivo de pruebas de BD real no podía pasar nunca: sin BD falla la
+regla 2 (sólo skips); con BD falla la regla 3.
+
+`UNIT_GATE_EXTRA_JUNIT` es una lista de junits separados por `:` (como `PATH`; vale una sola ruta),
+relativos al repo gateado. **Sólo afecta a la regla 2**: un archivo de tests tocado cuenta como
+ejecutado si tiene ≥1 caso que pasa en el junit de la suite **o** en algún junit extra. La
+**regla 3 no cambia**: la suite en verde se calcula sólo con la corrida propia del gate.
+
+```bash
+# 1) correr sólo las pruebas de BD real tocadas, con Postgres migrado (test_db/test_user en :5432)
+.venv/bin/python -m pytest tests/periods/test_x_db.py -q -o addopts='' --junitxml=reports/junit-realdb.xml
+# 2) apagar esa BD y correr el gate con la evidencia extra
+UNIT_GATE_EXTRA_JUNIT=reports/junit-realdb.xml ~/code/claude-cowork/scripts/unit-gate.sh <wt>
+```
+
+Fail‑closed:
+- junit extra inexistente o ilegible → `FAIL` (nunca se ignora en silencio);
+- junit extra más viejo (mtime) que el último commit del repo (`git log -1 --format=%ct`) → `FAIL`
+  con «junit extra anterior al último commit: vuelve a correr esas pruebas»;
+- un archivo tocado con algún caso en `failure`/`error` en un junit extra **no cuenta** (❌ aparte).
+
+Cuando la evidencia extra cubre archivos, el gate lo dice:
+`✅ <repo>: tests tocados ejecutados vía UNIT_GATE_EXTRA_JUNIT: <archivos>`.
+
+Pruebas del propio gate: `node --test scripts/unit-gate.test.mjs` (`npm run test:scripts`).
 
 Salida: una línea `✅/❌` por regla y repo, cola de `reports/unit-gate.log` cuando la suite falla,
 y al final `UNIT-GATE: PASS` o `UNIT-GATE: FAIL` (exit 0 / 1). El log completo de la suite queda

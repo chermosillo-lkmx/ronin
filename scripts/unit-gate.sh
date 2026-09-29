@@ -11,6 +11,7 @@
 # Uso: unit-gate.sh [DIR]   (DIR = worktree de la sesión; default: cwd, que es lo que pasa Ronin)
 # Env: UNIT_GATE_BASE (default origin/main) · UNIT_GATE_SKIP_SUITE=1 (sólo reglas 1-2, para depurar)
 #      UNIT_GATE_MAIN_ROOT (default ~/code/lkmx/liebre: de ahí se toma el .venv si el worktree no tiene)
+#      UNIT_GATE_EXTRA_JUNIT (junits extra «a.xml:b.xml», relativos al repo; SÓLO para la regla 2)
 set -u
 ROOT="${1:-$PWD}"
 BASE_REF="${UNIT_GATE_BASE:-origin/main}"
@@ -50,21 +51,68 @@ print(f("tests"), f("failures"), f("errors"), f("skipped"))
 PY
 }
 
+head_commit_time() { git log -1 --format=%ct 2>/dev/null; } # epoch del commit HEAD del repo actual
+
+# Regla 2 (y sólo la 2) puede apoyarse en UNIT_GATE_EXTRA_JUNIT: junits de corridas aparte (p. ej.
+# pruebas de BD real), separados por «:» y relativos al repo. Fail-closed: uno inexistente, ilegible
+# o anterior al último commit se imprime como faltante (→ FAIL); un archivo con fallos ahí no cuenta.
+# Los ❌/✅ de la evidencia extra van a stderr; stdout sigue siendo sólo la lista de faltantes.
 tests_ran_from() { # $1 junit.xml, $2.. changed test files → imprime los que NO aparecen ejecutados y pasando
+  GATE_EXTRA_JUNIT="${UNIT_GATE_EXTRA_JUNIT:-}" GATE_HEAD_CT="$(head_commit_time)" GATE_REPO="$(basename "$PWD")" \
   python3 - "$@" <<'PY'
-import sys, re, xml.etree.ElementTree as ET
+import os, sys, re, xml.etree.ElementTree as ET
 junit, files = sys.argv[1], sys.argv[2:]
-r = ET.parse(junit).getroot()
-passed = set()
-for tc in r.iter("testcase"):
-    if tc.find("failure") is not None or tc.find("error") is not None or tc.find("skipped") is not None:
-        continue
-    passed.add((tc.get("classname") or "") + "|" + (tc.get("file") or ""))
-for f in files:
+repo = os.environ.get("GATE_REPO", "")
+err = lambda msg: print(msg, file=sys.stderr)
+
+def outcomes(path):  # → (claves con casos que pasan, claves con casos que fallan/revientan)
+    passed, failed = set(), set()
+    for tc in ET.parse(path).getroot().iter("testcase"):
+        key = (tc.get("classname") or "") + "|" + (tc.get("file") or "")
+        if tc.find("failure") is not None or tc.find("error") is not None:
+            failed.add(key)
+        elif tc.find("skipped") is None:
+            passed.add(key)
+    return passed, failed
+
+def hit(f, keys):
     mod = re.sub(r"\.(py|ts|tsx|js|jsx)$", "", f).replace("/", ".")
-    hit = any(k.split("|")[0].startswith(mod) or f in k.split("|")[1] or k.split("|")[0].endswith(f) for k in passed)
-    if not hit:
-        print(f)
+    return any(k.split("|")[0].startswith(mod) or f in k.split("|")[1] or k.split("|")[0].endswith(f) for k in keys)
+
+suite_passed, _ = outcomes(junit)
+missing = [f for f in files if not hit(f, suite_passed)]
+
+extras = [p for p in os.environ.get("GATE_EXTRA_JUNIT", "").split(":") if p.strip()]
+if extras:
+    head_ct = os.environ.get("GATE_HEAD_CT", "").strip()
+    problems, via, broken = [], [], []
+    if not head_ct.isdigit():
+        problems.append("no pude leer la hora del último commit (git log -1 --format=%ct)")
+    for p in extras:
+        if not os.path.isfile(p):
+            problems.append(f"{p}: no existe"); continue
+        if head_ct.isdigit() and os.path.getmtime(p) < int(head_ct):
+            problems.append(f"{p}: junit extra anterior al último commit: vuelve a correr esas pruebas"); continue
+        try:
+            ep, ef = outcomes(p)
+        except (ET.ParseError, OSError) as e:
+            problems.append(f"{p}: no se pudo leer como junit ({e})"); continue
+        for f in files:
+            if hit(f, ef):
+                if f not in broken:
+                    broken.append(f)
+                err(f"❌ {repo}: UNIT_GATE_EXTRA_JUNIT {p} tiene casos que FALLAN de {f}: no cuenta para la regla 2")
+            elif hit(f, ep) and f in missing and f not in via:
+                via.append(f)
+    via = [f for f in via if f not in broken]
+    for msg in problems:
+        err(f"❌ {repo}: UNIT_GATE_EXTRA_JUNIT inválido — {msg}")
+    if via and not problems:
+        err(f"✅ {repo}: tests tocados ejecutados vía UNIT_GATE_EXTRA_JUNIT: {' '.join(via)}")
+    missing = [f for f in files if (f in missing and f not in via) or f in broken]
+    missing += [f"(UNIT_GATE_EXTRA_JUNIT inválido — {msg})" for msg in problems]
+for f in missing:
+    print(f)
 PY
 }
 
