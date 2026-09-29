@@ -6,7 +6,8 @@ export function agentMcpConfig(port: number, token: string) {
     mcpServers: {
       ronin: {
         type: "http",
-        url: `http://127.0.0.1:${port}/mcp`,
+        // scope=agent: los workers sólo ven las herramientas de pruebas, no las de sesión.
+        url: `http://127.0.0.1:${port}/mcp?scope=agent`,
         headers: { "x-ronin-capability": token },
       },
     },

@@ -22,7 +22,8 @@ export type SessionLaunchErrorCode =
   | "INVALID_SESSION"
   | "MANAGED_SESSION_PREFIX_REQUIRED"
   | "SESSION_ALREADY_EXISTS"
-  | "BASE_BRANCH_UNRESOLVED";
+  | "BASE_BRANCH_UNRESOLVED"
+  | "ORIGIN_INVALID";
 
 export class SessionLaunchError extends Error {
   constructor(readonly code: SessionLaunchErrorCode, message: string) {
@@ -39,10 +40,15 @@ export interface ManagedSessionLaunchInput {
   agent?: string;
   request?: string;
   inputs?: Record<string, string>;
+  /** Referencia externa que originó la sesión (p. ej. `clickup:<taskId>`). Solo informativa. */
+  origin?: string;
 }
 
 /** Cada valor se limita a 4 KiB UTF-8 para acotar launch.json y el prompt entregado al worker. */
 export const MAX_WORKFLOW_INPUT_VALUE_BYTES = 4 * 1024;
+
+const ORIGIN_PATTERN = /^[A-Za-z0-9._:/-]+$/;
+const MAX_ORIGIN_LENGTH = 200;
 
 export type SessionLaunchMode = "workflow" | "terminal";
 export type TerminalAgent = "claude" | "codex";
@@ -111,6 +117,9 @@ export function validateManagedSessionLaunch(input: ManagedSessionLaunchInput, d
   }
   if (!input.name.startsWith("cowork-")) {
     throw new SessionLaunchError("MANAGED_SESSION_PREFIX_REQUIRED", "las sesiones gestionadas deben iniciar con cowork-");
+  }
+  if (input.origin !== undefined && (typeof input.origin !== "string" || input.origin.length > MAX_ORIGIN_LENGTH || !ORIGIN_PATTERN.test(input.origin))) {
+    throw new SessionLaunchError("ORIGIN_INVALID", "el origen de la sesión no es válido");
   }
   const mode = input.mode ?? "workflow";
   if (mode !== "workflow" && mode !== "terminal") {

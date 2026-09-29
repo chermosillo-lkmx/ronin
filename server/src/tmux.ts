@@ -193,6 +193,25 @@ export async function pastePrompt(target: string, text: string, submit: boolean)
   }
 }
 
+// Tope de texto para escribir en un pane (envío pane-scoped, broadcast y responder_sesion).
+export const MAX_PANE_KEYS_BYTES = 16 * 1024;
+
+/**
+ * Entrega texto a un pane eligiendo el mecanismo por tamaño: teclear con `send-keys -l` hasta
+ * PASTE_THRESHOLD_BYTES y, por encima, buffer + bracketed paste (el Enter inmediato se pierde con
+ * textos largos). Única regla para /keys, broadcast y responder_sesion; `senders` es inyectable
+ * sólo para probar la elección sin tmux.
+ */
+export async function deliverText(
+  target: string,
+  text: string,
+  submit: boolean,
+  senders: { sendText: typeof sendText; pastePrompt: typeof pastePrompt } = { sendText, pastePrompt },
+): Promise<void> {
+  if (Buffer.byteLength(text, "utf8") > PASTE_THRESHOLD_BYTES) await senders.pastePrompt(target, text, submit);
+  else await senders.sendText(target, text, submit);
+}
+
 // Cuántas líneas del final se miran para decidir si hay texto compuesto sin enviar: el marcador
 // del paste vive en la caja de input (abajo), no en el transcript de más arriba.
 const PENDING_RECENT_LINES = 10;
@@ -945,6 +964,21 @@ export function lastMeaningfulLine(pane: string): string {
     .filter((l) => l && !CHROME.test(l));
   const last = lines[lines.length - 1] ?? "";
   return last.replace(/\s+/g, " ").slice(0, 56);
+}
+
+// La caja de input vacía de Claude ("❯" o "│ > │") no es texto útil del agente.
+const PROMPT_ONLY = /^│?\s*[❯>]\s*│?$/;
+
+/**
+ * Como lastMeaningfulLine pero con tope configurable y sin la caja de input ni la viñeta `⏺`:
+ * es la "pregunta" que ve un cliente MCP cuando el agente quedó idle esperando al usuario.
+ */
+export function lastMeaningfulText(pane: string, max: number): string {
+  const lines = recentLines(pane, Number.MAX_SAFE_INTEGER)
+    .map((l) => l.trim())
+    .filter((l) => l && !CHROME.test(l) && !PROMPT_ONLY.test(l));
+  const last = lines[lines.length - 1] ?? "";
+  return last.replace(/^[⏺●]\s*/u, "").replace(/\s+/g, " ").slice(0, max);
 }
 
 // P4: how many recent lines to scan for context-pressure signals. Small, like lastMeaningfulLine,

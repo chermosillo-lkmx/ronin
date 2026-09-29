@@ -1,5 +1,6 @@
 import { HarnessError, type TestHarnessService } from "./test-harness/service.js";
 import { isSuite, type Coverage, type Run, type TestSuite } from "./test-harness/model.js";
+import { callSessionTool, isSessionTool, McpToolError, SESSION_TOOLS, type McpSessionPort } from "./mcp-sessions.js";
 
 export const MCP_SERVER_VERSION = "0.1.0";
 
@@ -8,6 +9,9 @@ type JsonRpcId = string | number | null;
 
 export interface McpDependencies {
   harness: TestHarnessService;
+  sessions?: McpSessionPort;
+  /** "agent": cliente lanzado por Ronin; sólo ve las herramientas de pruebas, nunca las de sesión. */
+  scope?: "agent";
   version?: string;
 }
 
@@ -52,7 +56,7 @@ const STATUS_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-export const MCP_TOOLS = [
+const TEST_TOOLS = [
   {
     name: "reportar_pruebas",
     description: "Registra una suite ya ejecutada leyendo sus artefactos JUnit y Cobertura. No acepta conteos declarados por el agente.",
@@ -64,6 +68,7 @@ export const MCP_TOOLS = [
     inputSchema: STATUS_SCHEMA,
   },
 ] as const;
+export const MCP_TOOLS = [...TEST_TOOLS, ...SESSION_TOOLS];
 
 function requiredString(args: JsonRecord, key: string): string {
   const value = args[key];
@@ -160,7 +165,8 @@ export async function handleMcp(message: unknown, deps: McpDependencies): Promis
       result: { protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "ronin", version: deps.version ?? MCP_SERVER_VERSION } },
     };
   }
-  if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: MCP_TOOLS } };
+  const agentScope = deps.scope === "agent";
+  if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: agentScope ? TEST_TOOLS : MCP_TOOLS } };
   if (message.method !== "tools/call") return jsonRpcError(id, -32601, `Método no encontrado: ${message.method}`);
 
   try {
@@ -171,9 +177,15 @@ export async function handleMcp(message: unknown, deps: McpDependencies): Promis
       const repo = params.arguments !== undefined ? (args.repo === undefined ? undefined : requiredString(args, "repo")) : undefined;
       return { jsonrpc: "2.0", id, result: toolResult(statusText(deps.harness, repo)) };
     }
+    if (isSessionTool(name)) {
+      if (!deps.sessions || agentScope) return { jsonrpc: "2.0", id, result: toolResult("Ronin no tiene habilitadas las herramientas de sesión", true) };
+      return { jsonrpc: "2.0", id, result: toolResult(await callSessionTool(name, args, deps.sessions)) };
+    }
     return { jsonrpc: "2.0", id, result: toolResult(`Herramienta desconocida: ${name}. Usa tools/list para ver las disponibles.`, true) };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "No se pudo registrar la corrida";
+    const message = error instanceof McpToolError
+      ? `${error.code}: ${error.message}`
+      : error instanceof Error ? error.message : "No se pudo completar la herramienta";
     return { jsonrpc: "2.0", id, result: toolResult(message, true) };
   }
 }

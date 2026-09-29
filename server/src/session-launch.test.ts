@@ -244,3 +244,24 @@ test("el lanzamiento no espera a la provisión ni se cae si revienta", async () 
   await new Promise((resolve) => setTimeout(resolve, 40));
   assert.equal(errores.length, 1); // el fallo se reporta, no se traga ni se propaga
 });
+
+test("origen válido se persiste en launch.json", async () => {
+  const deps = launchDeps();
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-origen", origin: "clickup:86abc1234" }, deps);
+  const launch = deps.readWrite?.("/cycles/cowork-origen/launch.json") as Record<string, unknown>;
+  assert.equal(launch.origin, "clickup:86abc1234");
+});
+
+test("origen con caracteres no permitidos se rechaza con ORIGIN_INVALID", () => {
+  assert.throws(
+    () => validateManagedSessionLaunch({ repo: "monorepo", workflowId: "wf-test", name: "cowork-x", origin: "clickup:$(rm -rf /)" }, { listRepos: () => ["monorepo"] }),
+    (error: unknown) => error instanceof SessionLaunchError && error.code === "ORIGIN_INVALID",
+  );
+});
+
+test("origen de más de 200 caracteres se rechaza con ORIGIN_INVALID", () => {
+  assert.throws(
+    () => validateManagedSessionLaunch({ repo: "monorepo", workflowId: "wf-test", name: "cowork-x", origin: "a".repeat(201) }, { listRepos: () => ["monorepo"] }),
+    (error: unknown) => error instanceof SessionLaunchError && error.code === "ORIGIN_INVALID",
+  );
+});

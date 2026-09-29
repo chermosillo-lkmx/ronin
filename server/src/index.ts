@@ -10,19 +10,19 @@ import { adoptSession, releaseAdoption } from "./engine.js";
 import { AdoptCommitError, AdoptValidationError, type AdoptErrorCode } from "./adopt.js";
 import {
   capturePaneAnsi,
+  capturePanesTail,
+  deliverText,
   focusSessionPane,
   hasSession,
   killSession,
   listSessionPaneIds,
   paneMembership,
   parsePaneRoleParam,
-  pastePrompt,
   readAdoptedMark,
   readPaneGeometry,
-  sendText,
   serializePerSession,
   openTerminal,
-  PASTE_THRESHOLD_BYTES,
+  MAX_PANE_KEYS_BYTES,
 } from "./tmux.js";
 import { classifySession } from "./sessions.js";
 import { isSafeSessionName } from "./session-name.js";
@@ -53,6 +53,8 @@ import { createHarnessStore } from "./test-harness/config.js";
 import { HarnessValidationError, parseSelection } from "./test-harness/model.js";
 import { createTestHarnessService, HarnessError, type TestHarnessService } from "./test-harness/service.js";
 import { handleMcp } from "./mcp.js";
+import { createSessionPort } from "./mcp-session-port.js";
+import type { McpSessionPort } from "./mcp-sessions.js";
 import { withMcpConfig, writeAgentMcpConfig } from "./agent-mcp.js";
 import { runClaudeP } from "./claude-p.js";
 import { createAnalyzer, type Analyzer } from "./workflow-insights/analyzer.js";
@@ -140,6 +142,8 @@ export interface CreateAppOptions {
   /** Seams del lanzamiento gestionado y el inventario para pruebas HTTP sin tmux. */
   launchManagedSession?: typeof launchManagedSession;
   readTmuxInventory?: typeof readTmuxInventory;
+  /** Puerto de sesiones para /mcp; en producción se construye con las dependencias reales. */
+  mcpSessions?: McpSessionPort;
   /** Costuras de las rutas KB para pruebas HTTP con un repositorio temporal. */
   kb?: {
     listRepos?: typeof listRepos;
@@ -223,8 +227,20 @@ app.use("/api", requireCapability);
 app.use("/mcp", requireLocalOrigin);
 app.use("/mcp", requireCapability);
 app.use(express.json());
+const mcpSessions = options.mcpSessions ?? createSessionPort({
+  listRepos,
+  listWorkflows: () => loadWorkflowCatalog(catalogDirectory).items.map((item) => ({ id: item.id, name: item.name, stages: item.config.stages.map((stage) => stage.key) })),
+  launch: (input) => performLaunchManagedSession(input),
+  inventory: async () => (await readInventory()).sessions,
+  deliver: (paneId, text, submit) => deliverText(paneId, text, submit),
+  capture: (paneIds) => capturePanesTail(paneIds),
+  now: () => Date.now(),
+});
 app.post("/mcp", async (req, res) => {
-  const response = await handleMcp(req.body, { harness });
+  // Los agentes que lanza Ronin usan /mcp?scope=agent (agent-mcp.ts): sin puerto de sesiones, así
+  // un worker no puede crear sesiones ni escribir en otras. Los clientes externos no cambian.
+  const deps = req.query.scope === "agent" ? { harness, scope: "agent" as const } : { harness, sessions: mcpSessions };
+  const response = await handleMcp(req.body, deps);
   if (response === null) return void res.status(202).end();
   res.json(response);
 });
@@ -756,8 +772,6 @@ app.delete("/api/sessions/:name/adopt", async (req, res) => {
   res.json({ ok: true });
 });
 
-const MAX_PANE_KEYS_BYTES = 16 * 1024;
-
 function isPaneIdParam(value: string): boolean {
   return /^%\d+$/.test(value);
 }
@@ -814,8 +828,7 @@ app.post("/api/sessions/:name/panes/:paneId/keys", async (req, res) => {
   if (membership === "elsewhere") return res.status(400).json({ error: "el pane pertenece a otra sesión", code: "PANE_NOT_IN_SESSION" });
   if (membership === "gone") return res.status(409).json({ error: "el pane ya no existe", code: "PANE_GONE" });
   const submit = req.body?.submit === true;
-  if (Buffer.byteLength(text, "utf8") > PASTE_THRESHOLD_BYTES) await pastePrompt(paneId, text, submit);
-  else await sendText(paneId, text, submit);
+  await deliverText(paneId, text, submit);
   res.json({ ok: true });
 });
 
@@ -864,8 +877,7 @@ app.post("/api/sessions/:name/broadcast", async (req, res) => {
     }
     const submit = req.body?.submit === true;
     for (const target of targets) {
-      if (Buffer.byteLength(text, "utf8") > PASTE_THRESHOLD_BYTES) await pastePrompt(target, text, submit);
-      else await sendText(target, text, submit);
+      await deliverText(target, text, submit);
     }
     res.json({ ok: true, targets });
   });

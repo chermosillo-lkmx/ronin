@@ -7,6 +7,8 @@ import {
   buildCaptureArgs,
   capturePaneAnsi,
   classifyTmuxInventoryError,
+  deliverText,
+  MAX_PANE_KEYS_BYTES,
   clearAdoptedMark,
   createDriverWindow,
   createSession,
@@ -347,4 +349,17 @@ test("dos entregas concurrentes NO se pisan: cada pane recibe su propio texto", 
     assert.ok(!a.includes("DERECHA"), "el pane A no puede recibir el texto de B");
     assert.ok(!b.includes("IZQUIERDA"), "el pane B no puede recibir el texto de A");
   });
+});
+
+test("deliverText teclea hasta PASTE_THRESHOLD_BYTES y pega por buffer por encima (bytes UTF-8)", async () => {
+  const calls: string[] = [];
+  const senders = {
+    sendText: async (target: string, text: string, submit: boolean) => { calls.push(`type:${target}:${Buffer.byteLength(text)}:${submit}`); },
+    pastePrompt: async (target: string, text: string, submit: boolean) => { calls.push(`paste:${target}:${Buffer.byteLength(text)}:${submit}`); },
+  };
+  await deliverText("%1", "x".repeat(200), true, senders);
+  await deliverText("%1", "x".repeat(201), false, senders);
+  await deliverText("%2", "é".repeat(101), true, senders); // 202 bytes aunque sean 101 caracteres
+  assert.deepEqual(calls, ["type:%1:200:true", "paste:%1:201:false", "paste:%2:202:true"]);
+  assert.equal(MAX_PANE_KEYS_BYTES, 16 * 1024);
 });

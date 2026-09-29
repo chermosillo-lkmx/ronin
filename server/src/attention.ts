@@ -66,6 +66,17 @@ export function detectDecision(pane: string): Decision | null {
   return { question, options };
 }
 
+/**
+ * ¿La última línea con texto del pane es una opción del menú numerado? Un menú de permisos de
+ * Claude vivo termina en sus opciones (sin footer reconocible por claudeAlive); si Claude salió,
+ * el shell escribe su prompt DEBAJO del frame rancio y esto deja de cumplirse.
+ */
+export function menuIsLastLine(pane: string): boolean {
+  const decision = detectDecision(pane);
+  const last = recentLines(pane, RECENT_LINES).at(-1);
+  return Boolean(decision?.options.length && last !== undefined && NUMBERED_OPTION.test(last));
+}
+
 export function paneAttention(pane: string | null): Pick<SessionAttention, "level" | "question"> {
   if (pane === null) return { level: "gone" };
   const decision = detectDecision(pane);
