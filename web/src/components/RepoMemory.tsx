@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { addRepoMemory, deleteRepoMemory, getRepoMemory, resolveRepoMemory, setRepoMemoryEnabled } from "../api";
 import type { MemoryAction, MemoryEntry, MemoryKind, RepoMemoryView } from "../types";
+import { runExclusive } from "./in-flight";
 
 export type MemoryTab = "active" | "pending" | "kb";
 
@@ -30,42 +31,78 @@ export function memoryCounts(view: RepoMemoryView): Record<MemoryTab, number> {
 }
 
 /**
+ * Borrar desde Activas descarta (PATCH): la entrada sigue en el archivo para que la destilación no
+ * la vuelva a proponer, y la vista ya oculta las descartadas. Una sugerencia para la KB sí se borra.
+ */
+export function removeMemoryItem(
+  repo: string,
+  id: string,
+  from: "entry" | "kb",
+  api: { resolveRepoMemory: typeof resolveRepoMemory; deleteRepoMemory: typeof deleteRepoMemory } = { resolveRepoMemory, deleteRepoMemory },
+): Promise<RepoMemoryView> {
+  return from === "entry" ? api.resolveRepoMemory(repo, id, "discard") : api.deleteRepoMemory(repo, id);
+}
+
+export type MemoryNoteState = { text: string; error: boolean } | null;
+
+/** Aviso bajo la sección: los errores se anuncian con role="alert", los éxitos con role="status". */
+export function MemoryNote({ note }: { note: MemoryNoteState }) {
+  if (!note?.text) return null;
+  return <p className={`ron-mem-note${note.error ? " error" : ""}`} role={note.error ? "alert" : "status"}>{note.text}</p>;
+}
+
+const LOAD_ERROR = "No se pudo cargar la memoria de este repo.";
+
+/**
  * Memoria de un repo: interruptor, vista previa del bloque, pestañas Activas / Pendientes / Para la KB
  * y alta manual. `initial` undefined = la sección se carga sola; null = la carga quien la contiene.
+ * Mientras hay una petición en curso (`busy`) todos los botones que cambian la memoria quedan
+ * deshabilitados; `initialBusy` sólo existe para las pruebas SSR.
  */
-export function RepoMemorySection({ repo, initial, initialTab = "active", onChange }: { repo: string; initial?: RepoMemoryView | null; initialTab?: MemoryTab; onChange?: (view: RepoMemoryView) => void }) {
+export function RepoMemorySection({ repo, initial, initialTab = "active", initialBusy = false, onChange }: { repo: string; initial?: RepoMemoryView | null; initialTab?: MemoryTab; initialBusy?: boolean; onChange?: (view: RepoMemoryView) => void }) {
   const [view, setView] = useState<RepoMemoryView | null>(initial ?? null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [busy, setBusy] = useState(initialBusy);
+  const lock = useRef(false);
   const [tab, setTab] = useState<MemoryTab>(initialTab);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
   const [draft, setDraft] = useState<{ text: string; kind: MemoryKind }>({ text: "", kind: "comando" });
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState<MemoryNoteState>(null);
 
   useEffect(() => { if (initial) setView(initial); }, [initial]);
   useEffect(() => {
     if (initial !== undefined) return;
-    void getRepoMemory(repo).then((loaded) => { if (loaded) setView(loaded); });
+    void getRepoMemory(repo).then(
+      (loaded) => { if (loaded) setView(loaded); else setLoadFailed(true); },
+      () => setLoadFailed(true),
+    );
   }, [repo]);
 
   const apply = async (action: () => Promise<RepoMemoryView>, done: string): Promise<boolean> => {
     try {
-      const next = await action();
+      const next = await runExclusive(lock, setBusy, action);
+      if (!next) return false;
       setView(next);
       onChange?.(next);
       setEditing(null);
-      setNote(done);
+      setNote({ text: done, error: false });
       return true;
     } catch (error) {
-      setNote((error as Error).message);
+      setNote({ text: (error as Error).message, error: true });
       return false;
     }
   };
 
-  if (!view) return <section className="ron-mem" aria-label={`Memoria de ${repo}`}><p className="ron-mem-empty">Cargando memoria…</p></section>;
+  if (!view) {
+    return <section className="ron-mem" aria-label={`Memoria de ${repo}`}>
+      {loadFailed ? <MemoryNote note={{ text: LOAD_ERROR, error: true }} /> : <p className="ron-mem-empty">Cargando memoria…</p>}
+    </section>;
+  }
 
   const counts = memoryCounts(view);
   const resolve = (id: string, action: MemoryAction, text?: string) =>
     void apply(() => resolveRepoMemory(repo, id, action, text), action === "discard" ? "Aprendizaje descartado." : "Aprendizaje guardado.");
-  const remove = (id: string) => void apply(() => deleteRepoMemory(repo, id), "Aprendizaje borrado.");
+  const remove = (id: string, from: "entry" | "kb") => void apply(() => removeMemoryItem(repo, id, from), "Aprendizaje borrado.");
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const text = draft.text.trim();
@@ -81,7 +118,7 @@ export function RepoMemorySection({ repo, initial, initialTab = "active", onChan
   return <section className="ron-mem" aria-label={`Memoria de ${repo}`}>
     <header className="ron-mem-head">
       <label className="ron-mem-toggle">
-        <input type="checkbox" checked={view.enabled} disabled={!view.globalEnabled} onChange={(event) => void apply(() => setRepoMemoryEnabled(repo, event.target.checked), event.target.checked ? "Memoria activada." : "Memoria desactivada.")} />
+        <input type="checkbox" checked={view.enabled} disabled={!view.globalEnabled || busy} onChange={(event) => void apply(() => setRepoMemoryEnabled(repo, event.target.checked), event.target.checked ? "Memoria activada." : "Memoria desactivada.")} />
         <span>Memoria del repo</span>
       </label>
       {!view.globalEnabled && <small>Desactivada en este equipo (COWORK_MEMORY=0).</small>}
@@ -93,6 +130,7 @@ export function RepoMemorySection({ repo, initial, initialTab = "active", onChan
     <div className="ron-mem-tabs" role="tablist">
       {TABS.map(({ key, label }) => <button key={key} type="button" role="tab" aria-selected={tab === key} className={tab === key ? "on" : ""} onClick={() => { setTab(key); setEditing(null); }}>{`${label} · ${counts[key]}`}</button>)}
     </div>
+    {tab === "pending" && <p className="ron-mem-hint">Lo que apruebes llega a cada sesión nueva de este repo como si lo hubieras escrito tú.</p>}
     <ul className="ron-mem-list">
       {tab !== "kb" && entries.map((entry) => {
         const isEditing = editing?.id === entry.id;
@@ -103,11 +141,11 @@ export function RepoMemorySection({ repo, initial, initialTab = "active", onChan
           <div className="ron-mem-actions">
             {entry.status === "pending"
               ? isEditing
-                ? <><button type="button" className="n-btn n-btn-primary" onClick={() => resolve(entry.id, "edit", editing?.text)}>Guardar y aprobar</button><button type="button" className="n-btn n-btn-secondary" onClick={() => setEditing(null)}>Cancelar</button></>
-                : <><button type="button" className="n-btn n-btn-primary" onClick={() => resolve(entry.id, "approve")}>✅ Aprobar</button><button type="button" className="n-btn n-btn-secondary" onClick={() => setEditing({ id: entry.id, text: entry.text })}>✏️ Editar y aprobar</button><button type="button" className="n-btn n-btn-danger" onClick={() => resolve(entry.id, "discard")}>❌ Descartar</button></>
+                ? <><button type="button" disabled={busy} className="n-btn n-btn-primary" onClick={() => resolve(entry.id, "edit", editing?.text)}>Guardar y aprobar</button><button type="button" disabled={busy} className="n-btn n-btn-secondary" onClick={() => setEditing(null)}>Cancelar</button></>
+                : <><button type="button" disabled={busy} className="n-btn n-btn-primary" onClick={() => resolve(entry.id, "approve")}>✅ Aprobar</button><button type="button" disabled={busy} className="n-btn n-btn-secondary" onClick={() => setEditing({ id: entry.id, text: entry.text })}>✏️ Editar y aprobar</button><button type="button" disabled={busy} className="n-btn n-btn-danger" onClick={() => resolve(entry.id, "discard")}>❌ Descartar</button></>
               : isEditing
-                ? <><button type="button" className="n-btn n-btn-primary" onClick={() => resolve(entry.id, "edit", editing?.text)}>Guardar</button><button type="button" className="n-btn n-btn-secondary" onClick={() => setEditing(null)}>Cancelar</button></>
-                : <><button type="button" className="n-btn n-btn-secondary" onClick={() => setEditing({ id: entry.id, text: entry.text })}>Editar</button><button type="button" className="n-btn n-btn-danger" onClick={() => remove(entry.id)}>Borrar</button></>}
+                ? <><button type="button" disabled={busy} className="n-btn n-btn-primary" onClick={() => resolve(entry.id, "edit", editing?.text)}>Guardar</button><button type="button" disabled={busy} className="n-btn n-btn-secondary" onClick={() => setEditing(null)}>Cancelar</button></>
+                : <><button type="button" disabled={busy} className="n-btn n-btn-secondary" onClick={() => setEditing({ id: entry.id, text: entry.text })}>Editar</button><button type="button" disabled={busy} className="n-btn n-btn-danger" onClick={() => remove(entry.id, "entry")}>Borrar</button></>}
           </div>
         </li>;
       })}
@@ -115,7 +153,7 @@ export function RepoMemorySection({ repo, initial, initialTab = "active", onChan
         <span className="ron-mem-kind arquitectura">arquitectura</span>
         <p>{suggestion.text}</p>
         <small>{`de ${suggestion.source} · se usará en la próxima generación de la KB`}</small>
-        <div className="ron-mem-actions"><button type="button" className="n-btn n-btn-danger" onClick={() => remove(suggestion.id)}>Borrar</button></div>
+        <div className="ron-mem-actions"><button type="button" disabled={busy} className="n-btn n-btn-danger" onClick={() => remove(suggestion.id, "kb")}>Borrar</button></div>
       </li>)}
       {counts[tab] === 0 && <li className="ron-mem-empty">Nada por aquí.</li>}
     </ul>
@@ -124,17 +162,20 @@ export function RepoMemorySection({ repo, initial, initialTab = "active", onChan
         {MEMORY_KIND_OPTIONS.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
       </select>
       <input aria-label="Nuevo aprendizaje" maxLength={200} placeholder="Nuevo aprendizaje (máx. 200 caracteres)" value={draft.text} onChange={(event) => setDraft({ ...draft, text: event.target.value })} />
-      <button type="submit" className="n-btn n-btn-primary" disabled={!draft.text.trim()}>Agregar</button>
+      <button type="submit" className="n-btn n-btn-primary" disabled={busy || !draft.text.trim()}>Agregar</button>
     </form>
-    {note && <p className="ron-mem-note" role="status">{note}</p>}
+    <MemoryNote note={note} />
   </section>;
 }
 
 /** Envoltorio plegable para la tarjeta de un repo en Configuración. */
-export function RepoMemoryDetails({ repo, view, onChange }: { repo: string; view?: RepoMemoryView; onChange: (view: RepoMemoryView) => void }) {
+/** `view` undefined = todavía cargando; null = la carga terminó sin memoria (falló). */
+export function RepoMemoryDetails({ repo, view, onChange }: { repo: string; view?: RepoMemoryView | null; onChange: (view: RepoMemoryView) => void }) {
   const pending = view ? memoryCounts(view).pending : 0;
   return <details className="ron-cfg-memory">
     <summary>{`🧠 Memoria${pending ? ` · ${pending} ${pending === 1 ? "pendiente" : "pendientes"}` : ""}`}</summary>
-    <RepoMemorySection repo={repo} initial={view ?? null} onChange={onChange} />
+    {view === null
+      ? <section className="ron-mem" aria-label={`Memoria de ${repo}`}><MemoryNote note={{ text: LOAD_ERROR, error: true }} /></section>
+      : <RepoMemorySection repo={repo} initial={view ?? null} onChange={onChange} />}
   </details>;
 }

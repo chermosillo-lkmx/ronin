@@ -41,15 +41,15 @@ export function SettingsScreen({ initial }: { initial?: SettingsScreenData }) {
   const [checks, setChecks] = useState(initial?.checks ?? []);
   const [knowledgeBases, setKnowledgeBases] = useState(initial?.knowledgeBases ?? {});
   const [generations, setGenerations] = useState<Record<string, KnowledgeBaseGeneration | null>>({});
-  const [memories, setMemories] = useState<Record<string, RepoMemoryView>>(initial?.memories ?? {});
+  const [memories, setMemories] = useState<Record<string, RepoMemoryView | null>>(initial?.memories ?? {});
   const [note, setNote] = useState("");
   const [editor, setEditor] = useState<Editor | null>(null);
 
   const loadKb = async (repo: string) => {
-    const [kb, generation, memory] = await Promise.all([getRepoKnowledgeBase(repo), getRepoKnowledgeBaseGeneration(repo), getRepoMemory(repo)]);
+    const [kb, generation, memory] = await Promise.all([getRepoKnowledgeBase(repo), getRepoKnowledgeBaseGeneration(repo), getRepoMemory(repo).catch(() => null)]);
     if (kb) setKnowledgeBases((current) => ({ ...current, [repo]: kb }));
     setGenerations((current) => ({ ...current, [repo]: generation }));
-    if (memory) setMemories((current) => ({ ...current, [repo]: memory }));
+    setMemories((current) => ({ ...current, [repo]: memory }));
     return kb;
   };
   const load = async () => {

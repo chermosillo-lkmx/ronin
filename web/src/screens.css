@@ -435,3 +435,5 @@
 .ron-mem-add { display: flex; gap: var(--space-2); }
 .ron-mem-add input { flex: 1; min-width: 0; }
 .ron-mem-note { margin: 0; color: var(--color-neutral-500); }
+.ron-mem-note.error { color: var(--status-fail); }
+.ron-mem-hint { margin: 0; color: var(--color-neutral-500); font-size: 11px; }
