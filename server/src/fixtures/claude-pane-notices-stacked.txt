@@ -1,0 +1,20 @@
+  How to roll it out
+
+  The same pattern that worked before: a gate plus a ratchet test whose inventory can only shrink. Only new code gets reviewed and the old
+  debt does not have to be paid all at once.
+
+  1. Cite the section name everywhere. Add it to the project notes and to the plan and review instructions so every finding points to
+     its section.
+  2. Add a gate script as a new stage right after the existing one. It checks only the added lines of the diff:
+     - Rule A: a query built from a formatted string.
+     - Rule B: a bare exception handler that swallows errors.
+  3. Leave the rest to the reviewer as a checklist.
+
+  Follow-up tickets (outside the gate)
+                                                            1 new message (click) ↓
+                                                                                                      ✔ Update installed · Restart to update
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ start with the gate script
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  sample-standards  ⎇ ronin/sample-standards  ░░░░░ 10%
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents

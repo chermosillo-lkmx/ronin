@@ -1,0 +1,19 @@
+  5. Network rules
+
+  - No inbound rules are needed.
+  - Outbound HTTPS to the package registries and the target site.
+
+  6. Launch the instance
+
+  - Image: a current long-term support release.
+  - Size: a medium instance as a starting point. Some tools need a lot of memory, so leave headroom for the heavier ones when they run in
+    parallel.
+  - Disk: enough for the container images.
+  - Once it is running, confirm it shows as online in the console.
+                                                            1 new message (click) ↓
+                                                                                                      new task? /clear to save 368.9k tokens
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ yes, fix the setup script too
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  sample-tasks  ⎇ ronin/sample-tasks  ▓░░░░ 36%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents

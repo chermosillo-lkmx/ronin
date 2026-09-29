@@ -193,6 +193,25 @@ export async function pastePrompt(target: string, text: string, submit: boolean)
   }
 }
 
+// Tope de texto para escribir en un pane (envío pane-scoped, broadcast y responder_sesion).
+export const MAX_PANE_KEYS_BYTES = 16 * 1024;
+
+/**
+ * Entrega texto a un pane eligiendo el mecanismo por tamaño: teclear con `send-keys -l` hasta
+ * PASTE_THRESHOLD_BYTES y, por encima, buffer + bracketed paste (el Enter inmediato se pierde con
+ * textos largos). Única regla para /keys, broadcast y responder_sesion; `senders` es inyectable
+ * sólo para probar la elección sin tmux.
+ */
+export async function deliverText(
+  target: string,
+  text: string,
+  submit: boolean,
+  senders: { sendText: typeof sendText; pastePrompt: typeof pastePrompt } = { sendText, pastePrompt },
+): Promise<void> {
+  if (Buffer.byteLength(text, "utf8") > PASTE_THRESHOLD_BYTES) await senders.pastePrompt(target, text, submit);
+  else await senders.sendText(target, text, submit);
+}
+
 // Cuántas líneas del final se miran para decidir si hay texto compuesto sin enviar: el marcador
 // del paste vive en la caja de input (abajo), no en el transcript de más arriba.
 const PENDING_RECENT_LINES = 10;
@@ -945,6 +964,88 @@ export function lastMeaningfulLine(pane: string): string {
     .filter((l) => l && !CHROME.test(l));
   const last = lines[lines.length - 1] ?? "";
   return last.replace(/\s+/g, " ").slice(0, 56);
+}
+
+// La caja de input vacía de Claude ("❯" o "│ > │") no es texto útil del agente.
+const PROMPT_ONLY = /^│?\s*[❯>]\s*│?$/;
+// Borde superior de la caja de input ("────" o "╭────╮") y primera línea de la caja ("❯ …" o "│ > …").
+const INPUT_BOX_BORDER = /^[╭]?─{3,}[╮]?$/;
+const INPUT_BOX_PROMPT = /^│?\s*[❯>](\s|$)/;
+// Línea de tiempo/resumen del turno de Claude: "✻ Sautéed for 1m 43s · done 9:21 AM", también
+// truncada ("✻ Baked for 45…") o con otro sufijo ("· 2 agents"). Exige una duración tras "for" para
+// no confundirla con una viñeta de contenido ("* Wait for the build").
+const TURN_TIMING = /^[✻✶✢✳✽·*]\s+\p{L}[\p{L}'’-]*\s+for\s+\d+(?:\.\d+)?(?:[hms](?=\s|$|·)|…|$)/u;
+// Avisos transitorios que Claude Code alinea a la derecha justo encima de la caja de input. Se
+// descartan sólo si coinciden con un aviso conocido Y vienen con sangría grande: una línea muy
+// sangrada por sí sola puede ser contenido real (celdas de tabla, texto centrado, código), así que
+// la sangría nunca basta para tirarla.
+const NOTICE_INDENT = 30;
+const NOTICES = [
+  /^new task\? \/clear to save\b/,
+  /^\d+ new messages? \(click\)/,
+  /^✔ Update installed\b/,
+  /^Update available\b/,
+];
+// Prefijo del resumen que Claude Code imprime al volver a una sesión: el texto que sigue sí es contenido.
+const RECAP_PREFIX = /^※\s*recap:\s*/u;
+// Status line personalizada bajo la caja: "<sesión>  ⎇ <rama>".
+const STATUS_LINE = /\s⎇\s/;
+
+function isNotice(line: string): boolean {
+  const indent = line.length - line.trimStart().length;
+  const text = line.trim();
+  return indent >= NOTICE_INDENT && NOTICES.some((re) => re.test(text));
+}
+
+/** Índice del borde superior de la última caja de input (borde "────" justo encima de "❯"), o -1. */
+function inputBoxTop(lines: string[]): number {
+  for (let i = lines.length - 1; i > 0; i--) {
+    if (INPUT_BOX_PROMPT.test(lines[i]!.trim()) && INPUT_BOX_BORDER.test(lines[i - 1]!.trim())) return i - 1;
+  }
+  return -1;
+}
+
+function cleanText(text: string, max: number): string {
+  return text
+    .replace(/^[⏺●]\s*/u, "")
+    .replace(RECAP_PREFIX, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+/**
+ * La "pregunta" que ve un cliente MCP cuando el agente quedó idle esperando al usuario: el último
+ * párrafo de Claude encima de la caja de input. Todo lo que hay desde el borde superior de la caja
+ * hacia abajo (la sugerencia gris de prompt tras "❯", status line, footer) se ignora. Encima de la
+ * caja se quitan los avisos flotantes alineados a la derecha ("new task? /clear…", "1 new message
+ * (click) ↓", "✔ Update installed…") y la línea de tiempo del turno cuenta como separador, nunca
+ * como contenido: si el último párrafo sólo era esa línea, se sube al anterior. Las líneas del
+ * párrafo se unen con un espacio, sin la viñeta `⏺`/`●` ni el prefijo `※ recap:`, con tope `max`.
+ * Si sólo queda ruido devuelve "". Sin caja reconocible, cae a la última línea útil (sin chrome,
+ * avisos, línea de tiempo ni status line con `⎇`).
+ */
+export function lastMeaningfulText(pane: string, max: number): string {
+  const lines = recentLines(pane, Number.MAX_SAFE_INTEGER);
+  const top = inputBoxTop(lines);
+  if (top >= 0) {
+    // Avisos fuera; la línea de tiempo se vuelve un blanco para que corte el párrafo.
+    const above = lines
+      .slice(0, top)
+      .filter((l) => !isNotice(l))
+      .map((l) => (TURN_TIMING.test(l.trim()) ? "" : l.trim()));
+    let end = above.length - 1;
+    while (end >= 0 && !above[end]) end--;
+    if (end < 0) return "";
+    let start = end;
+    while (start > 0 && above[start - 1]) start--;
+    return cleanText(above.slice(start, end + 1).join(" "), max);
+  }
+  const meaningful = lines
+    .filter((l) => !isNotice(l))
+    .map((l) => l.trim())
+    .filter((l) => l && !CHROME.test(l) && !PROMPT_ONLY.test(l) && !STATUS_LINE.test(l) && !TURN_TIMING.test(l));
+  return cleanText(meaningful[meaningful.length - 1] ?? "", max);
 }
 
 // P4: how many recent lines to scan for context-pressure signals. Small, like lastMeaningfulLine,

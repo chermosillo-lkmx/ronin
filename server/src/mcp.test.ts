@@ -21,9 +21,9 @@ function setup() {
 
 const deps = (harness: ReturnType<typeof createTestHarnessService>) => ({ harness, version: "0.1.0-test" });
 
-function invokeMcp(app: ReturnType<typeof createApp>, body: unknown, headers: Record<string, string> = {}): Promise<{ status: number; body?: unknown }> {
+function invokeMcp(app: ReturnType<typeof createApp>, body: unknown, headers: Record<string, string> = {}, url = "/mcp"): Promise<{ status: number; body?: unknown }> {
   return new Promise((resolve, reject) => {
-    const req: any = { method: "POST", url: "/mcp", originalUrl: "/mcp", headers, socket: {}, body, get(name: string) { return headers[name.toLowerCase()]; } };
+    const req: any = { method: "POST", url, originalUrl: url, headers, socket: {}, body, get(name: string) { return headers[name.toLowerCase()]; } };
     const res: any = {
       statusCode: 200,
       setHeader() {},
@@ -77,10 +77,59 @@ test("tools/list publica reportar_pruebas y estado_pruebas con JSON Schema", asy
   const { harness, cleanup } = setup();
   try {
     const response: any = await handleMcp({ jsonrpc: "2.0", id: "tools", method: "tools/list" }, deps(harness));
-    assert.deepEqual(response.result.tools.map((tool: { name: string }) => tool.name), ["reportar_pruebas", "estado_pruebas"]);
+    assert.deepEqual(response.result.tools.map((tool: { name: string }) => tool.name), [
+      "reportar_pruebas", "estado_pruebas",
+      "listar_repos_y_workflows", "crear_sesion", "estado_sesiones", "responder_sesion",
+    ]);
     assert.equal(response.result.tools[0].inputSchema.type, "object");
     assert.deepEqual(response.result.tools[0].inputSchema.required, ["repo", "suite", "junitPath"]);
     assert.equal(response.result.tools[1].inputSchema.properties.repo.type, "string");
+  } finally {
+    cleanup();
+  }
+});
+
+test("scope agent: tools/list sólo publica las herramientas de pruebas y bloquea las de sesión", async () => {
+  const { harness, cleanup } = setup();
+  try {
+    const port = {
+      catalog: async () => ({ repos: ["fixture"], workflows: [] }),
+      launch: async () => { throw new Error("no debería lanzarse"); },
+      status: async () => [],
+      reply: async () => { throw new Error("no debería responder"); },
+    };
+    const list: any = await handleMcp({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { ...deps(harness), sessions: port, scope: "agent" });
+    assert.deepEqual(list.result.tools.map((tool: { name: string }) => tool.name), ["reportar_pruebas", "estado_pruebas"]);
+    const call: any = await handleMcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "listar_repos_y_workflows", arguments: {} } }, { ...deps(harness), sessions: port, scope: "agent" });
+    assert.equal(call.result.isError, true);
+    assert.match(call.result.content[0].text, /no tiene habilitadas las herramientas de sesión/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("POST /mcp?scope=agent no expone el puerto de sesiones; sin scope sí", async () => {
+  const { harness, cleanup } = setup();
+  try {
+    const mcpSessions = {
+      catalog: async () => ({ repos: ["fixture"], workflows: [] }),
+      launch: async () => { throw new Error("no debería lanzarse"); },
+      status: async () => [],
+      reply: async () => { throw new Error("no debería responder"); },
+    };
+    const app = createApp({ harness, mcpSessions });
+    const token = ensureCapabilityToken();
+    const headers = { "x-ronin-capability": token };
+    const catalogCall = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "listar_repos_y_workflows", arguments: {} } };
+    const listCall = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+    const agentCall: any = await invokeMcp(app, catalogCall, headers, "/mcp?scope=agent");
+    assert.equal(agentCall.body.result.isError, true);
+    assert.match(agentCall.body.result.content[0].text, /no tiene habilitadas/);
+    const agentList: any = await invokeMcp(app, listCall, headers, "/mcp?scope=agent");
+    assert.deepEqual(agentList.body.result.tools.map((tool: { name: string }) => tool.name), ["reportar_pruebas", "estado_pruebas"]);
+    const externalCall: any = await invokeMcp(app, catalogCall, headers);
+    assert.equal(externalCall.body.result.isError, undefined);
+    assert.deepEqual(JSON.parse(externalCall.body.result.content[0].text), { repos: ["fixture"], workflows: [] });
   } finally {
     cleanup();
   }
@@ -171,6 +220,31 @@ test("reportar_pruebas devuelve isError y no registra ante JUnit ilegible o ruta
     assert.ok(dir);
   } finally {
     rmSync(outside, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("POST /mcp enruta crear_sesion al puerto de sesiones con capability", async () => {
+  const { harness, cleanup } = setup();
+  try {
+    const launched: unknown[] = [];
+    const mcpSessions = {
+      catalog: async () => ({ repos: ["fixture"], workflows: [] }),
+      launch: async (input: unknown) => { launched.push(input); return { name: "cowork-http", branch: "ronin/cowork-http" }; },
+      status: async () => [],
+      reply: async () => {},
+    };
+    const app = createApp({ harness, mcpSessions });
+    const token = ensureCapabilityToken();
+    const body = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "crear_sesion", arguments: { repo: "fixture", workflowId: "wf-1", request: "hola", name: "cowork-http" } } };
+    assert.equal((await invokeMcp(app, body)).status, 401);
+    const response = await invokeMcp(app, body, { "x-ronin-capability": token });
+    assert.equal(response.status, 200);
+    const result = (response.body as { result: { content: Array<{ text: string }>; isError?: true } }).result;
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(JSON.parse(result.content[0].text), { name: "cowork-http", branch: "ronin/cowork-http" });
+    assert.deepEqual(launched, [{ repo: "fixture", workflowId: "wf-1", request: "hola", name: "cowork-http" }]);
+  } finally {
     cleanup();
   }
 });

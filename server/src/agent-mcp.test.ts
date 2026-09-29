@@ -5,12 +5,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { agentMcpConfig, withMcpConfig, writeAgentMcpConfig } from "./agent-mcp.js";
 
-test("agentMcpConfig configura el servidor local con capability", () => {
+test("agentMcpConfig configura el servidor local con capability y scope de agente", () => {
   assert.deepEqual(agentMcpConfig(4312, "capability-secret"), {
     mcpServers: {
       ronin: {
         type: "http",
-        url: "http://127.0.0.1:4312/mcp",
+        url: "http://127.0.0.1:4312/mcp?scope=agent",
         headers: { "x-ronin-capability": "capability-secret" },
       },
     },

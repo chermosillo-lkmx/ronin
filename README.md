@@ -18,7 +18,8 @@
 - Workflows versionados con **ejecutor y modelo por etapa**, overrides por repositorio, Skills y
   propuestas asistidas por Claude.
 - Terminales ttyd y xterm, captura por pane, foco y Attach a Terminal.app.
-- **Servidor MCP propio**: el agente reporta sus pruebas a Ronin en vez de que Ronin las ejecute.
+- **Servidor MCP propio**: el agente reporta sus pruebas a Ronin en vez de que Ronin las ejecute, y
+  clientes externos pueden crear sesiones, seguirlas y responderles (`crear_sesion`, `estado_sesiones`, `responder_sesion`).
 - Aplicación de escritorio (Electron) empaquetable para macOS, Windows y Linux.
 
 ### Nueva sesión con petición
@@ -156,6 +157,28 @@ los demás servidores MCP del operador siguen disponibles.
 
 El endpoint pasa por la misma puerta de capability y de origen local que el resto de la API; el
 token viaja en la cabecera que Ronin escribe en esa configuración.
+
+La URL de esa configuración es `/mcp?scope=agent`: con ese scope el endpoint sólo lista y acepta
+las herramientas de pruebas, así que un worker no puede crear sesiones ni escribir en otras.
+Riesgo residual: un agente que corre con el mismo usuario del sistema aún podría leer el archivo
+del token de capability y llamar al endpoint sin scope; el scope es una barandilla, no un
+aislamiento.
+
+### Sesiones por MCP
+
+El mismo endpoint (sin `scope`) expone herramientas para clientes externos. Se autentican igual:
+cabecera `X-Ronin-Capability` con el contenido de `<data dir>/capability-token` (se genera al
+arrancar, `0600`; el data dir es `COWORK_DATA_DIR` o `server/data`).
+
+- `listar_repos_y_workflows()` → `{ repos, workflows: [{ id, name, stages }] }`
+- `crear_sesion(repo, workflowId, request, name?, origen?)` → `{ name, branch, worktree }`. Solo
+  repos configurados y workflows del catálogo; `origen` (p. ej. `clickup:<taskId>`) queda en `launch.json`.
+- `estado_sesiones(names?)` → etapa actual, avance, atención, `needsInput`, pregunta, `options`
+  (sólo en menús numerados) y gate fallido.
+- `responder_sesion(name, text)` → escribe en el pane que pidió atención (tope de 16 KB, igual que
+  el envío a un pane); antes vuelve a leer el pane y falla con `SESSION_NOT_WAITING` si la sesión
+  no espera al usuario o el agente ya no está vivo. En un menú numerado sólo acepta el número de
+  una opción (envía esa tecla, sin Enter); otro texto falla con `SESSION_EXPECTS_OPTION`.
 
 ### Ejecutor y modelo por etapa
 
