@@ -13,6 +13,8 @@ export interface SessionPortDeps {
   capture(paneIds: string[]): Promise<Map<string, string | null>>;
   /** Misma entrega que /keys y broadcast: teclea o pega por buffer según el tamaño (deliverText). */
   deliver(paneId: string, text: string, submit: boolean): Promise<void>;
+  /** Registra en el historial el texto libre que el usuario le dio a la sesión (evento reply). */
+  recordReply?(name: string, text: string): void;
   now(): number;
 }
 
@@ -128,6 +130,7 @@ export function createSessionPort(deps: SessionPortDeps): McpSessionPort {
         return;
       }
       await deps.deliver(paneId, clean, true);
+      deps.recordReply?.(name, clean);
     },
   };
 }

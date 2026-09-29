@@ -210,6 +210,8 @@ export interface TmuxSessionInfo {
   flow?: SessionFlow;
   /** Gestionada pero sin nada anotado en su cycle dir: adoptarla es lo que le da un flujo. */
   unrecorded?: boolean;
+  /** Pendientes del repo y estado de la destilación (sólo gestionadas con repo conocido). */
+  memory?: SessionMemoryInfo;
 }
 
 // Espejo de server/src/types.ts. Lo calcula flow-progress.ts leyendo el cycle dir.
@@ -401,4 +403,54 @@ export interface WorkflowAnalysis {
   discarded: { name?: string; reason: string }[];
   error?: string;
   signals: { tasks: number; commits: number; evidenceFiles: number };
+}
+
+// ---- Memoria por repo. Espejo manual de server/src/memory.ts y server/src/types.ts ----
+
+export type MemoryKind = "comando" | "trampa" | "preferencia" | "decision" | "arquitectura";
+export type MemoryStatus = "pending" | "active" | "discarded";
+export type MemoryAction = "approve" | "discard" | "edit";
+
+export interface MemoryEntry {
+  id: string;
+  text: string;
+  kind: MemoryKind;
+  source: string;
+  createdAt: number;
+  updatedAt: number;
+  status: MemoryStatus;
+  uses: number;
+}
+
+export interface KbSuggestion {
+  id: string;
+  text: string;
+  source: string;
+  createdAt: number;
+}
+
+export interface RepoMemoryView {
+  repo: string;
+  enabled: boolean;
+  globalEnabled: boolean;
+  entries: MemoryEntry[];
+  kbSuggestions: KbSuggestion[];
+  preview: { text: string; bytes: number; maxBytes: number; omitted: number };
+}
+
+export type DistillStatus = "running" | "done" | "failed" | "skipped";
+
+export interface DistillState {
+  status: DistillStatus;
+  repo: string;
+  at: number;
+  error?: string;
+  reason?: string;
+  proposed?: number;
+}
+
+export interface SessionMemoryInfo {
+  repo: string;
+  pending: number;
+  distill: DistillState | null;
 }

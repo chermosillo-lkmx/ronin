@@ -56,6 +56,23 @@ export function readFlow(cycle: string): WorkflowConfig | null {
   }
 }
 
+function repoFrom(cycle: string, file: string): string | null {
+  try {
+    const raw = JSON.parse(readFileSync(join(cycle, file), "utf8")) as { repo?: unknown } | null;
+    return typeof raw?.repo === "string" && raw.repo.trim() ? raw.repo : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Repo al que pertenece un ciclo: el de `launch.json` (sesiones lanzadas por Ronin) o, si falta, el
+ * de `adopted.json` (sesiones adoptadas, que nunca tienen launch.json). Nunca lanza.
+ */
+export function readCycleRepo(cycle: string): string | null {
+  return repoFrom(cycle, "launch.json") ?? repoFrom(cycle, "adopted.json");
+}
+
 export function removeCycleDir(cycle: string): void {
   try {
     rmSync(cycle, { recursive: true, force: true });

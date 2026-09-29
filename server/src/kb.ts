@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { runClaudeP } from "./claude-p.js";
 import { dataPath } from "./data-dir.js";
 import { engineInvocation } from "./engine-config.js";
+import { defaultMemoryStore, type KbSuggestion } from "./memory.js";
 import { getPromptTemplate, renderPrompt } from "./prompts.js";
 import { readRepoConfigFull } from "./repo-config.js";
 import { resolveCwd } from "./repos.js";
@@ -220,6 +221,33 @@ export interface GenerateKbDeps extends KbGenerationStateDeps {
   readEngine?: typeof readEngine;
   runClaudeP?: typeof runClaudeP;
   now?: () => number;
+  /** Sugerencias aprobadas desde la memoria del repo (entradas de arquitectura). */
+  readKbSuggestions?: (repo: string) => KbSuggestion[];
+  /** Borra de la memoria las sugerencias que esta generación ya usó. */
+  dropKbSuggestions?: (repo: string, ids: string[]) => void;
+}
+
+/** Texto del spec §6 para `{kbSuggestions}`; "" si no hay sugerencias. */
+export function kbSuggestionsBlock(suggestions: KbSuggestion[]): string {
+  if (!suggestions.length) return "";
+  return [
+    "",
+    "",
+    "Sugerencias de sesiones recientes: verifícalas contra el código y, si son ciertas, incorpóralas con su cita:",
+    ...suggestions.map((suggestion) => `- ${suggestion.text}`),
+  ].join("\n");
+}
+
+function readKbSuggestionsDefault(repo: string): KbSuggestion[] {
+  try {
+    return defaultMemoryStore().read(repo).kbSuggestions;
+  } catch {
+    return []; // repo sin memoria posible (nombre no almacenable): la KB se genera igual
+  }
+}
+
+function dropKbSuggestionsDefault(repo: string, ids: string[]): void {
+  defaultMemoryStore().dropKbSuggestions(repo, ids);
 }
 
 /** Genera o actualiza la KB. Persiste el estado y convierte todo fallo en estado terminal. */
@@ -234,13 +262,26 @@ export async function generateKb(repo: string, deps: GenerateKbDeps = {}): Promi
     const configured = (deps.readRepoConfigFull ?? readRepoConfigFull)(repo).kbPath || null;
     const kbDir = (deps.ensureKbDir ?? ensureKbDir)(resolved.cwd, configured);
     if (!kbDir) throw new Error("no se pudo crear una base de conocimiento dentro del repositorio");
-    const prompt = (deps.renderPrompt ?? renderPrompt)((deps.getPromptTemplate ?? getPromptTemplate)("kb"), { repo, kbDir });
+    const suggestions = (deps.readKbSuggestions ?? readKbSuggestionsDefault)(repo);
+    const suggestionsText = kbSuggestionsBlock(suggestions);
+    const template = (deps.getPromptTemplate ?? getPromptTemplate)("kb");
+    const rendered = (deps.renderPrompt ?? renderPrompt)(template, { repo, kbDir, kbSuggestions: suggestionsText });
+    // Un override guardado antes de que existiera {kbSuggestions} no lo trae: se anexa al final.
+    const prompt = suggestionsText && !template.includes("{kbSuggestions}") ? `${rendered}${suggestionsText}` : rendered;
     const engine = (deps.readEngine ?? readEngine)();
     const output = await (deps.runClaudeP ?? runClaudeP)(prompt, {
       timeoutMs: KB_GENERATION_TIMEOUT_MS,
       cwd: resolved.cwd,
       ...engineInvocation(engine),
     });
+    if (suggestions.length) {
+      try {
+        // Sólo las que se leyeron al empezar: las que llegaron durante la generación se conservan.
+        (deps.dropKbSuggestions ?? dropKbSuggestionsDefault)(repo, suggestions.map((suggestion) => suggestion.id));
+      } catch {
+        /* se reintentarán en la próxima generación; no convierte un ok en failed */
+      }
+    }
     const state: KbGenerationState = { status: "ok", startedAt, finishedAt: now(), output: outputTail(output) };
     writeKbGenerationState(repo, state, deps);
     return state;

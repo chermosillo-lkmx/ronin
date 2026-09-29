@@ -20,6 +20,8 @@
 - Terminales ttyd y xterm, captura por pane, foco y Attach a Terminal.app.
 - **Servidor MCP propio**: el agente reporta sus pruebas a Ronin en vez de que Ronin las ejecute, y
   clientes externos pueden crear sesiones, seguirlas y responderles (`crear_sesion`, `estado_sesiones`, `responder_sesion`).
+- **Memoria por repo**: al terminar un flujo, Ronin propone aprendizajes y, cuando los apruebas, cada
+  sesión nueva del repo los recibe al arrancar.
 - Aplicación de escritorio (Electron) empaquetable para macOS, Windows y Linux.
 
 ### Nueva sesión con petición
@@ -162,7 +164,9 @@ La URL de esa configuración es `/mcp?scope=agent`: con ese scope el endpoint s�
 las herramientas de pruebas, así que un worker no puede crear sesiones ni escribir en otras.
 Riesgo residual: un agente que corre con el mismo usuario del sistema aún podría leer el archivo
 del token de capability y llamar al endpoint sin scope; el scope es una barandilla, no un
-aislamiento.
+aislamiento. `scope=agent` oculta las herramientas de memoria, pero un agente que corre con el
+mismo usuario del sistema puede leer el token de capability y llegar a la memoria directamente
+(incluido `POST /api/repos/:repo/memory`, que crea entradas activas).
 
 ### Sesiones por MCP
 
@@ -179,6 +183,39 @@ arrancar, `0600`; el data dir es `COWORK_DATA_DIR` o `server/data`).
   el envío a un pane); antes vuelve a leer el pane y falla con `SESSION_NOT_WAITING` si la sesión
   no espera al usuario o el agente ya no está vivo. En un menú numerado sólo acepta el número de
   una opción (envía esa tecla, sin Enter); otro texto falla con `SESSION_EXPECTS_OPTION`.
+- `memoria_pendiente(repo?)` → aprendizajes pendientes con `id`, `repo`, `text`, `kind` y `source`.
+- `resolver_memoria(id, accion, texto?)` → `accion` es `aprobar`, `descartar` o `editar` (con
+  `texto`, que también aprueba). Errores: `MEMORY_NOT_FOUND` y `MEMORY_INVALID`. Ninguna de las dos
+  existe con `scope=agent`: un worker no ve ni puede llamar las herramientas de memoria (el token
+  compartido sigue siendo un riesgo residual; ver arriba).
+
+### Memoria por repo
+
+Cada repo tiene una memoria propia en `<dataDir>/memory/<repo>.json`, fuera del repo: no ensucia los
+PRs ni se comparte por git.
+
+- **Destilación.** Cuando todas las etapas de una sesión quedan cumplidas, Ronin corre `claude -p`
+  con el motor de ajustes y la plantilla editable `memory` (⚙ Configuración → Prompts). Recibe la
+  petición, el workflow, la evidencia (`summary`, `research`, `verdict`, `plan.md`, `tests.md`,
+  recortada a 24 KB conservando el final de cada archivo), las respuestas que le diste a la sesión
+  y la memoria actual. Propone de 0 a 5 aprendizajes (`comando`, `trampa`, `preferencia`,
+  `decision` o `arquitectura`). Una salida que no cumple el esquema se descarta completa. También se
+  puede destilar o reintentar desde el inspector de la sesión. Una sesión se destila una sola vez,
+  aunque Ronin se reinicie; tras actualizar, sólo se destilan solos los flujos que terminen después.
+- **Aprobación.** Nada entra sin tu aprobación: en Configuración → Repositorios → 🧠 Memoria revisas
+  las pestañas *Activas*, *Pendientes* y *Para la KB*, y puedes agregar aprendizajes a mano. La lista
+  de sesiones marca con 🧠 N los repos con pendientes.
+- **Inyección.** Cada sesión nueva de workflow recibe, antes de su petición, un bloque de 2 KB como
+  máximo con los aprendizajes activos (primero los más usados). El bloque exacto queda en el campo
+  `memory` de `launch.json`. Se apaga por repo con el interruptor o para todo el equipo con
+  `COWORK_MEMORY=0`.
+- **Puente con la KB.** Los aprendizajes de `arquitectura` nunca se inyectan: al aprobarlos pasan a
+  *Para la KB* y la siguiente generación de la knowledge base los recibe en `{kbSuggestions}` para
+  verificarlos contra el código. Si la generación termina bien, se borran.
+- **Respuestas registradas.** Lo que le respondes a una sesión (con `responder_sesion` o escribiendo
+  en un pane y enviando con Enter) queda en `history.jsonl` como evento `reply`, recortado a 2000
+  caracteres, para alimentar la destilación. Se asume que no es secreto porque es texto dirigido al
+  agente: no pegues credenciales en una sesión.
 
 ### Ejecutor y modelo por etapa
 
@@ -315,6 +352,7 @@ variables opcionales hay que pasarlas lanzando el binario:
 ```bash
 COWORK_REPORT_SCHEDULE=1 release/mac-arm64/Ronin.app/Contents/MacOS/Ronin   # p.ej. encender los reportes
 COWORK_VERIFY_GATE=0 release/mac-arm64/Ronin.app/Contents/MacOS/Ronin       # o apagar el gate de verifyCmd
+COWORK_MEMORY=0 release/mac-arm64/Ronin.app/Contents/MacOS/Ronin           # o apagar la memoria por repo
 ```
 
 Sin firma ni notarización todavía: la primera vez, macOS pide abrirla con clic derecho → Abrir.

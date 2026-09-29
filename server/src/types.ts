@@ -221,6 +221,8 @@ export interface TmuxSessionInfo {
   flow?: SessionFlow;
   /** Gestionada pero sin nada anotado en su cycle dir: adoptarla es lo que le da un flujo. */
   unrecorded?: boolean;
+  /** Sólo gestionadas con repo conocido: pendientes de ese repo y estado de la destilación. */
+  memory?: SessionMemoryInfo;
 }
 
 // ---- Preflight (F1). Espejo manual en web/src/types.ts ----
@@ -233,4 +235,27 @@ export interface PreflightCheck {
   level: CheckLevel;
   detail: string;
   note?: string;   // qué hacer; sólo se rellena cuando level !== "ok"
+}
+
+// ---- Memoria por repo (spec 2026-09-29). Espejo manual en web/src/types.ts ----
+
+export type DistillStatus = "running" | "done" | "failed" | "skipped";
+
+export interface DistillState {
+  status: DistillStatus;
+  repo: string;
+  /** ms epoch del último cambio de estado. */
+  at: number;
+  /** Sólo en failed. */
+  error?: string;
+  /** Sólo en skipped: por qué no se destiló. */
+  reason?: string;
+  /** Sólo en done: entradas nuevas que quedaron pendientes. */
+  proposed?: number;
+}
+
+export interface SessionMemoryInfo {
+  repo: string;
+  pending: number;
+  distill: DistillState | null;
 }

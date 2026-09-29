@@ -61,5 +61,8 @@ export function resolveVerifyGate(raw: string | undefined): boolean {
   return raw !== "0";
 }
 export const VERIFY_GATE = resolveVerifyGate(process.env.COWORK_VERIFY_GATE);
+
+/** Memoria por repo: `COWORK_MEMORY=0` apaga la inyección al lanzar y la destilación automática. */
+export const MEMORY = process.env.COWORK_MEMORY !== "0";
 export const REPORT_DAILY_AT = process.env.COWORK_REPORT_DAILY_AT ?? "19:00";
 export const REPORT_WEEKLY_DAY = Number(process.env.COWORK_REPORT_WEEKLY_DAY ?? 5); // 0=Dom..6=Sáb, default vie

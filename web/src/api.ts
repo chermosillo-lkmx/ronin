@@ -1,4 +1,4 @@
-import type { EngineChoice, KnowledgeBaseGeneration, KnowledgeBaseInfo, TestCasesFile, TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionCleanupReport, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
+import type { DistillState, EngineChoice, KnowledgeBaseGeneration, KnowledgeBaseInfo, MemoryAction, MemoryKind, RepoMemoryView, TestCasesFile, TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionCleanupReport, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
 
 /** Carries the server's {path, code} (T11/T13) so a save failure can be shown per-field, or as
  *  a clear "someone is mid-flight on this stage" message (STAGE_IN_FLIGHT, T13), not just text. */
@@ -257,6 +257,48 @@ export async function generateRepoKnowledgeBase(repo: string): Promise<Knowledge
 export async function getRepoKnowledgeBaseGeneration(repo: string): Promise<KnowledgeBaseGeneration | null> {
   const r = await fetch(`/api/repos/${encodeURIComponent(repo)}/kb/generation`);
   return r.ok ? r.json() : null;
+}
+
+const memoryUrl = (repo: string, suffix = "") => `/api/repos/${encodeURIComponent(repo)}/memory${suffix}`;
+
+async function memoryRequest<T>(url: string, init: RequestInit, fallback: string): Promise<T> {
+  const r = await fetch(url, init);
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.error || fallback);
+  }
+  return r.json();
+}
+
+export async function getRepoMemory(repo: string): Promise<RepoMemoryView | null> {
+  const r = await fetch(memoryUrl(repo));
+  return r.ok ? r.json() : null;
+}
+
+export function setRepoMemoryEnabled(repo: string, enabled: boolean): Promise<RepoMemoryView> {
+  return memoryRequest(memoryUrl(repo, "/enabled"), {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+  }, "no se pudo cambiar la memoria del repo");
+}
+
+export function addRepoMemory(repo: string, input: { text: string; kind: MemoryKind }): Promise<RepoMemoryView> {
+  return memoryRequest(memoryUrl(repo), {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+  }, "no se pudo agregar el aprendizaje");
+}
+
+export function resolveRepoMemory(repo: string, id: string, action: MemoryAction, text?: string): Promise<RepoMemoryView> {
+  return memoryRequest(memoryUrl(repo, `/${encodeURIComponent(id)}`), {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(text === undefined ? { action } : { action, text }),
+  }, "no se pudo guardar el aprendizaje");
+}
+
+export function deleteRepoMemory(repo: string, id: string): Promise<RepoMemoryView> {
+  return memoryRequest(memoryUrl(repo, `/${encodeURIComponent(id)}`), { method: "DELETE" }, "no se pudo borrar el aprendizaje");
+}
+
+export function distillSession(name: string): Promise<DistillState | null> {
+  return memoryRequest(`/api/sessions/${encodeURIComponent(name)}/distill`, { method: "POST" }, "no se pudo destilar la sesión");
 }
 
 export async function getTrustedRoots(): Promise<TrustedRoots> {

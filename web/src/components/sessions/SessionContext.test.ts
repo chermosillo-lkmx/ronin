@@ -45,3 +45,15 @@ test("SessionContext: reserva el badge ámbar para sesiones que esperan decisió
   assert.doesNotMatch(html, /cowork-idle<\/code><b class="ronin-attention-badge">/);
   assert.doesNotMatch(html, /cowork-working<\/code><b class="ronin-attention-badge">/);
 });
+
+test("SessionContext: badge 🧠 N junto al repo sólo cuando hay pendientes", () => {
+  const withPending: TmuxSessionInfo = { ...idle, name: "cowork-memoria", memory: { repo: "acme-api", pending: 2, distill: null } };
+  const withoutPending: TmuxSessionInfo = { ...idle, name: "cowork-sin-pendientes", memory: { repo: "acme-web", pending: 0, distill: null } };
+  const html = renderToString(createElement(SessionContext, {
+    sessions: [withPending, withoutPending], selected: null, filter: "", diagnostic: null,
+    onFilter: () => {}, onSelect: () => {}, onEditPresentation: () => {}, onNew: () => {},
+  }));
+  assert.match(html, /acme-api<b class="ronin-memory-badge"[^>]*>🧠 2<\/b>/);
+  assert.match(html, /acme-web/);
+  assert.equal((html.match(/🧠/g) ?? []).length, 1);
+});
