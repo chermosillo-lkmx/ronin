@@ -57,6 +57,7 @@ import { createTestHarnessService, HarnessError, type TestHarnessService } from 
 import { handleMcp } from "./mcp.js";
 import { createSessionPort } from "./mcp-session-port.js";
 import type { McpSessionPort } from "./mcp-sessions.js";
+import { createMemoryPort, type McpMemoryPort } from "./mcp-memory.js";
 import { withMcpConfig, writeAgentMcpConfig } from "./agent-mcp.js";
 import { runClaudeP } from "./claude-p.js";
 import { createAnalyzer, type Analyzer } from "./workflow-insights/analyzer.js";
@@ -146,6 +147,8 @@ export interface CreateAppOptions {
   readTmuxInventory?: typeof readTmuxInventory;
   /** Puerto de sesiones para /mcp; en producción se construye con las dependencias reales. */
   mcpSessions?: McpSessionPort;
+  /** Puerto de memoria para /mcp; en producción usa el store real. */
+  mcpMemory?: McpMemoryPort;
   /** Registro de respuestas del usuario (evento reply); las pruebas lo espían en vez de escribir history.jsonl. */
   recordReply?: (session: string, text: string) => void;
   /** Costuras de la memoria por repo para pruebas HTTP con un store temporal y un destilador falso. */
@@ -267,10 +270,11 @@ const mcpSessions = options.mcpSessions ?? createSessionPort({
   now: () => Date.now(),
   recordReply: recordSessionReply,
 });
+const mcpMemory = options.mcpMemory ?? createMemoryPort(memoryApi.store());
 app.post("/mcp", async (req, res) => {
   // Los agentes que lanza Ronin usan /mcp?scope=agent (agent-mcp.ts): sin puerto de sesiones, así
   // un worker no puede crear sesiones ni escribir en otras. Los clientes externos no cambian.
-  const deps = req.query.scope === "agent" ? { harness, scope: "agent" as const } : { harness, sessions: mcpSessions };
+  const deps = req.query.scope === "agent" ? { harness, scope: "agent" as const } : { harness, sessions: mcpSessions, memory: mcpMemory };
   const response = await handleMcp(req.body, deps);
   if (response === null) return void res.status(202).end();
   res.json(response);
