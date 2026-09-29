@@ -14,7 +14,7 @@ import { resolveCwd } from "./repos.js";
 import { isSafeSessionName } from "./session-name.js";
 import { readEngine } from "./settings.js";
 import { cycleDirForSession, readCycleRepo } from "./stages.js";
-import type { DistillState, DistillStatus } from "./types.js";
+import type { DistillState, DistillStatus, SessionMemoryInfo, TmuxSessionInfo } from "./types.js";
 
 /**
  * Destilación de memoria (spec §5). Una sola en curso por repo; las demás esperan en una cola EN
@@ -289,4 +289,39 @@ export function startMemoryDistiller(distiller: Pick<Distiller, "scan">, interva
   }, intervalMs);
   timer.unref?.();
   return { stop: () => clearInterval(timer) };
+}
+
+/** Repo de una sesión según su cycle dir; null si no se sabe o el nombre es inseguro. */
+export function sessionRepo(session: string): string | null {
+  try {
+    return readCycleRepo(cycleDirForSession(session));
+  } catch {
+    return null;
+  }
+}
+
+export interface SessionMemoryDeps {
+  store: Pick<MemoryStore, "knows" | "pending">;
+  stateOf(session: string): DistillState | null;
+  repoOf(session: string): string | null;
+}
+
+/** Lo que la UI necesita para el badge y el inspector. Nunca lanza: sin datos → null. */
+export function sessionMemoryInfo(session: string, deps: SessionMemoryDeps): SessionMemoryInfo | null {
+  try {
+    const repo = deps.repoOf(session);
+    if (!repo || !deps.store.knows(repo)) return null;
+    return { repo, pending: deps.store.pending(repo).length, distill: deps.stateOf(session) };
+  } catch {
+    return null;
+  }
+}
+
+/** Cuelga `memory` sólo de las sesiones gestionadas con datos; las ajenas no se tocan. */
+export function attachSessionMemory(sessions: TmuxSessionInfo[], info: (name: string) => SessionMemoryInfo | null): TmuxSessionInfo[] {
+  return sessions.map((session) => {
+    if (session.kind !== "managed") return session;
+    const memory = info(session.name);
+    return memory ? { ...session, memory } : session;
+  });
 }

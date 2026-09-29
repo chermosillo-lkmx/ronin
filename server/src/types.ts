@@ -221,6 +221,8 @@ export interface TmuxSessionInfo {
   flow?: SessionFlow;
   /** Gestionada pero sin nada anotado en su cycle dir: adoptarla es lo que le da un flujo. */
   unrecorded?: boolean;
+  /** Sólo gestionadas con repo conocido: pendientes de ese repo y estado de la destilación. */
+  memory?: SessionMemoryInfo;
 }
 
 // ---- Preflight (F1). Espejo manual en web/src/types.ts ----

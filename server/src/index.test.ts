@@ -13,6 +13,8 @@ import { createApp, runConfiguredClaude, startServer } from "./index.js";
 import { createSession } from "./tmux.js";
 import { cycleDirForSession } from "./stages.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
+import { createMemoryStore } from "./memory.js";
+import type { Distiller } from "./memory-distiller.js";
 
 const pexec = promisify(execFile);
 
@@ -402,6 +404,170 @@ test("POST /api/repos/:repo/kb/generate inicia en segundo plano y rechaza duplic
     await new Promise((resolve) => setImmediate(resolve));
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function memoryFixture() {
+  const directory = mkdtempSync(join(tmpdir(), "ronin-api-memory-"));
+  let seq = 0;
+  const store = createMemoryStore({ directory, listRepos: () => ["acme-api"], now: () => 1_790_000_000_000, newId: (prefix) => `${prefix}_${++seq}` });
+  return { store, cleanup: () => rmSync(directory, { recursive: true, force: true }) };
+}
+
+function fakeDistiller(overrides: Partial<Distiller> = {}): Distiller {
+  return {
+    request: () => "queued",
+    scan: () => [],
+    stateOf: () => ({ status: "running", repo: "acme-api", at: 1 }),
+    idle: async () => {},
+    ...overrides,
+  };
+}
+
+test("rutas de memoria: capability, repo desconocido, vista, alta manual, validación y enabled", async () => {
+  const token = ensureCapabilityToken();
+  const { store, cleanup } = memoryFixture();
+  try {
+    const app = createApp({ memory: { store, distiller: fakeDistiller(), globalEnabled: true } });
+    const headers = { "x-ronin-capability": token };
+    assert.equal((await invokeRequest(app, "GET", "/api/repos/acme-api/memory")).status, 401);
+
+    const unknown = await invokeRequest(app, "GET", "/api/repos/acme-otro/memory", { headers });
+    assert.equal(unknown.status, 404);
+    assert.equal((unknown.body as any).code, "REPO_UNKNOWN");
+    assert.equal(typeof (unknown.body as any).error, "string");
+
+    const empty = await invokeRequest(app, "GET", "/api/repos/acme-api/memory", { headers });
+    assert.deepEqual(empty, {
+      status: 200,
+      body: { repo: "acme-api", enabled: true, globalEnabled: true, entries: [], kbSuggestions: [], preview: { text: "", bytes: 0, maxBytes: 2048, omitted: 0 } },
+    });
+
+    const added = await invokeRequest(app, "POST", "/api/repos/acme-api/memory", { headers, body: { text: "Tests: usar make test-unit", kind: "comando" } });
+    assert.equal(added.status, 200);
+    assert.equal((added.body as any).entries[0].status, "active");
+    assert.match((added.body as any).preview.text, /- \[comando\] Tests: usar make test-unit/);
+    assert.equal((added.body as any).preview.bytes, Buffer.byteLength((added.body as any).preview.text, "utf8"));
+
+    for (const body of [{ text: "", kind: "comando" }, { text: "x".repeat(201), kind: "comando" }, { text: "ok", kind: "chisme" }, undefined]) {
+      const bad = await invokeRequest(app, "POST", "/api/repos/acme-api/memory", { headers, body });
+      assert.equal(bad.status, 400, JSON.stringify(body));
+      assert.equal((bad.body as any).code, "MEMORY_INVALID");
+    }
+
+    const off = await invokeRequest(app, "PUT", "/api/repos/acme-api/memory/enabled", { headers, body: { enabled: false } });
+    assert.equal(off.status, 200);
+    assert.equal((off.body as any).enabled, false);
+    const badToggle = await invokeRequest(app, "PUT", "/api/repos/acme-api/memory/enabled", { headers, body: { enabled: "no" } });
+    assert.equal(badToggle.status, 400);
+    assert.equal((badToggle.body as any).code, "MEMORY_INVALID");
+    assert.equal((await invokeRequest(app, "PUT", "/api/repos/acme-otro/memory/enabled", { headers, body: { enabled: true } })).status, 404);
+  } finally {
+    cleanup();
+  }
+});
+
+test("PATCH y DELETE de memoria: aprobar, editar, arquitectura a la KB, descartar, borrar; 400, 404 y 409", async () => {
+  const token = ensureCapabilityToken();
+  const { store, cleanup } = memoryFixture();
+  try {
+    const [a, b, c] = store.propose("acme-api", [
+      { text: "Pendiente A", kind: "trampa" },
+      { text: "Pendiente B", kind: "comando" },
+      { text: "Pendiente C", kind: "arquitectura" },
+    ], "cowork-x");
+    const app = createApp({ memory: { store, distiller: fakeDistiller(), globalEnabled: true } });
+    const headers = { "x-ronin-capability": token };
+    const patch = (id: string, body: unknown) => invokeRequest(app, "PATCH", `/api/repos/acme-api/memory/${id}`, { headers, body });
+
+    assert.equal((await patch(a.id, { action: "approve" })).status, 200);
+    const edited = await patch(b.id, { action: "edit", text: "Pendiente B editada" });
+    assert.equal(edited.status, 200);
+    assert.deepEqual((edited.body as any).entries.map((e: any) => [e.text, e.status]), [["Pendiente A", "active"], ["Pendiente B editada", "active"], ["Pendiente C", "pending"]]);
+
+    const toKb = await patch(c.id, { action: "approve" });
+    assert.deepEqual((toKb.body as any).kbSuggestions.map((s: any) => s.text), ["Pendiente C"]);
+
+    const again = await patch(a.id, { action: "approve" });
+    assert.equal(again.status, 409);
+    assert.equal((again.body as any).code, "MEMORY_INVALID");
+
+    const discarded = await patch(a.id, { action: "discard" });
+    assert.equal(discarded.status, 200);
+    assert.deepEqual((discarded.body as any).entries.map((e: any) => e.text), ["Pendiente B editada"]);
+
+    const missing = await patch("m_nope", { action: "approve" });
+    assert.equal(missing.status, 404);
+    assert.equal((missing.body as any).code, "MEMORY_NOT_FOUND");
+    assert.equal((await patch(b.id, { action: "borrar" })).status, 400);
+    assert.equal((await patch(b.id, { action: "edit", text: "" })).status, 400);
+
+    const kbId = (toKb.body as any).kbSuggestions[0].id;
+    assert.equal((await invokeRequest(app, "DELETE", `/api/repos/acme-api/memory/${kbId}`)).status, 401);
+    const removed = await invokeRequest(app, "DELETE", `/api/repos/acme-api/memory/${kbId}`, { headers });
+    assert.equal(removed.status, 200);
+    assert.deepEqual((removed.body as any).kbSuggestions, []);
+    const gone = await invokeRequest(app, "DELETE", `/api/repos/acme-api/memory/${kbId}`, { headers });
+    assert.equal(gone.status, 404);
+    assert.equal((gone.body as any).code, "MEMORY_NOT_FOUND");
+  } finally {
+    cleanup();
+  }
+});
+
+test("POST /api/sessions/:name/distill: 202 en cola, 409 en curso, 404 sin ciclo y 400 con nombre inválido", async () => {
+  const token = ensureCapabilityToken();
+  const requested: string[] = [];
+  const distiller = fakeDistiller({
+    request: (name, trigger) => {
+      requested.push(`${name}:${trigger}`);
+      return name === "cowork-ocupada" ? "busy" : name === "cowork-nada" ? "unknown" : "queued";
+    },
+  });
+  const app = createApp({ memory: { distiller } });
+  const headers = { "x-ronin-capability": token };
+  assert.equal((await invokeRequest(app, "POST", "/api/sessions/cowork-csv/distill")).status, 401);
+  assert.deepEqual(await invokeRequest(app, "POST", "/api/sessions/cowork-csv/distill", { headers }), { status: 202, body: { status: "running", repo: "acme-api", at: 1 } });
+  const busy = await invokeRequest(app, "POST", "/api/sessions/cowork-ocupada/distill", { headers });
+  assert.equal(busy.status, 409);
+  assert.equal((busy.body as any).code, "DISTILL_RUNNING");
+  const missing = await invokeRequest(app, "POST", "/api/sessions/cowork-nada/distill", { headers });
+  assert.equal(missing.status, 404);
+  assert.equal((missing.body as any).code, "SESSION_NOT_FOUND");
+  const invalid = await invokeRequest(app, "POST", "/api/sessions/mal%20nombre/distill", { headers });
+  assert.equal(invalid.status, 400);
+  assert.equal((invalid.body as any).code, "INVALID_SESSION");
+  assert.deepEqual(requested, ["cowork-csv:manual", "cowork-ocupada:manual", "cowork-nada:manual"]);
+});
+
+test("GET /api/sessions añade memory (repo, pendientes y destilación) sólo a gestionadas con repo conocido", async () => {
+  const { store, cleanup } = memoryFixture();
+  try {
+    store.propose("acme-api", [{ text: "Pendiente", kind: "trampa" }, { text: "Otra", kind: "comando" }], "cowork-memoria-a");
+    const base = { windows: 1, panes: [], createdAt: 0, attached: false, adopted: false };
+    const app = createApp({
+      readTmuxInventory: async () => ({
+        sessions: [
+          { ...base, name: "cowork-memoria-a", kind: "managed" as const },
+          { ...base, name: "cowork-memoria-sin-repo", kind: "managed" as const },
+          { ...base, name: "memoria-ajena", kind: "foreign" as const },
+        ],
+        diagnostic: null,
+      }),
+      memory: {
+        store,
+        distiller: fakeDistiller({ stateOf: () => ({ status: "done", repo: "acme-api", at: 5, proposed: 2 }) }),
+        repoOf: (name) => (name === "cowork-memoria-sin-repo" ? null : "acme-api"),
+      },
+    });
+    const response = await invokeRequest(app, "GET", "/api/sessions");
+    assert.equal(response.status, 200);
+    const sessions = (response.body as any).sessions;
+    assert.deepEqual(sessions[0].memory, { repo: "acme-api", pending: 2, distill: { status: "done", repo: "acme-api", at: 5, proposed: 2 } });
+    assert.equal("memory" in sessions[1], false);
+    assert.equal("memory" in sessions[2], false);
+  } finally {
+    cleanup();
   }
 });
 

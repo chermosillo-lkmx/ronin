@@ -30,7 +30,8 @@ import { isReplyText, readHistory, recordEvent, recordReply } from "./history.js
 import { generateReport, listReports, readReport, BadRequest } from "./reports.js";
 import { startReportSchedule } from "./report-schedule.js";
 import { cycleDirForSession, readCycleRepo } from "./stages.js";
-import { getDefaultDistiller, startMemoryDistiller } from "./memory-distiller.js";
+import { attachSessionMemory, getDefaultDistiller, sessionMemoryInfo, sessionRepo, startMemoryDistiller, type Distiller } from "./memory-distiller.js";
+import { defaultMemoryStore, MemoryError, memoryView, type MemoryStore, type RepoMemory } from "./memory.js";
 import { realVerifyDriverDeps } from "./verify-driver-deps.js";
 import { startVerifyDriver } from "./verify-driver.js";
 import { startTtyd } from "./ttyd.js";
@@ -147,6 +148,13 @@ export interface CreateAppOptions {
   mcpSessions?: McpSessionPort;
   /** Registro de respuestas del usuario (evento reply); las pruebas lo espían en vez de escribir history.jsonl. */
   recordReply?: (session: string, text: string) => void;
+  /** Costuras de la memoria por repo para pruebas HTTP con un store temporal y un destilador falso. */
+  memory?: {
+    store?: MemoryStore;
+    distiller?: Distiller;
+    globalEnabled?: boolean;
+    repoOf?: (session: string) => string | null;
+  };
   /** Costuras de las rutas KB para pruebas HTTP con un repositorio temporal. */
   kb?: {
     listRepos?: typeof listRepos;
@@ -230,6 +238,13 @@ const kbApi = {
   downloadsDirectory: options.kb?.downloadsDirectory ?? (() => join(homedir(), "Downloads")),
   temporaryDirectory: options.kb?.temporaryDirectory ?? tmpdir,
   now: options.kb?.now ?? (() => new Date()),
+};
+// Perezoso: ni el store ni el destilador de producción se construyen hasta que una ruta los usa.
+const memoryApi = {
+  store: (): MemoryStore => options.memory?.store ?? defaultMemoryStore(),
+  distiller: (): Distiller => options.memory?.distiller ?? getDefaultDistiller(),
+  globalEnabled: options.memory?.globalEnabled ?? MEMORY,
+  repoOf: options.memory?.repoOf ?? sessionRepo,
 };
 app.use(cors(corsOptions));
 // Los tres guards van ANTES de express.json(): no hay razón para parsear el cuerpo de una
@@ -359,6 +374,31 @@ app.post("/api/repos/:repo/kb/zip", requireKbCapability, async (req, res) => {
     res.status(500).json({ error: (error as Error).message });
   }
 });
+
+// ---- Memoria por repo (spec §7). Misma seguridad que la KB: capability también en GET. ----
+function respondMemoryError(res: express.Response, error: unknown): void {
+  if (error instanceof MemoryError) {
+    res.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  res.status(500).json({ error: "no se pudo guardar la memoria del repo", code: "MEMORY_FAILED" });
+}
+
+function memoryRoute(handler: (req: express.Request) => RepoMemory) {
+  return (req: express.Request, res: express.Response): void => {
+    try {
+      res.json(memoryView(handler(req), memoryApi.globalEnabled));
+    } catch (error) {
+      respondMemoryError(res, error);
+    }
+  };
+}
+
+app.get("/api/repos/:repo/memory", requireKbCapability, memoryRoute((req) => memoryApi.store().read(req.params.repo)));
+app.put("/api/repos/:repo/memory/enabled", requireKbCapability, memoryRoute((req) => memoryApi.store().setEnabled(req.params.repo, req.body?.enabled)));
+app.post("/api/repos/:repo/memory", requireKbCapability, memoryRoute((req) => memoryApi.store().add(req.params.repo, req.body)));
+app.patch("/api/repos/:repo/memory/:id", requireKbCapability, memoryRoute((req) => memoryApi.store().resolve(req.params.repo, req.params.id, req.body?.action, req.body?.text)));
+app.delete("/api/repos/:repo/memory/:id", requireKbCapability, memoryRoute((req) => memoryApi.store().remove(req.params.repo, req.params.id)));
 
 // Read / edit the repo→folder map (data/repos.json) from the settings UI
 app.get("/api/repos-config", (_req, res) => {
@@ -628,11 +668,16 @@ app.post("/api/prompts/:key/reset", (req, res) => {
 app.get("/api/sessions", async (_req, res) => {
   const inventory = await readInventory();
   const presentations = sessionPresentations.list(inventory.sessions.map((session) => session.name));
+  const sessions = inventory.sessions.map((session) => presentations[session.name]
+    ? { ...session, presentation: presentations[session.name] }
+    : session);
   res.json({
     ...inventory,
-    sessions: inventory.sessions.map((session) => presentations[session.name]
-      ? { ...session, presentation: presentations[session.name] }
-      : session),
+    sessions: attachSessionMemory(sessions, (name) => sessionMemoryInfo(name, {
+      store: memoryApi.store(),
+      stateOf: (session) => memoryApi.distiller().stateOf(session),
+      repoOf: memoryApi.repoOf,
+    })),
   });
 });
 
@@ -717,6 +762,18 @@ app.post("/api/sessions/:name/attach", async (req, res) => {
   if (!(await terminal.hasSession(name))) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
   await terminal.openTerminal(name);
   res.json({ ok: true });
+});
+
+// Destilar (o reintentar) a mano. Corre en segundo plano: 202 con el estado; el inspector lo sondea
+// por GET /api/sessions.
+app.post("/api/sessions/:name/distill", (req, res) => {
+  const { name } = req.params;
+  if (!isSafeSessionName(name)) return res.status(400).json({ error: "nombre de sesión inválido", code: "INVALID_SESSION" });
+  const distiller = memoryApi.distiller();
+  const outcome = distiller.request(name, "manual");
+  if (outcome === "unknown") return res.status(404).json({ error: "la sesión no tiene un ciclo con un repo configurado", code: "SESSION_NOT_FOUND" });
+  if (outcome === "busy") return res.status(409).json({ error: "ya hay una destilación en curso para esta sesión", code: "DISTILL_RUNNING" });
+  res.status(202).json(distiller.stateOf(name));
 });
 
 // La etiqueta es metadata local: título y repo para operar la lista, sin `rename-session`.
