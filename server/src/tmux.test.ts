@@ -412,3 +412,63 @@ test("lastMeaningfulText sin caja de input conserva el comportamiento previo", (
   const pane = ["⏺ Listo el plan. ¿Lo implemento?", "", "❯ ", "  ⏵⏵ bypass permissions on (shift+tab to cycle)"].join("\n");
   assert.equal(lastMeaningfulText(pane, 500), "Listo el plan. ¿Lo implemento?");
 });
+
+// Capturas reales (prosa neutralizada) con avisos flotantes alineados a la derecha sobre la caja.
+const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+
+test("lastMeaningfulText salta la línea de tiempo y el aviso «new task? /clear» que la sigue", () => {
+  assert.equal(
+    lastMeaningfulText(fixture("claude-pane-notice-after-timing.txt"), 500),
+    "1. The first item explains a small gap that showed up while running the suite. It is long enough that it wraps onto a second line in the pane, and it ends right here. 2. endpoints.md was out of date. It now lists every route that is mounted, with the new ones documented apart from the older ones.",
+  );
+});
+
+test("lastMeaningfulText ignora «N new message (click) ↓» y «✔ Update installed» apilados", () => {
+  assert.equal(lastMeaningfulText(fixture("claude-pane-notices-stacked.txt"), 500), "Follow-up tickets (outside the gate)");
+});
+
+test("lastMeaningfulText ignora «1 new message» y «new task? /clear» y conserva la lista con continuaciones", () => {
+  assert.equal(
+    lastMeaningfulText(fixture("claude-pane-new-message-notice.txt"), 500),
+    "- Image: a current long-term support release. - Size: a medium instance as a starting point. Some tools need a lot of memory, so leave headroom for the heavier ones when they run in parallel. - Disk: enough for the container images. - Once it is running, confirm it shows as online in the console.",
+  );
+});
+
+test("lastMeaningfulText devuelve el párrafo «※ recap:» sin el prefijo", () => {
+  assert.equal(
+    lastMeaningfulText(fixture("claude-pane-recap.txt"), 500),
+    "The goal is to speed up the slow endpoints. Phase one is now in the plan stage in its own session, and it wraps onto more than one line in the pane. Next, review its plan once it is ready, and say whether a ticket is wanted for it.",
+  );
+});
+
+const BOX = ["─".repeat(60), "❯ sugerencia gris de Claude", "─".repeat(60), "  mi-sesion  ⎇ main  ▓░░░░ 20%", "  ⏵⏵ auto mode on (shift+tab to cycle)"];
+const pad = (text: string) => " ".repeat(60 - text.length > 30 ? 60 - text.length : 40) + text;
+
+test("lastMeaningfulText salta una línea de tiempo con sufijo o truncada pegada al párrafo", () => {
+  for (const timing of ["✢ Crunched for 3m 2s · done 4:10 PM", "· Worked for 12s · done 9:0…", "* Pondered for 1h 2m", "✳ Mulled for 7s · 2 agents"]) {
+    const pane = ["⏺ ¿Sigo con la etapa de pruebas?", timing, ...BOX].join("\n");
+    assert.equal(lastMeaningfulText(pane, 500), "¿Sigo con la etapa de pruebas?", timing);
+  }
+});
+
+test("lastMeaningfulText sube al párrafo anterior si el último es sólo la línea de tiempo", () => {
+  const pane = ["⏺ ¿Hago el deploy?", "", "✶ Brewed for 12s · done 1:00 PM", "", ...BOX].join("\n");
+  assert.equal(lastMeaningfulText(pane, 500), "¿Hago el deploy?");
+});
+
+test("lastMeaningfulText descarta un aviso flotante solo al final, pegado al párrafo", () => {
+  for (const notice of ["new task? /clear to save 12.3k tokens", "3 new messages (click) ↓", "✔ Update installed · Restart to update", "Update available"]) {
+    const pane = ["⏺ ¿Abro el PR?", pad(notice), ...BOX].join("\n");
+    assert.equal(lastMeaningfulText(pane, 500), "¿Abro el PR?", notice);
+  }
+});
+
+test("lastMeaningfulText conserva un texto de aviso si no está alineado a la derecha", () => {
+  const pane = ["⏺ Update available", ...BOX].join("\n");
+  assert.equal(lastMeaningfulText(pane, 500), "Update available");
+});
+
+test("lastMeaningfulText devuelve cadena vacía si sobre la caja sólo hay ruido", () => {
+  const pane = ["✻ Baked for 45m 34s · done 5:25 PM", pad("1 new message (click) ↓"), pad("new task? /clear to save 1k tokens"), ...BOX].join("\n");
+  assert.equal(lastMeaningfulText(pane, 500), "");
+});

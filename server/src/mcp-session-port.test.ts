@@ -83,6 +83,19 @@ test("toStatus considera 'idle' con etapas pendientes como espera del usuario", 
   assert.equal(toStatus(session({ attention: { level: "idle", paneId: "%1" } })).needsInput, true);
 });
 
+test("toStatus omite question si sobre la caja de input sólo hay ruido", () => {
+  const box = "─".repeat(60);
+  const pane = [
+    "✻ Baked for 45m 34s · done 5:25 PM",
+    `${" ".repeat(60)}1 new message (click) ↓`,
+    `${" ".repeat(60)}new task? /clear to save 1k tokens`,
+    box, "❯ sugerencia de Claude", box, "  cowork-a  ⎇ ronin/cowork-a  ▓░░░░ 20%",
+  ].join("\n");
+  const status = toStatus(session({ attention: { level: "idle", paneId: "%1" } }), pane);
+  assert.equal(status.needsInput, true);
+  assert.equal("question" in status, false);
+});
+
 test("toStatus no marca needsInput cuando el flujo ya terminó", () => {
   const done = session({ attention: { level: "idle", paneId: "%1" }, flow: { workflow: "w", done: 4, total: 4, stages: [] } });
   assert.equal(toStatus(done).needsInput, false);
