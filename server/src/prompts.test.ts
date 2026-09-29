@@ -18,3 +18,12 @@ test("la plantilla kb tiene un default y conserva guardar/restaurar", () => {
   assert.equal(getPromptTemplate("kb"), DEFAULT_PROMPTS.kb);
   assert.equal(readPromptConfig().find((prompt) => prompt.key === "kb")?.isDefault, true);
 });
+
+test("la plantilla memory existe, tiene default y publica sus placeholders", () => {
+  assert.equal(PROMPT_KEYS.includes("memory"), true);
+  assert.equal(getPromptTemplate("memory"), DEFAULT_PROMPTS.memory);
+  assert.deepEqual(
+    readPromptConfig().find((prompt) => prompt.key === "memory")?.placeholders,
+    ["{repo}", "{session}", "{workflow}", "{request}", "{evidence}", "{replies}", "{known}"],
+  );
+});
