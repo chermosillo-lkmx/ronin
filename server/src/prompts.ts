@@ -38,7 +38,7 @@ const PLACEHOLDERS: Record<PromptKey, string[]> = {
   pr: ["{body}", "{objetivo}", "{resumen}", "{repo}", "{cycle}", "{ev}", "{url}", "{title}"],
   verifier: ["{key}", "{title}", "{ref}", "{cycle}", "{ev}", "{repo}", "{url}"],
   driver: ["{key}", "{title}", "{ref}", "{desc}", "{repo}", "{cycle}", "{ev}", "{url}", "{body}", "{steps}", "{driverPane}", "{workerPane}", "{reviewPane}", "{verifyPane}", "{reviewTool}", "{reviewCmd}", "{brainModel}", "{reviewerModel}", "{implModel}"],
-  kb: ["{repo}", "{kbDir}"],
+  kb: ["{repo}", "{kbDir}", "{kbSuggestions}"],
   memory: ["{repo}", "{session}", "{workflow}", "{request}", "{evidence}", "{replies}", "{known}"],
 };
 
@@ -156,7 +156,7 @@ export const DEFAULT_PROMPTS: Record<PromptKey, string> = {
     "- Lo que no hayas podido determinar va como pregunta abierta, no relleno. Un hueco señalado vale más que un dato inventado.",
     "- Nada de listar archivos ni volcar el árbol de directorios: eso ya lo da el repositorio. Explica lo que el código no dice de sí mismo: por qué está así, qué depende de qué y qué se rompe si lo tocas.",
     "",
-    "Si {kbDir} ya tiene contenido, ACTUALÍZALO en vez de empezar de cero: conserva lo que siga siendo cierto, corrige lo que cambió y anota lo que desapareció.",
+    "Si {kbDir} ya tiene contenido, ACTUALÍZALO en vez de empezar de cero: conserva lo que siga siendo cierto, corrige lo que cambió y anota lo que desapareció.{kbSuggestions}",
   ].join("\n"),
 
   memory: [

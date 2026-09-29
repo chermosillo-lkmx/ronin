@@ -27,3 +27,8 @@ test("la plantilla memory existe, tiene default y publica sus placeholders", () 
     ["{repo}", "{session}", "{workflow}", "{request}", "{evidence}", "{replies}", "{known}"],
   );
 });
+
+test("la plantilla kb publica {kbSuggestions} y su default lo usa al final", () => {
+  assert.ok(DEFAULT_PROMPTS.kb.endsWith("{kbSuggestions}"));
+  assert.ok(readPromptConfig().find((prompt) => prompt.key === "kb")?.placeholders.includes("{kbSuggestions}"));
+});
