@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createSessionPort, deriveSessionName, toStatus, type SessionPortDeps } from "./mcp-session-port.js";
 import { McpToolError } from "./mcp-sessions.js";
@@ -233,4 +234,16 @@ test("status no pone question a una sesión idle que ya terminó su flujo", asyn
   const [status] = await createSessionPort(d).status();
   assert.equal(status!.needsInput, false);
   assert.equal(status!.question, undefined);
+});
+
+test("status toma como question el último párrafo de Claude en un pane real con status line", async () => {
+  const pane = readFileSync(new URL("./fixtures/claude-pane-statusline.txt", import.meta.url), "utf8");
+  const idle = session({ attention: { level: "idle", paneId: "%7" } });
+  const { deps: d } = deps({ inventory: async () => [idle] }, { "%7": pane });
+  const [status] = await createSessionPort(d).status();
+  assert.equal(status!.needsInput, true);
+  assert.equal(
+    status!.question,
+    "Decision needed: should I relaunch the cycle on a new worktree of ant-liebre-api from origin/main and continue from the implementation stage?",
+  );
 });

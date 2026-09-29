@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import {
@@ -8,6 +9,7 @@ import {
   capturePaneAnsi,
   classifyTmuxInventoryError,
   deliverText,
+  lastMeaningfulText,
   MAX_PANE_KEYS_BYTES,
   clearAdoptedMark,
   createDriverWindow,
@@ -362,4 +364,51 @@ test("deliverText teclea hasta PASTE_THRESHOLD_BYTES y pega por buffer por encim
   await deliverText("%2", "é".repeat(101), true, senders); // 202 bytes aunque sean 101 caracteres
   assert.deepEqual(calls, ["type:%1:200:true", "paste:%1:201:false", "paste:%2:202:true"]);
   assert.equal(MAX_PANE_KEYS_BYTES, 16 * 1024);
+});
+
+// Captura real de Claude Code con status line personalizada bajo la caja de input (caja vacía).
+const STATUSLINE_PANE = readFileSync(new URL("./fixtures/claude-pane-statusline.txt", import.meta.url), "utf8");
+const STATUSLINE_QUESTION = "Decision needed: should I relaunch the cycle on a new worktree of ant-liebre-api from origin/main and continue from the implementation stage?";
+
+test("lastMeaningfulText devuelve el último párrafo de Claude, no la status line bajo la caja de input", () => {
+  assert.equal(lastMeaningfulText(STATUSLINE_PANE, 500), STATUSLINE_QUESTION);
+});
+
+test("lastMeaningfulText ignora el texto tecleado sin enviar en la caja de input", () => {
+  const typed = STATUSLINE_PANE.replace(/^❯ $/m, "❯ sí, relánzalo en ant-liebre-api desde origin/main");
+  assert.notEqual(typed, STATUSLINE_PANE);
+  assert.equal(lastMeaningfulText(typed, 500), STATUSLINE_QUESTION);
+});
+
+test("lastMeaningfulText ignora una caja de input con varias líneas de texto", () => {
+  const typed = STATUSLINE_PANE.replace(/^❯ $/m, "❯ primera línea\n  segunda línea");
+  assert.equal(lastMeaningfulText(typed, 500), STATUSLINE_QUESTION);
+});
+
+test("lastMeaningfulText quita la viñeta, colapsa espacios y acota el párrafo a max", () => {
+  const pane = [
+    "⏺ Hice el plan.",
+    "",
+    "⏺ Primera   línea del párrafo",
+    "  y su continuación.",
+    "",
+    "✶ Brewed for 12s",
+    "",
+    "─".repeat(40),
+    "❯ ",
+    "─".repeat(40),
+    "  mi-sesion  ⎇ main",
+  ].join("\n");
+  assert.equal(lastMeaningfulText(pane, 500), "Primera línea del párrafo y su continuación.");
+  assert.equal(lastMeaningfulText(pane, 7), "Primera");
+});
+
+test("lastMeaningfulText sin caja de input descarta la status line con ⎇", () => {
+  const pane = ["⏺ ¿Continúo con la etapa de pruebas?", "", "  mi-sesion  ⎇ ronin/mi-rama"].join("\n");
+  assert.equal(lastMeaningfulText(pane, 500), "¿Continúo con la etapa de pruebas?");
+});
+
+test("lastMeaningfulText sin caja de input conserva el comportamiento previo", () => {
+  const pane = ["⏺ Listo el plan. ¿Lo implemento?", "", "❯ ", "  ⏵⏵ bypass permissions on (shift+tab to cycle)"].join("\n");
+  assert.equal(lastMeaningfulText(pane, 500), "Listo el plan. ¿Lo implemento?");
 });

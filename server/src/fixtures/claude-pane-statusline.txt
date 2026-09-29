@@ -1,0 +1,24 @@
+    and the final steps never ran.
+  - Hypothesis 2, the process died: a deploy, restart or out-of-memory kill. The
+    worker runs inside the API process (src/main.py:698). It stops on shutdown
+    without saving anything (:343), and the 300-second graceful shutdown is
+    shorter than an import.
+  - Telling them apart: this needs Joel's infrastructure evidence for
+    04:50–05:05. The useful items are restarts or out-of-memory kills, deploys,
+    "failed to refresh heartbeat" log lines, and which instance logged "marked …
+    interrupted".
+
+  The implementation plan (checkpoints, deduplication, resume, a
+  finish_partial_import command with dry-run, and the tests) is in the plan file
+  and ready to run against liebre-api.
+
+  Decision needed: should I relaunch the cycle on a new worktree of
+  ant-liebre-api from origin/main and continue from the implementation stage?
+
+✻ Sautéed for 1m 43s · done 9:21 AM
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  cowork-contexto-la-importacion-de-respaldo-del-6js3kx  ⎇ ronin/cowork-conte…
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents

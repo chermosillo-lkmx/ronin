@@ -968,17 +968,48 @@ export function lastMeaningfulLine(pane: string): string {
 
 // La caja de input vacía de Claude ("❯" o "│ > │") no es texto útil del agente.
 const PROMPT_ONLY = /^│?\s*[❯>]\s*│?$/;
+// Borde superior de la caja de input ("────" o "╭────╮") y primera línea de la caja ("❯ …" o "│ > …").
+const INPUT_BOX_BORDER = /^[╭]?─{3,}[╮]?$/;
+const INPUT_BOX_PROMPT = /^│?\s*[❯>](\s|$)/;
+// Línea de tiempo del turno de Claude: "✻ Sautéed for 1m 43s · done 9:21 AM".
+const TURN_TIMING = /^[✻✶✢✳✽·*]\s+\S+\s+for\s/u;
+// Status line personalizada bajo la caja: "<sesión>  ⎇ <rama>".
+const STATUS_LINE = /\s⎇\s/;
+
+/** Índice del borde superior de la última caja de input (borde "────" justo encima de "❯"), o -1. */
+function inputBoxTop(lines: string[]): number {
+  for (let i = lines.length - 1; i > 0; i--) {
+    if (INPUT_BOX_PROMPT.test(lines[i]!.trim()) && INPUT_BOX_BORDER.test(lines[i - 1]!.trim())) return i - 1;
+  }
+  return -1;
+}
+
+function cleanText(text: string, max: number): string {
+  return text.replace(/^[⏺●]\s*/u, "").replace(/\s+/g, " ").trim().slice(0, max);
+}
 
 /**
- * Como lastMeaningfulLine pero con tope configurable y sin la caja de input ni la viñeta `⏺`:
- * es la "pregunta" que ve un cliente MCP cuando el agente quedó idle esperando al usuario.
+ * La "pregunta" que ve un cliente MCP cuando el agente quedó idle esperando al usuario: el último
+ * párrafo de Claude encima de la caja de input. Todo lo que hay desde el borde superior de la caja
+ * hacia abajo (texto tecleado sin enviar, status line, footer) se ignora, igual que la línea de
+ * tiempo del turno y las líneas en blanco; las líneas del párrafo se unen con un espacio, sin la
+ * viñeta `⏺` y con tope `max`. Sin caja reconocible, cae a la última línea útil (sin chrome ni
+ * status line con `⎇`).
  */
 export function lastMeaningfulText(pane: string, max: number): string {
-  const lines = recentLines(pane, Number.MAX_SAFE_INTEGER)
+  const lines = recentLines(pane, Number.MAX_SAFE_INTEGER);
+  const top = inputBoxTop(lines);
+  if (top >= 0) {
+    let end = top - 1;
+    while (end >= 0 && (!lines[end]!.trim() || TURN_TIMING.test(lines[end]!.trim()))) end--;
+    let start = end;
+    while (start > 0 && lines[start - 1]!.trim()) start--;
+    if (end >= 0) return cleanText(lines.slice(start, end + 1).map((l) => l.trim()).join(" "), max);
+  }
+  const meaningful = lines
     .map((l) => l.trim())
-    .filter((l) => l && !CHROME.test(l) && !PROMPT_ONLY.test(l));
-  const last = lines[lines.length - 1] ?? "";
-  return last.replace(/^[⏺●]\s*/u, "").replace(/\s+/g, " ").slice(0, max);
+    .filter((l) => l && !CHROME.test(l) && !PROMPT_ONLY.test(l) && !STATUS_LINE.test(l));
+  return cleanText(meaningful[meaningful.length - 1] ?? "", max);
 }
 
 // P4: how many recent lines to scan for context-pressure signals. Small, like lastMeaningfulLine,

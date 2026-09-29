@@ -50,7 +50,7 @@ export function toStatus(session: TmuxSessionInfo, pane?: string | null): McpSes
   };
   if (session.attention?.question) status.question = session.attention.question.slice(0, MAX_QUESTION);
   else if (level === "idle" && needsInput && pane) {
-    // Spec §4.2: sin diálogo detectado, la pregunta es la última línea significativa del pane.
+    // Spec §4.2: sin diálogo detectado, la pregunta es el último párrafo de Claude sobre la caja de input.
     const question = lastMeaningfulText(pane, MAX_QUESTION);
     if (question) status.question = question;
   }
