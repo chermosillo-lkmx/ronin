@@ -741,3 +741,92 @@ test("state.json: la parte de skill es un subcampo que convive con la de memoria
     f.cleanup();
   }
 });
+
+test("F1: mientras se redacta, la memoria ya guardada se ve done y la parte de skill running", async () => {
+  const f = skillFixture();
+  try {
+    f.gated("cowork-redactando", "acme-api");
+    const gates: Array<{ resolve: (value: string) => void }> = [];
+    const distiller = createDistiller(f.deps({
+      runClaudeP: () => {
+        const gate = deferred<string>();
+        gates.push(gate);
+        return gate.promise;
+      },
+    }));
+    assert.equal(distiller.request("cowork-redactando", "manual"), "queued");
+    while (gates.length < 1) await tick();
+    assert.equal(distiller.stateOf("cowork-redactando")?.status, "running");
+    gates[0].resolve(withSkill(TRIAGE));
+    while (gates.length < 2) await tick();
+    assert.deepEqual(distiller.stateOf("cowork-redactando"), { status: "done", repo: "acme-api", at: NOW, proposed: 1 });
+    assert.equal(distiller.skillStateOf("cowork-redactando")?.status, "running");
+    gates[1].resolve(DRAFT_OUT);
+    await distiller.idle();
+    assert.equal(distiller.stateOf("cowork-redactando")?.status, "done");
+    assert.equal(distiller.skillStateOf("cowork-redactando")?.status, "done");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("F2: un error de E/S en el triaje deja failed sólo la parte de skill; la memoria sigue done", async () => {
+  const f = skillFixture();
+  try {
+    f.gated("cowork-es", "acme-api");
+    f.outputs.push(withSkill(TRIAGE));
+    const store = { ...f.learned, names: (): string[] => { throw new Error("EIO: no se pudo leer learned.json"); } };
+    const distiller = createDistiller(f.deps({ skills: f.skills({ store }) }));
+    distiller.request("cowork-es", "manual");
+    await distiller.idle();
+    assert.deepEqual(distiller.stateOf("cowork-es"), { status: "done", repo: "acme-api", at: NOW, proposed: 1 });
+    assert.equal(distiller.skillStateOf("cowork-es")?.status, "failed");
+    assert.match(distiller.skillStateOf("cowork-es")?.error ?? "", /EIO/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("F3: una redacción que cae en una learned existente sin el SKILL.md actual queda failed, sin propuesta a ciegas", async () => {
+  const f = skillFixture();
+  try {
+    f.approveLearned();
+    f.gated("cowork-ciega-manual", "acme-api", { verify: null });
+    f.gated("cowork-ciega-auto", "acme-api");
+    const distiller = createDistiller(f.deps());
+    f.outputs.push(JSON.stringify({ ...DRAFT, name: "Migración Reversible" }));
+    assert.equal(distiller.requestSkill("cowork-ciega-manual"), "queued");
+    await distiller.idle();
+    assert.deepEqual(distiller.skillStateOf("cowork-ciega-manual"), { status: "failed", at: NOW, error: "actualización sin texto actual" });
+    f.outputs.push(withSkill({ ...TRIAGE, name: "otra-cosa" }), DRAFT_OUT);
+    distiller.request("cowork-ciega-auto", "manual");
+    await distiller.idle();
+    assert.equal(f.prompts.length, 3);
+    assert.match(f.prompts[2], /actual:\n\(ninguna: es una skill nueva\)/);
+    assert.deepEqual(distiller.skillStateOf("cowork-ciega-auto"), { status: "failed", at: NOW, error: "actualización sin texto actual" });
+    assert.equal(distiller.stateOf("cowork-ciega-auto")?.status, "done");
+    assert.deepEqual(f.learned.pending(), []);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("F4: entradas de memoria inválidas con un skill válido: la memoria queda failed y el triaje redacta igual", async () => {
+  const f = skillFixture();
+  try {
+    f.gated("cowork-entradas", "acme-api");
+    f.outputs.push(withSkill(TRIAGE, [{ text: "algo", kind: "inventado" }]), DRAFT_OUT);
+    const distiller = createDistiller(f.deps());
+    distiller.request("cowork-entradas", "manual");
+    await distiller.idle();
+    assert.equal(f.prompts.length, 2);
+    assert.equal(distiller.stateOf("cowork-entradas")?.status, "failed");
+    assert.match(distiller.stateOf("cowork-entradas")?.error ?? "", /kind inválido/);
+    assert.deepEqual(f.store.pending("acme-api"), []);
+    const [pending] = f.learned.pending();
+    assert.equal(pending.name, "migracion-reversible");
+    assert.deepEqual(distiller.skillStateOf("cowork-entradas"), { status: "done", at: NOW, proposalId: pending.id });
+  } finally {
+    f.cleanup();
+  }
+});

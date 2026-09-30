@@ -35,6 +35,7 @@ const STATUSES: DistillStatus[] = ["running", "done", "failed", "skipped"];
 const MEMORY_OFF = "la memoria está desactivada";
 const NO_EVIDENCE = "la sesión no dejó evidencia";
 const NOT_REUSABLE = "la destilación no encontró un procedimiento reutilizable";
+const BLIND_UPDATE = "actualización sin texto actual";
 
 interface SessionRecord {
   repo: string;
@@ -256,6 +257,11 @@ export function createDistiller(deps: DistillerDeps): Distiller {
         setSkill(session, repo, { status: "skipped", reason: `la redacción la omitió: ${parsed.reason}` });
         return;
       }
+      // Sin el SKILL.md actual en el prompt, caer en una learned existente sería un reemplazo a ciegas.
+      if (!input.updates && skills.store.names().includes(normalizeSkillName(parsed.name))) {
+        setSkill(session, repo, { status: "failed", error: BLIND_UPDATE });
+        return;
+      }
       const proposal = skills.store.propose({
         repo,
         source: session,
@@ -345,7 +351,20 @@ export function createDistiller(deps: DistillerDeps): Distiller {
       }
       if (skillOpen) {
         skillOpen = false;
-        await triage(session, repo, output, launch.request, evidence);
+        // La memoria ya quedó guardada: desde aquí la sesión está en su parte de skill.
+        const flight = inFlight.get(session);
+        if (flight) inFlight.set(session, { ...flight, at: deps.now(), job: "skill" });
+        // Un error del triaje sólo toca la parte de skill; la memoria ya persistida no se reescribe.
+        try {
+          await triage(session, repo, output, launch.request, evidence);
+        } catch (error) {
+          deps.logError?.(error);
+          try {
+            setSkill(session, repo, { status: "failed", error: errorText(error) });
+          } catch (persistError) {
+            deps.logError?.(persistError);
+          }
+        }
       }
     } catch (error) {
       deps.logError?.(error);
