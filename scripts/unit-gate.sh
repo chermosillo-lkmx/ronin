@@ -468,6 +468,16 @@ for repo in "${candidates[@]}"; do
   checked=$((checked+1))
   src_changed="$(printf '%s\n' "$changed" | grep -E '^(src|app|lib)/.*\.(py|ts|tsx|js|jsx)$' | grep -vE '/migrations/|/__pycache__/' || true)"
   test_changed="$(printf '%s\n' "$changed" | grep -E '(^|/)tests?/.*\.(py|ts|tsx|js|jsx)$|\.(test|spec)\.(ts|tsx|js|jsx)$' | grep -vE 'conftest\.py$|/fixtures?/|/support/|/__snapshots__/' || true)"
+  # Regla 2 sólo aplica a tests que EXISTEN y traen líneas NUEVAS: un test borrado (p.ej.
+  # al podar un módulo) no es nuevo ni modificado y no puede aparecer ejecutándose en el
+  # junit; un archivo al que SÓLO se le quitaron funciones tampoco tiene nada nuevo que
+  # ejecutar (lo que le queda ya corría antes del cambio).
+  test_present="$(printf '%s\n' "$test_changed" | while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    added="$( { git diff --numstat "$base" -- "$f"; } 2>/dev/null | awk '{s+=$1} END{print s+0}')"
+    if ! git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then added=1; fi   # untracked = nuevo
+    [ "$added" -gt 0 ] && printf '%s\n' "$f"
+  done)"
   say "── $name  (base $(git rev-parse --short "$base"), $(printf '%s\n' "$changed" | wc -l | tr -d ' ') archivos cambiados)"
 
   # Regla 1: código de producto sin tests que lo acompañen.
@@ -480,7 +490,7 @@ for repo in "${candidates[@]}"; do
     while IFS= read -r f; do
       [ -z "$f" ] && continue
       stem="$(basename "$f")"; stem="${stem%.*}"
-      if ! printf '%s\n' "$test_changed" | xargs -I{} grep -l -- "$stem" {} 2>/dev/null | grep -q .; then
+      if ! printf '%s\n' "$test_present" | xargs -I{} grep -l -- "$stem" {} 2>/dev/null | grep -q .; then
         say "   ⚠ $f: ningún test tocado menciona «${stem}» (revisa que el cambio tenga prueba propia)"
       fi
     done <<< "$src_changed"
@@ -520,13 +530,13 @@ for repo in "${candidates[@]}"; do
     continue
   fi
   ok "$name: suite en verde — $t tests, 0 failed, $s skipped"
-  if [ -n "$test_changed" ]; then
-    missing="$(tests_ran_from "$junit" $test_changed)"
+  if [ -n "$test_present" ]; then
+    missing="$(tests_ran_from "$junit" $test_present)"
     if [ -n "$missing" ]; then
       bad "$name: tests tocados que NO aparecen ejecutados y pasando en el junit:"
       printf '%s\n' "$missing" | sed 's/^/     /'
     else
-      ok "$name: los $(printf '%s\n' "$test_changed" | wc -l | tr -d ' ') archivo(s) de tests tocados se ejecutaron y pasan"
+      ok "$name: los $(printf '%s\n' "$test_present" | wc -l | tr -d ' ') archivo(s) de tests tocados (existentes) se ejecutaron y pasan"
     fi
   fi
 
