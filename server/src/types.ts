@@ -223,6 +223,8 @@ export interface TmuxSessionInfo {
   unrecorded?: boolean;
   /** Sólo gestionadas con repo conocido: pendientes de ese repo y estado de la destilación. */
   memory?: SessionMemoryInfo;
+  /** Sólo gestionadas con repo conocido: estado de la parte de skill (skills aprendidas). */
+  skills?: SessionSkillInfo;
 }
 
 // ---- Preflight (F1). Espejo manual en web/src/types.ts ----
@@ -258,4 +260,23 @@ export interface SessionMemoryInfo {
   repo: string;
   pending: number;
   distill: DistillState | null;
+}
+
+// ---- Skills aprendidas (spec 2026-09-30). Espejo manual en web/src/types.ts ----
+
+/** Parte de skill de una sesión: subcampo `skill` de su entrada en <dataDir>/memory/state.json. */
+export interface SkillDistillState {
+  status: DistillStatus;
+  at: number;
+  /** Sólo en done: la propuesta que quedó pendiente. */
+  proposalId?: string;
+  /** Sólo en skipped. */
+  reason?: string;
+  /** Sólo en failed. */
+  error?: string;
+}
+
+export interface SessionSkillInfo {
+  repo: string;
+  state: SkillDistillState | null;
 }

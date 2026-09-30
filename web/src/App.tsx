@@ -7,6 +7,7 @@ import { StatusBar } from "./components/StatusBar";
 import { TrustedRootsEditor } from "./components/TrustedRootsEditor";
 import { NewSessionDialog } from "./components/NewSessionDialog";
 import { SkillsContext, SkillsInspector, SkillsWorkspace } from "./components/skills/SkillsWorkspace";
+import { skillsBadgeLabel, useSkillProposalCount } from "./components/skills/useSkillProposalCount";
 import { WorkflowContext, WorkflowInspector, WorkflowWorkspace, useWorkflowInsights } from "./components/workflows/WorkflowWorkspace";
 import { PreflightScreen } from "./screens/PreflightScreen";
 import { SessionsScreen } from "./screens/SessionsScreen";
@@ -53,6 +54,11 @@ function ReposSection() {
   </div>;
 }
 
+/** Aviso de una plantilla que perdió una capacidad (hoy: memory sin el triaje de skills). */
+export function PromptWarning({ warning }: { warning?: string }) {
+  return warning ? <p className="wf-err" role="alert">{`⚠ ${warning}`}</p> : null;
+}
+
 function PromptsSection() {
   const [templates, setTemplates] = useState<PromptTemplate[] | null>(null);
   const [selected, setSelected] = useState("");
@@ -67,7 +73,7 @@ function PromptsSection() {
     <header className="settings-panel-head"><div className="drawer-title">✍️ Prompts</div></header>
     {!templates ? <div className="empty">cargando…</div> : <>
       <div className="prompt-tabs">{templates.map((item) => <button key={item.key} className={`settings-item ${selected === item.key ? "on" : ""}`} onClick={() => choose(item.key)}>{item.label}</button>)}</div>
-      {current && <><textarea className="wf-instr prompt-textarea" value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} /><div className="prompt-ph">{current.placeholders.map((placeholder) => <code key={placeholder} className="prompt-chip">{placeholder}</code>)}</div></>}
+      {current && <><textarea className="wf-instr prompt-textarea" value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} /><div className="prompt-ph">{current.placeholders.map((placeholder) => <code key={placeholder} className="prompt-chip">{placeholder}</code>)}</div><PromptWarning warning={current.warning} /></>}
       <div className="modal-foot"><span className="wf-err">{error}</span><button className="btn" disabled={!current || current.isDefault} onClick={restore}>↩ restaurar default</button><button className="btn copy" disabled={!current} onClick={save}>💾 guardar prompt</button></div>
     </>}
   </div>;
@@ -94,6 +100,7 @@ function ReportsView() {
 
 export function App() {
   const [view, setView] = useState<(typeof APP_VIEWS)[number]>("sessions");
+  const skillsBadge = skillsBadgeLabel(useSkillProposalCount());
   const [theme, setTheme] = useState<"light" | "dark">(() => localStorage.getItem("cowork-theme") === "dark" ? "dark" : "light");
   const [workflowOverrides, setWorkflowOverrides] = useState(false);
   const [workflowLaunchOpen, setWorkflowLaunchOpen] = useState(false);
@@ -101,5 +108,5 @@ export function App() {
   const workflowInsights = useWorkflowInsights();
   useEffect(() => { document.documentElement.setAttribute("data-theme", theme); localStorage.setItem("cowork-theme", theme); }, [theme]);
   const content = view === "sessions" ? <SessionsScreen /> : view === "settings" ? <SettingsView /> : view === "reports" ? <ReportsView /> : view === "preflight" ? <PreflightScreen /> : view === "tests" ? <TestsScreen /> : view === "skills" ? <div className="nocturne ron-web-shell"><div className="ronin-shell-body"><aside className="ronin-context-list"><SkillsContext /></aside><main className="ronin-workspace"><SkillsWorkspace /></main><aside className="ronin-inspector"><SkillsInspector /></aside></div></div> : <div className="nocturne ron-web-shell"><div className="ronin-shell-body"><aside className="ronin-context-list"><WorkflowContext /></aside><main className="ronin-workspace"><div className="ron-web-view-toggle"><button className={!workflowOverrides ? "active" : ""} onClick={() => setWorkflowOverrides(false)}>Catálogo</button><button className={workflowOverrides ? "active" : ""} onClick={() => setWorkflowOverrides(true)}>Overrides por repo</button></div>{workflowOverrides ? <WorkflowEditorScreen /> : <WorkflowWorkspace insights={workflowInsights} selectId={acceptedWorkflowId} onLaunch={() => setWorkflowLaunchOpen(true)} />}</main><aside className="ronin-inspector"><WorkflowInspector insights={workflowInsights} onAccepted={setAcceptedWorkflowId} /></aside></div>{workflowLaunchOpen && <NewSessionDialog onClose={() => setWorkflowLaunchOpen(false)} onCreated={() => setWorkflowLaunchOpen(false)} />}</div>;
-  return <div className="app"><header className="bar"><span className="brand">Ronin</span><button className="refresh" onClick={() => setTheme((value) => value === "light" ? "dark" : "light")} title="cambiar tema">{theme === "light" ? "🌙" : "☀️"}</button><button className="refresh" onClick={() => setView("reports")}>📊</button><button className="refresh" onClick={() => setView("sessions")} title="sesiones tmux">⌘</button><button className="refresh" onClick={() => setView("preflight")}>⚙✓</button><button className="refresh" onClick={() => setView("workflow")}>🧭</button><button className="refresh" onClick={() => setView("skills")}>▤</button><button className="refresh" onClick={() => setView("tests")}>⚗</button><button className="refresh" onClick={() => setView("settings")}>⚙</button></header><ViewErrorBoundary key={view} label="vista">{content}</ViewErrorBoundary><StatusBar /></div>;
+  return <div className="app"><header className="bar"><span className="brand">Ronin</span><button className="refresh" onClick={() => setTheme((value) => value === "light" ? "dark" : "light")} title="cambiar tema">{theme === "light" ? "🌙" : "☀️"}</button><button className="refresh" onClick={() => setView("reports")}>📊</button><button className="refresh" onClick={() => setView("sessions")} title="sesiones tmux">⌘</button><button className="refresh" onClick={() => setView("preflight")}>⚙✓</button><button className="refresh" onClick={() => setView("workflow")}>🧭</button><button className="refresh" onClick={() => setView("skills")}>▤{skillsBadge && <b className="ronin-skills-badge">{skillsBadge}</b>}</button><button className="refresh" onClick={() => setView("tests")}>⚗</button><button className="refresh" onClick={() => setView("settings")}>⚙</button></header><ViewErrorBoundary key={view} label="vista">{content}</ViewErrorBoundary><StatusBar /></div>;
 }

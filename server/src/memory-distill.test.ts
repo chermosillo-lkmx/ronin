@@ -119,3 +119,11 @@ test("la plantilla memory por defecto usa todos los placeholders y rellena los v
   assert.match(prompt, /\(vacía\)/);
   assert.doesNotMatch(prompt, /\{repo\}|\{known\}|\{evidence\}/);
 });
+
+test("buildDistillPrompt rellena {skillCatalog} y {offeredSkills}, con valores por defecto si faltan", () => {
+  const base = { repo: "acme-api", session: "cowork-x", workflow: "", request: "", evidence: "", replies: [], known: [] };
+  const template = "catálogo:\n{skillCatalog}\nofrecidas:\n{offeredSkills}";
+  assert.equal(buildDistillPrompt({ ...base, skillCatalog: "- migracion-reversible: Migra.", offeredSkills: "- api-review (global)" }, template), "catálogo:\n- migracion-reversible: Migra.\nofrecidas:\n- api-review (global)");
+  assert.equal(buildDistillPrompt(base, template), "catálogo:\n(vacío)\nofrecidas:\n(ninguna)");
+  assert.doesNotMatch(buildDistillPrompt(base, DEFAULT_PROMPTS.memory), /\{skillCatalog\}|\{offeredSkills\}/);
+});

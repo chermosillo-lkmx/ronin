@@ -25,3 +25,9 @@ test("DesktopStatusBar: muestra el aviso de límite disponible", () => {
   }));
   assert.match(html, /Claude: límite alcanzado · reinicia 15:00/);
 });
+
+test("PromptWarning avisa cuando la plantilla memory no incluye el triaje de skills", async () => {
+  const { PromptWarning } = await import("./App.js");
+  assert.equal(renderToString(createElement(PromptWarning, {})), "");
+  assert.match(renderToString(createElement(PromptWarning, { warning: "tu plantilla memory no incluye el triaje de skills" })), /role="alert"[^>]*>⚠ tu plantilla memory no incluye el triaje de skills</);
+});

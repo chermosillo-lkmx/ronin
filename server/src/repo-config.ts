@@ -5,7 +5,8 @@ import { sanitizeModel } from "./models.js";
 import { validateStages, type WorkflowConfig } from "./workflow.js";
 import { listRepos } from "./repos.js";
 
-export type SkillRoot = "global" | "repo-claude" | "repo-skills";
+/** `learned`: skills que Ronin aprendió y el usuario aprobó (<dataDir>/skills/learned); nunca llevan sourceRepo. */
+export type SkillRoot = "global" | "learned" | "repo-claude" | "repo-skills";
 export interface SkillRef {
   root: SkillRoot;
   name: string;
@@ -70,8 +71,8 @@ function sanitizeSkillRefs(value: unknown): SkillRef[] {
     const root = candidate?.root;
     const name = typeof candidate?.name === "string" ? candidate.name.trim() : "";
     const sourceRepo = typeof candidate?.sourceRepo === "string" ? candidate.sourceRepo.trim() : "";
-    if ((root !== "global" && root !== "repo-claude" && root !== "repo-skills") || !SKILL_NAME.test(name)) continue;
-    if (root === "global") {
+    if ((root !== "global" && root !== "learned" && root !== "repo-claude" && root !== "repo-skills") || !SKILL_NAME.test(name)) continue;
+    if (root === "global" || root === "learned") {
       const key = `${root}:${name}`;
       if (!seen.has(key)) { seen.add(key); refs.push({ root, name }); }
       continue;
@@ -256,4 +257,31 @@ export function saveRepoOverrides(
   writeFileSync(FILE, JSON.stringify({ _comment: COMMENT, ...next }, null, 2) + "\n");
   store = next;
   return readRepoConfigFull(repo);
+}
+
+export interface RepoSkillIo {
+  read(repo: string): RepoConfigFull;
+  save(repo: string, input: Parameters<typeof saveRepoOverrides>[1]): RepoConfigFull;
+}
+
+const skillRefKey = (ref: SkillRef): string => `${ref.root}:${ref.sourceRepo ?? ""}:${ref.name}`;
+
+/**
+ * Asocia una skill a un repo sin tocar el resto de su override (lo usa la aprobación de una skill
+ * aprendida nueva: queda asociada a su repo de origen). Idempotente.
+ */
+export function addRepoSkillAssociation(repo: string, ref: SkillRef, io: RepoSkillIo = { read: readRepoConfigFull, save: saveRepoOverrides }): RepoConfigFull {
+  const current = io.read(repo);
+  if (current.skills.some((item) => skillRefKey(item) === skillRefKey(ref))) return current;
+  return io.save(repo, {
+    inheritWorkflow: current.usesDefaultWorkflow,
+    workflow: current.workflow ?? undefined,
+    vars: current.vars,
+    startCommand: current.startCommand,
+    setupCommand: current.setupCommand,
+    kbPath: current.kbPath,
+    plannerModel: current.plannerModel,
+    workerModel: current.workerModel,
+    skills: [...current.skills, ref],
+  });
 }

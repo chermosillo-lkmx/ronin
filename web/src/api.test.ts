@@ -102,3 +102,65 @@ test("memoria y destilación: un error del servidor llega como Error con su mens
     globalThis.fetch = originalFetch;
   }
 });
+
+test("skills aprendidas: cada acción llama a la ruta, el método y el cuerpo correctos", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  try {
+    globalThis.fetch = async (input, init) => {
+      calls.push({ url: String(input), method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      const url = String(input);
+      if (url.startsWith("/api/skills/proposals?") || url === "/api/skills/proposals") return new Response(JSON.stringify({ proposals: [{ id: "s_1" }] }));
+      return new Response(JSON.stringify({ ok: true }), { status: url.endsWith("/skill") ? 202 : 200 });
+    };
+    assert.deepEqual(await api.listSkillProposals(), [{ id: "s_1" }]);
+    await api.listSkillProposals("acme-api");
+    await api.getSkillProposal("s_1");
+    await api.resolveSkillProposal("s_1", "approve", { contentHash: "sha256:abc" });
+    await api.resolveSkillProposal("s_2", "edit", { content: "---\nname: x\n---\n" });
+    await api.resolveSkillProposal("s_3", "discard");
+    await api.getRepoSkillLearning("acme-api");
+    await api.setRepoSkillLearning("acme-api", false);
+    await api.proposeSessionSkill("cowork-mig");
+    assert.deepEqual(calls, [
+      { url: "/api/skills/proposals", method: "GET", body: undefined },
+      { url: "/api/skills/proposals?repo=acme-api", method: "GET", body: undefined },
+      { url: "/api/skills/proposals/s_1", method: "GET", body: undefined },
+      { url: "/api/skills/proposals/s_1", method: "PATCH", body: { action: "approve", contentHash: "sha256:abc" } },
+      { url: "/api/skills/proposals/s_2", method: "PATCH", body: { action: "edit", content: "---\nname: x\n---\n" } },
+      { url: "/api/skills/proposals/s_3", method: "PATCH", body: { action: "discard" } },
+      { url: "/api/repos/acme-api/skills/learning", method: "GET", body: undefined },
+      { url: "/api/repos/acme-api/skills/learning", method: "PUT", body: { enabled: false } },
+      { url: "/api/sessions/cowork-mig/skill", method: "POST", body: undefined },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("skills aprendidas: un error del servidor llega como Error con su mensaje y la lista falla a vacío", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "el texto que aprobaste no coincide con la propuesta guardada", code: "SKILL_STALE" }), { status: 409 });
+    await assert.rejects(api.resolveSkillProposal("s_1", "approve", { contentHash: "x" }), /no coincide con la propuesta guardada/);
+    await assert.rejects(api.proposeSessionSkill("cowork-mig"), /no coincide/);
+    assert.deepEqual(await api.listSkillProposals(), []);
+    assert.equal(await api.getRepoSkillLearning("acme-api"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("F2: el error de resolveSkillProposal conserva el code del servidor (para poder ofrecer 'Recargar' ante SKILL_STALE)", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "el texto que aprobaste no coincide con la propuesta guardada", code: "SKILL_STALE" }), { status: 409 });
+    await assert.rejects(api.resolveSkillProposal("s_1", "approve", { contentHash: "x" }), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as { code?: string }).code, "SKILL_STALE");
+      return true;
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

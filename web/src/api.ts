@@ -1,3 +1,4 @@
+import type { SkillDistillState, SkillLearningView, SkillProposalAction, SkillProposalDetail, SkillProposalSummary, SkillResolution } from "./types";
 import type { DistillState, EngineChoice, KnowledgeBaseGeneration, KnowledgeBaseInfo, MemoryAction, MemoryKind, RepoMemoryView, TestCasesFile, TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionCleanupReport, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
 
 /** Carries the server's {path, code} (T11/T13) so a save failure can be shown per-field, or as
@@ -261,11 +262,25 @@ export async function getRepoKnowledgeBaseGeneration(repo: string): Promise<Know
 
 const memoryUrl = (repo: string, suffix = "") => `/api/repos/${encodeURIComponent(repo)}/memory${suffix}`;
 
+/**
+ * Como WorkflowSaveError, pero para las rutas "memoria" (memoryRequest): conserva el `code` del
+ * servidor (p. ej. SKILL_STALE) sin dejar de ser un Error normal para quien sólo lee `.message`
+ * (T9/F2 — el consumidor que no lo necesita sigue funcionando igual).
+ */
+export class ApiRequestError extends Error {
+  readonly code?: string;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.code = code;
+  }
+}
+
 async function memoryRequest<T>(url: string, init: RequestInit, fallback: string): Promise<T> {
   const r = await fetch(url, init);
   if (!r.ok) {
     const e = await r.json().catch(() => ({}));
-    throw new Error(e.error || fallback);
+    throw new ApiRequestError(e.error || fallback, e.code);
   }
   return r.json();
 }
@@ -299,6 +314,39 @@ export function deleteRepoMemory(repo: string, id: string): Promise<RepoMemoryVi
 
 export function distillSession(name: string): Promise<DistillState | null> {
   return memoryRequest(`/api/sessions/${encodeURIComponent(name)}/distill`, { method: "POST" }, "no se pudo destilar la sesión");
+}
+
+// ---- Skills aprendidas: la capability la inyecta el proxy, igual que en la memoria. ----
+
+export async function listSkillProposals(repo?: string): Promise<SkillProposalSummary[]> {
+  const r = await fetch(repo ? `/api/skills/proposals?repo=${encodeURIComponent(repo)}` : "/api/skills/proposals");
+  return r.ok ? ((await r.json()).proposals ?? []) : [];
+}
+
+export function getSkillProposal(id: string): Promise<SkillProposalDetail> {
+  return memoryRequest(`/api/skills/proposals/${encodeURIComponent(id)}`, {}, "no se pudo leer la propuesta");
+}
+
+/** Aprobar exige el `contentHash` del texto mostrado; editar manda el SKILL.md completo. */
+export function resolveSkillProposal(id: string, action: SkillProposalAction, payload: { contentHash?: string; content?: string } = {}): Promise<SkillResolution> {
+  return memoryRequest(`/api/skills/proposals/${encodeURIComponent(id)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ...payload }),
+  }, "no se pudo resolver la propuesta");
+}
+
+export async function getRepoSkillLearning(repo: string): Promise<SkillLearningView | null> {
+  const r = await fetch(`/api/repos/${encodeURIComponent(repo)}/skills/learning`);
+  return r.ok ? r.json() : null;
+}
+
+export function setRepoSkillLearning(repo: string, enabled: boolean): Promise<SkillLearningView> {
+  return memoryRequest(`/api/repos/${encodeURIComponent(repo)}/skills/learning`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+  }, "no se pudo cambiar el aprendizaje de skills");
+}
+
+export function proposeSessionSkill(name: string): Promise<SkillDistillState | null> {
+  return memoryRequest(`/api/sessions/${encodeURIComponent(name)}/skill`, { method: "POST" }, "no se pudo proponer la skill");
 }
 
 export async function getTrustedRoots(): Promise<TrustedRoots> {

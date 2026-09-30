@@ -4,6 +4,7 @@ import { CLAUDE_CMD, CLAUDE_TERMINAL_CMD, CODEX_CMD } from "./config.js";
 import { sendWhenReady } from "./engine.js";
 import { getRepoSetupCommand } from "./repo-config.js";
 import { memoryBlockForLaunch } from "./memory.js";
+import { skillIndexForLaunch, type LaunchSkillIndex, type LaunchSkillRef } from "./learned-skills.js";
 import { provisionWorktree } from "./provision.js";
 import { listRepos, resolveCwd } from "./repos.js";
 import { isSafeSessionName } from "./session-name.js";
@@ -98,6 +99,8 @@ export interface ManagedSessionLaunchDeps {
   startCommandFor?: (startCommand: string) => string;
   /** Bloque de memoria del repo a anteponer al prompt; "" = nada que inyectar. */
   memoryBlockFor?: (repo: string) => string;
+  /** Índice de skills asociadas al repo, después de la memoria; text "" = nada que inyectar. */
+  skillIndexFor?: (repo: string) => LaunchSkillIndex;
   logError?: (error: unknown) => void;
   /** Sólo para inspeccionar la escritura desde pruebas unitarias. */
   readWrite?: (file: string) => unknown;
@@ -109,6 +112,7 @@ const launchDeps: ManagedSessionLaunchDeps = {
   ensureCycleDir, removeCycleDir, writeFlow, writeJsonAtomic, deliverPrompt: sendWhenReady,
   setupCommandFor: getRepoSetupCommand, provision: provisionWorktree,
   memoryBlockFor: (repo) => memoryBlockForLaunch(repo),
+  skillIndexFor: (repo) => skillIndexForLaunch(repo, { logError: (error) => console.error("[claude-cowork] índice de skills", error) }),
   logError: (error) => console.error("[claude-cowork] no se pudo entregar la petición inicial", error),
 };
 
@@ -140,8 +144,23 @@ export function validateManagedSessionLaunch(input: ManagedSessionLaunchInput, d
   }
 }
 
-function launchRecord(input: ManagedSessionLaunchInput, workflow: WorkflowCatalogItem, cwd: string, worktree: string, branch: string, memory: string) {
-  return { version: 1, ...input, mode: "workflow" as const, workflowName: workflow.name, cwd, worktree, branch, ...(memory ? { memory } : {}), createdAt: Date.now() };
+function launchRecord(input: ManagedSessionLaunchInput, workflow: WorkflowCatalogItem, cwd: string, worktree: string, branch: string, memory: string, skills: LaunchSkillRef[]) {
+  return {
+    version: 1, ...input, mode: "workflow" as const, workflowName: workflow.name, cwd, worktree, branch,
+    ...(memory ? { memory } : {}), ...(skills.length ? { skills } : {}), createdAt: Date.now(),
+  };
+}
+
+const EMPTY_SKILL_INDEX: LaunchSkillIndex = { text: "", skills: [] };
+
+/** Igual que la memoria: si el índice falla, la sesión arranca sin él. */
+function skillIndexOrEmpty(deps: ManagedSessionLaunchDeps, repo: string): LaunchSkillIndex {
+  try {
+    return deps.skillIndexFor?.(repo) ?? EMPTY_SKILL_INDEX;
+  } catch (error) {
+    deps.logError?.(error);
+    return EMPTY_SKILL_INDEX;
+  }
 }
 
 /** La memoria nunca tumba un lanzamiento: si el bloque falla, la sesión arranca sin él. */
@@ -211,7 +230,9 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
     const deliverPrompt = request || workflow.config.inputs?.length ? deps.deliverPrompt : undefined;
     // Sólo se consulta la memoria si hay prompt que entregar: así `uses` cuenta inyecciones reales.
     const memory = deliverPrompt ? memoryBlockOrEmpty(deps, input.repo) : "";
-    deps.writeJsonAtomic(`${cycle}/launch.json`, launchRecord({ ...input, inputs }, workflow, resolved.cwd, worktree, branch, memory));
+    // Mismo criterio para el índice: `uses` cuenta sólo lanzamientos que de verdad lo recibieron.
+    const skillIndex = deliverPrompt ? skillIndexOrEmpty(deps, input.repo) : EMPTY_SKILL_INDEX;
+    deps.writeJsonAtomic(`${cycle}/launch.json`, launchRecord({ ...input, inputs }, workflow, resolved.cwd, worktree, branch, memory, skillIndex.skills));
     // El worktree nace pelado (.venv y node_modules están gitignorados): sin esto, la copia de la
     // sesión no puede correr sus propias pruebas. Va en SEGUNDO PLANO —instalar dependencias son
     // minutos— y su fallo se reporta sin tumbar el lanzamiento, igual que la entrega del prompt.
@@ -223,8 +244,8 @@ export async function launchManagedSession(input: ManagedSessionLaunchInput, inj
     if (deliverPrompt) {
       const title = (request ?? "").split(/\r?\n/, 1)[0].slice(0, 70);
       const prompt = buildWorkflowRequestPrompt({ workflow: workflow.config, cycle, repo: input.repo, request: request ?? "", title, key: input.name, inputs });
-      // Literal a propósito: el bloque no pasa por renderPrompt, así que un `{repo}` en una entrada no se sustituye.
-      void deliverPrompt(input.name, memory ? `${memory}\n\n${prompt}` : prompt)
+      // Literal a propósito: ni el bloque ni el índice pasan por renderPrompt, así que un `{repo}` no se sustituye.
+      void deliverPrompt(input.name, [memory, skillIndex.text, prompt].filter(Boolean).join("\n\n"))
         .catch((error) => deps.logError?.(error));
     }
     recordEvent({ type: "launch", key: input.name, title: input.request?.split(/\r?\n/, 1)[0] || input.name, repo: input.repo, source: "session", request: input.request });

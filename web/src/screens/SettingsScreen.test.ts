@@ -65,3 +65,11 @@ test("SettingsScreen muestra la sección Memoria de cada repo junto a su KB, con
   assert.match(html, /Esto recibe cada sesión nueva/);
   assert.match(html, /Cargando memoria…/);
 });
+
+test("SettingsScreen muestra el interruptor Aprender skills de cada repo junto a Memoria", () => {
+  const html = renderToString(createElement(SettingsScreen, {
+    initial: { ...FIXTURE, skillLearning: { "con-kb": { repo: "con-kb", enabled: false, globalEnabled: true } } },
+  }));
+  assert.equal((html.match(/🧩 Aprender skills/g) ?? []).length, 2);
+  assert.match(html, /🧠 Memoria · 1 pendiente<\/summary>[\s\S]*🧩 Aprender skills/);
+});
