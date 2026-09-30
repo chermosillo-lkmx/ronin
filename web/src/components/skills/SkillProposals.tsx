@@ -8,6 +8,9 @@ const WARNING_LABELS: Record<SkillWarning, string> = {
   "url-externa": "Tiene una URL externa",
   "comentario-html": "Tiene un comentario HTML (no se vería renderizado)",
   "comando-destructivo": "Tiene un comando destructivo",
+  "ruta-sensible": "Menciona una ruta sensible (credenciales, configuración del agente o CI)",
+  "exfiltracion": "Tiene un comando que podría sacar datos del equipo",
+  "salta-controles": "Pide saltarse controles o instrucciones",
   "nombre-ajustado": "Ronin ajustó el nombre",
 };
 
@@ -54,11 +57,13 @@ function diffLines(diff: string): string[] {
 /**
  * Detalle de una propuesta: el SKILL.md en crudo (monoespaciado, sin renderizar markdown, para que un
  * comentario HTML no esconda nada), los avisos y, en una actualización, el diff. `initialRead`,
- * `initialBusy` e `initialError` sólo existen para las pruebas SSR.
+ * `initialBusy`, `initialError` e `initialEditing` sólo existen para las pruebas SSR. Aprobar, Editar y
+ * Guardar comparten la misma puerta: haber bajado hasta el final del texto.
  */
-export function SkillProposalView({ detail, initialRead = false, initialBusy = false, initialError = null, onResolved, onReload }: {
+export function SkillProposalView({ detail, initialRead = false, initialBusy = false, initialError = null, initialEditing = null, onResolved, onReload }: {
   detail: SkillProposalDetail;
   initialRead?: boolean;
+  initialEditing?: string | null;
   initialBusy?: boolean;
   initialError?: { message: string; code?: string } | null;
   onResolved?: (result: SkillResolution) => void;
@@ -67,12 +72,12 @@ export function SkillProposalView({ detail, initialRead = false, initialBusy = f
 }) {
   const [read, setRead] = useState(initialRead);
   const [busy, setBusy] = useState(initialBusy);
-  const [editing, setEditing] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(initialEditing);
   const [error, setError] = useState<{ message: string; code?: string } | null>(initialError);
   const lock = useRef(false);
   const raw = useRef<HTMLPreElement>(null);
   useEffect(() => {
-    setEditing(null);
+    setEditing(initialEditing);
     setError(null);
     setRead(initialReadOnMount(initialRead, raw.current));
   }, [detail.id]);
@@ -107,18 +112,18 @@ export function SkillProposalView({ detail, initialRead = false, initialBusy = f
       {editing === null
         ? <>
           <button type="button" className="n-btn n-btn-primary" disabled={busy || !read} onClick={() => void run(actions.approve)}>✅ Aprobar</button>
-          <button type="button" className="n-btn n-btn-secondary" disabled={busy} onClick={() => setEditing(detail.content)}>✏️ Editar y aprobar</button>
+          <button type="button" className="n-btn n-btn-secondary" disabled={busy || !read} onClick={() => setEditing(detail.content)}>✏️ Editar y aprobar</button>
           <button type="button" className="n-btn n-btn-danger" disabled={busy} onClick={() => void run(actions.discard)}>❌ Descartar</button>
-          {!read && <small>Baja hasta el final del texto para habilitar Aprobar.</small>}
+          {!read && <small>Baja hasta el final del texto para habilitar Aprobar y Editar.</small>}
         </>
         : <>
-          <button type="button" className="n-btn n-btn-primary" disabled={busy} onClick={() => void run(() => actions.edit(editing))}>Guardar y aprobar</button>
+          <button type="button" className="n-btn n-btn-primary" disabled={busy || !read} onClick={() => void run(() => actions.edit(editing))}>Guardar y aprobar</button>
           <button type="button" className="n-btn n-btn-secondary" disabled={busy} onClick={() => setEditing(null)}>Cancelar</button>
         </>}
     </footer>
     {error && (error.code === "SKILL_STALE"
       ? <p className="ronin-form-error" role="alert">
-          La propuesta cambió; recárgala para ver el texto actual.{" "}
+          La propuesta cambió; recárgala para ver el texto actual. Si sigue sin poder aprobarse, descártala.{" "}
           <button type="button" className="n-btn n-btn-secondary" onClick={() => { setError(null); onReload?.(); }}>Recargar</button>
         </p>
       : <p className="ronin-form-error" role="alert">{error.message}</p>)}

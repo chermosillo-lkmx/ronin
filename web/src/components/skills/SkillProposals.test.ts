@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
@@ -33,16 +34,31 @@ test("SkillProposalView de una actualización muestra el resumen de cambios y el
   assert.match(html, /<span class="hunk">@@ -1,2 \+1,2 @@/);
 });
 
-test("Aprobar sólo se habilita al llegar al final del texto; Editar y Descartar están disponibles", () => {
+test("Aprobar sólo se habilita al llegar al final del texto; Descartar está disponible", () => {
   const unread = renderToString(createElement(SkillProposalView, { detail: detail() }));
   assert.match(unread, /<button[^>]*disabled=""[^>]*>✅ Aprobar<\/button>/);
   assert.match(unread, /Baja hasta el final del texto/);
-  assert.match(unread, /<button[^>]*>✏️ Editar y aprobar<\/button>/);
   assert.match(unread, /<button[^>]*>❌ Descartar<\/button>/);
+  assert.doesNotMatch(unread, /disabled=""[^>]*>❌ Descartar/);
   const read = renderToString(createElement(SkillProposalView, { detail: detail(), initialRead: true }));
   assert.doesNotMatch(read, /disabled=""[^>]*>✅ Aprobar/);
   const busy = renderToString(createElement(SkillProposalView, { detail: detail(), initialRead: true, initialBusy: true }));
   assert.match(busy, /disabled=""[^>]*>❌ Descartar/);
+});
+
+test("final F1: Editar y aprobar y Guardar y aprobar exigen la misma lectura hasta el final que Aprobar", () => {
+  const unread = renderToString(createElement(SkillProposalView, { detail: detail() }));
+  assert.match(unread, /<button[^>]*disabled=""[^>]*>✏️ Editar y aprobar<\/button>/);
+  assert.match(unread, /Baja hasta el final del texto para habilitar Aprobar y Editar\./);
+  const read = renderToString(createElement(SkillProposalView, { detail: detail(), initialRead: true }));
+  assert.match(read, /<button[^>]*>✏️ Editar y aprobar<\/button>/);
+  assert.doesNotMatch(read, /disabled=""[^>]*>✏️ Editar y aprobar/);
+  const editingUnread = renderToString(createElement(SkillProposalView, { detail: detail(), initialEditing: CONTENT }));
+  assert.match(editingUnread, /<textarea[^>]*class="ron-skill-raw"/);
+  assert.match(editingUnread, /<button[^>]*disabled=""[^>]*>Guardar y aprobar<\/button>/);
+  const editingRead = renderToString(createElement(SkillProposalView, { detail: detail(), initialRead: true, initialEditing: CONTENT }));
+  assert.match(editingRead, /<button[^>]*>Guardar y aprobar<\/button>/);
+  assert.doesNotMatch(editingRead, /disabled=""[^>]*>Guardar y aprobar/);
 });
 
 test("proposalActions: Aprobar manda el contentHash mostrado; Editar manda el contenido; Descartar, sólo la acción", async () => {
@@ -69,6 +85,16 @@ test("reachedEnd, diffLineClass y warningLabel", () => {
   assert.equal(warningLabel("nombre-ajustado"), "Ronin ajustó el nombre");
 });
 
+test("final F6: los avisos nuevos tienen etiqueta en español y se resaltan en la propuesta", () => {
+  assert.equal(warningLabel("ruta-sensible"), "Menciona una ruta sensible (credenciales, configuración del agente o CI)");
+  assert.equal(warningLabel("exfiltracion"), "Tiene un comando que podría sacar datos del equipo");
+  assert.equal(warningLabel("salta-controles"), "Pide saltarse controles o instrucciones");
+  const html = renderToString(createElement(SkillProposalView, { detail: detail({ warnings: ["ruta-sensible", "exfiltracion", "salta-controles"] }) }));
+  assert.match(html, /class="ron-skill-warning ruta-sensible"[^>]*>⚠ Menciona una ruta sensible/);
+  assert.match(html, /class="ron-skill-warning exfiltracion"[^>]*>⚠ Tiene un comando que podría sacar datos/);
+  assert.match(html, /class="ron-skill-warning salta-controles"[^>]*>⚠ Pide saltarse controles/);
+});
+
 test("F1: initialReadOnMount nunca hereda el 'leído' de un <pre> ajeno; sólo mide el propio o usa initialRead", () => {
   assert.equal(initialReadOnMount(false, null), false);
   assert.equal(initialReadOnMount(true, null), true);
@@ -89,7 +115,7 @@ test("F2: un 409 SKILL_STALE muestra el aviso de recarga con un botón Recargar,
     detail: detail(), initialRead: true,
     initialError: { message: "el texto que aprobaste no coincide con la propuesta guardada", code: "SKILL_STALE" },
   }));
-  assert.match(html, /La propuesta cambió; recárgala para ver el texto actual\./);
+  assert.match(html, /La propuesta cambió; recárgala para ver el texto actual\. Si sigue sin poder aprobarse, descártala\./);
   assert.match(html, /<button[^>]*>Recargar<\/button>/);
   assert.doesNotMatch(html, /no coincide con la propuesta guardada/);
 });
@@ -115,4 +141,13 @@ test("SkillProposalsPanel lista las pendientes con su tipo, repo y avisos", () =
   assert.match(html, /1 aviso/);
   assert.match(html, /Selecciona una propuesta/);
   assert.match(renderToString(createElement(SkillProposalsPanel, { initial: [] })), /No hay propuestas pendientes/);
+});
+
+function cssChecks(css: string): void {
+  assert.match(css, /(?:^|\n)\.ron-skill-raw\s*\{[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(css, /(?:^|\n)\.ron-skill-diff\s*\{[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere/);
+}
+
+test("final F5: el texto crudo y el diff parten tokens largos, así la puerta de lectura vertical los cubre", () => {
+  cssChecks(readFileSync(new URL("../../ronin-shell.css", import.meta.url), "utf8"));
 });

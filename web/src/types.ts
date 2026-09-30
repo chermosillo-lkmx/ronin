@@ -464,7 +464,15 @@ export interface SessionMemoryInfo {
 
 // ---- Skills aprendidas. Espejo manual de server/src/learned-skills.ts y server/src/types.ts ----
 
-export type SkillWarning = "menciona-repo" | "url-externa" | "comentario-html" | "comando-destructivo" | "nombre-ajustado";
+export type SkillWarning =
+  | "menciona-repo"
+  | "url-externa"
+  | "comentario-html"
+  | "comando-destructivo"
+  | "ruta-sensible"
+  | "exfiltracion"
+  | "salta-controles"
+  | "nombre-ajustado";
 export type SkillProposalKind = "new" | "update";
 export type SkillProposalAction = "approve" | "discard" | "edit";
 

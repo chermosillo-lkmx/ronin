@@ -11,6 +11,11 @@ export function skillStateLabel(state: SkillDistillState | null): string {
   return state.proposalId ? `Propuesta ${state.proposalId} lista para revisar en Skills → Propuestas` : "Propuesta lista para revisar en Skills → Propuestas";
 }
 
+/** Proponer sólo tiene sentido sin estado, con una omitida o con una fallida: en curso o hecha, no. */
+function canPropose(state: SkillDistillState | null): boolean {
+  return !state || state.status === "skipped" || state.status === "failed";
+}
+
 /**
  * Parte de skill de la sesión: su estado y el botón para proponer (salta el triaje y el verifyCmd) o
  * reintentar. El botón queda deshabilitado mientras su POST está en curso; `initialBusy` es para SSR.
@@ -34,7 +39,7 @@ export function SkillPanel({ session, skills, initialBusy = false }: { session: 
   return <div className="ron-distill ron-skill-panel">
     <span className="ronin-eyebrow">skill</span>
     <p className={`ron-distill-status ${state?.status ?? "none"}`}>{skillStateLabel(state)}</p>
-    <button type="button" className="n-btn n-btn-secondary" disabled={busy || state?.status === "running"} onClick={() => void run()}>{state?.status === "failed" ? "Reintentar" : "Proponer skill"}</button>
+    {canPropose(state) && <button type="button" className="n-btn n-btn-secondary" disabled={busy} onClick={() => void run()}>{state?.status === "failed" ? "Reintentar" : "Proponer skill"}</button>}
     {error && <p className="ronin-form-error">{error}</p>}
   </div>;
 }
