@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { writeJsonAtomic } from "./atomic.js";
 import { readCapabilityToken } from "./capability.js";
@@ -527,6 +527,8 @@ function sanitizeProposal(raw: unknown): SkillProposal | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Record<string, unknown>;
   if (typeof value.id !== "string" || typeof value.name !== "string" || typeof value.repo !== "string") return null;
+  // El nombre termina en rutas de disco (<root>/<name>, <history>/<name>): uno manipulado no entra.
+  if (!isStrictSkillName(value.name)) return null;
   if (value.kind !== "new" && value.kind !== "update") return null;
   if (value.status !== "pending" && value.status !== "approved" && value.status !== "discarded") return null;
   return {
@@ -598,6 +600,22 @@ export function createLearnedSkillStore(options: LearnedSkillStoreOptions = {}) 
   const now = options.now ?? (() => Date.now());
   const newId = options.newId ?? (() => `s_${randomBytes(3).toString("hex")}`);
 
+  /** El texto de learned.json si existe y no es JSON válido; null si falta o se lee bien. */
+  function corruptText(): string | null {
+    let text: string;
+    try {
+      text = readFileSync(metaFile, "utf8");
+    } catch {
+      return null;
+    }
+    try {
+      JSON.parse(text);
+      return null;
+    } catch {
+      return text;
+    }
+  }
+
   function load(): LearnedSkillsFile {
     try {
       return sanitizeLearnedFile(JSON.parse(readFileSync(metaFile, "utf8")));
@@ -608,6 +626,9 @@ export function createLearnedSkillStore(options: LearnedSkillStoreOptions = {}) 
 
   function save(file: LearnedSkillsFile): void {
     mkdirSync(dirname(metaFile), { recursive: true });
+    // Un learned.json corrupto se lee vacío; antes de pisarlo se aparta para poder recuperarlo a mano.
+    // Tras el primer guardado el archivo vuelve a ser válido, así que esto ocurre una sola vez.
+    if (corruptText() !== null) renameSync(metaFile, `${metaFile}.corrupt-${now()}`);
     writeJsonAtomic(metaFile, file);
   }
 
@@ -647,13 +668,36 @@ export function createLearnedSkillStore(options: LearnedSkillStoreOptions = {}) 
     for (const version of versions.slice(SKILL_HISTORY_KEEP)) rmSync(join(directory, `v${version}.md`), { force: true });
   }
 
+  /**
+   * <parent>/<name> debe ser, si existe, una carpeta real dentro de <parent>: nunca un symlink ni algo
+   * que resuelva fuera. Así ninguna escritura sale de la raíz de las learned o de su historial.
+   */
+  function assertOwnDirectory(parent: string, name: string): void {
+    const directory = join(parent, name);
+    let stat;
+    try {
+      stat = lstatSync(directory);
+    } catch {
+      return;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory() || realpathSync(directory) !== join(realpathSync(parent), name)) {
+      throw skillInvalid([`${directory} no es una carpeta propia de Ronin (symlink o fuera de su raíz)`]);
+    }
+  }
+
   /** La versión anterior va a history/ (se conservan 5) y el SKILL.md se reemplaza con rename atómico. */
   function writeVersion(name: string, content: string, previousVersion: number): void {
+    if (!isStrictSkillName(name)) throw skillInvalid([`nombre de skill inválido: ${name}`]);
+    assertOwnDirectory(root, name);
+    assertOwnDirectory(historyDir, name);
     const previous = current(name);
     if (previous !== null && previousVersion > 0) {
       const directory = join(historyDir, name);
       mkdirSync(directory, { recursive: true });
-      writeFileSync(join(directory, `v${previousVersion}.md`), previous);
+      const snapshot = join(directory, `v${previousVersion}.md`);
+      // Si ya hubiera algo (p. ej. un symlink) se quita y se crea de cero: "wx" no sigue enlaces.
+      rmSync(snapshot, { force: true });
+      writeFileSync(snapshot, previous, { flag: "wx" });
       pruneHistory(directory);
     }
     mkdirSync(join(root, name), { recursive: true });
@@ -664,6 +708,7 @@ export function createLearnedSkillStore(options: LearnedSkillStoreOptions = {}) 
   }
 
   function approveWith(file: LearnedSkillsFile, proposal: SkillProposal, content: string): SkillResolution {
+    if (!isStrictSkillName(proposal.name)) throw skillInvalid([`nombre de skill inválido: ${proposal.name}`]);
     const previous = file.skills[proposal.name];
     if (proposal.kind === "new" && (previous || existsSync(join(root, proposal.name)))) {
       throw new LearnedSkillError("SKILL_STALE", `ya existe una skill aprendida llamada ${proposal.name}`, 409);
@@ -676,6 +721,10 @@ export function createLearnedSkillStore(options: LearnedSkillStoreOptions = {}) 
     }
     const at = now();
     const hash = skillHash(content);
+    // Orden de escritura: primero el SKILL.md (rename atómico) y después learned.json. Si el proceso
+    // muere entre ambos, queda un SKILL.md sin meta al día: integrity() lo reporta "modified" (o, en
+    // una nueva, la carpeta existente hace que reintentar dé SKILL_STALE). Nunca queda un meta que
+    // apunte a un texto no escrito.
     writeVersion(proposal.name, content, previous?.version ?? 0);
     const meta: LearnedSkillMeta = {
       originRepo: previous?.originRepo ?? proposal.repo,
@@ -803,7 +852,8 @@ export function createLearnedSkillStore(options: LearnedSkillStoreOptions = {}) 
       const warnings: SkillWarning[] = name === input.name ? [] : ["nombre-ajustado"];
       const kind: SkillProposalKind = learned.has(name) ? "update" : "new";
       if (kind === "new" && (input.reservedNames ?? []).includes(name)) {
-        const taken = new Set([...(input.reservedNames ?? []), ...learned]);
+        const pendingNew = file.proposals.filter((proposal) => proposal.status === "pending" && proposal.kind === "new").map((proposal) => proposal.name);
+        const taken = new Set([...(input.reservedNames ?? []), ...learned, ...pendingNew]);
         const base = name;
         for (let suffix = 2; taken.has(name); suffix++) {
           const tail = `-${suffix}`;
@@ -852,11 +902,19 @@ export function createLearnedSkillStore(options: LearnedSkillStoreOptions = {}) 
         if (payload.contentHash !== proposal.contentHash) {
           throw new LearnedSkillError("SKILL_STALE", "el texto que aprobaste no coincide con la propuesta guardada", 409);
         }
-        return approveWith(file, proposal, proposal.content);
+        // Se revalida con el contexto de hoy (vars, token y rutas pueden haber cambiado desde la
+        // propuesta) y el texto guardado debe seguir dando el hash aprobado: learned.json no es de fiar.
+        const revalidated = validateLearnedSkill(proposal.content, { ...contextFor(proposal.repo), name: proposal.name });
+        if (skillHash(revalidated.content) !== proposal.contentHash) {
+          throw new LearnedSkillError("SKILL_STALE", "el texto guardado de la propuesta no coincide con su hash", 409);
+        }
+        return approveWith(file, proposal, revalidated.content);
       }
       const validated = validateLearnedSkill(payload.content, { ...contextFor(proposal.repo), name: proposal.name });
       proposal.description = validated.description;
-      proposal.warnings = validated.warnings;
+      // El aviso nombre-ajustado viene del nombre, no del texto: la edición no lo borra.
+      const kept: SkillWarning[] = proposal.warnings.includes("nombre-ajustado") ? ["nombre-ajustado"] : [];
+      proposal.warnings = orderWarnings([...validated.warnings, ...kept]);
       return approveWith(file, proposal, validated.content);
     },
 

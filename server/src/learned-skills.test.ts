@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,6 +18,7 @@ import {
   unifiedDiff,
   validateLearnedSkill,
   type LearnedSkillStore,
+  type LearnedSkillStoreOptions,
   type ProposeSkillInput,
   type SkillIndexCandidate,
   type SkillValidationContext,
@@ -270,7 +271,7 @@ test("formatSkillCatalog lista aprendidas y descartadas dentro de 4 KB", () => {
   assert.match(big, /\(\+\d+ omitidas\)$/);
 });
 
-function storeFixture() {
+function storeFixture(overrides: Partial<LearnedSkillStoreOptions> = {}) {
   const base = mkdtempSync(join(tmpdir(), "ronin-learned-"));
   const root = join(base, "skills", "learned");
   const metaFile = join(base, "skills", "learned.json");
@@ -287,6 +288,7 @@ function storeFixture() {
     associate: (repo, name) => { associated.push([repo, name]); },
     now: () => ++clock,
     newId: () => `s_${++seq}`,
+    ...overrides,
   });
   return { base, root, metaFile, historyDir, store, associated, cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }
@@ -511,6 +513,117 @@ test("store: markUsed sólo suma a learned conocidas y un learned.json corrupto 
     assert.deepEqual(store.pending(), []);
     assert.equal(store.meta("migracion-reversible"), null);
     assert.equal(store.integrity("migracion-reversible"), "modified");
+  } finally {
+    cleanup();
+  }
+});
+
+test("fix F1: una propuesta con nombre inválido en un learned.json manipulado se descarta y no escribe fuera de la raíz", () => {
+  const { base, root, metaFile, store, cleanup } = storeFixture();
+  try {
+    const content = doc("1. Paso.", "../../escaped");
+    mkdirSync(join(base, "skills"), { recursive: true });
+    writeFileSync(metaFile, JSON.stringify({
+      repos: {},
+      skills: {},
+      proposals: [{ id: "s_evil", kind: "new", name: "../../escaped", repo: "acme-api", source: "x", description: "d", content, contentHash: skillHash(content), changes: "", warnings: [], status: "pending", createdAt: 1 }],
+    }));
+    assert.deepEqual(store.pending(), []);
+    assert.throws(() => store.resolve("s_evil", "approve", { contentHash: skillHash(content) }), isSkillError("SKILL_PROPOSAL_NOT_FOUND", 404));
+    assert.throws(() => store.resolve("s_evil", "edit", { content }), isSkillError("SKILL_PROPOSAL_NOT_FOUND", 404));
+    assert.equal(existsSync(join(root, "..", "..", "escaped")), false);
+    assert.equal(existsSync(join(base, "escaped")), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("fix F2: aprobar revalida el texto guardado con el contexto actual y exige que el hash no cambie", () => {
+  const vars: Record<string, string> = { TOKEN: "tok-123456" };
+  const { metaFile, root, store, cleanup } = storeFixture({ contextFor: (repo) => ({ repo, repoPath: `/srv/code/${repo}`, dataDir: "/srv/ronin-data", vars, token: "cap-9f8e7d6c5b4a" }) });
+  try {
+    const leaky = store.propose({ ...DRAFT, body: "1. Llama a https://dev.acme.test/health." });
+    vars.DEV_URL = "https://dev.acme.test";
+    assert.throws(() => store.resolve(leaky.id, "approve", { contentHash: leaky.contentHash }), isSkillError("SKILL_INVALID", 400, /DEV_URL/));
+    assert.equal(existsSync(join(root, "migracion-reversible")), false);
+
+    const tampered = store.propose({ ...DRAFT, name: "otra-skill" });
+    const saved = JSON.parse(readFileSync(metaFile, "utf8"));
+    const entry = saved.proposals.find((proposal: { id: string }) => proposal.id === tampered.id);
+    entry.content = entry.content.replace("Crea la migración.", "Borra la tabla de usuarios.");
+    writeFileSync(metaFile, JSON.stringify(saved));
+    assert.throws(() => store.resolve(tampered.id, "approve", { contentHash: tampered.contentHash }), isSkillError("SKILL_STALE", 409));
+    assert.equal(existsSync(join(root, "otra-skill")), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("fix F3: no escribe a través de un symlink en la carpeta de la skill ni en su historial", () => {
+  const { base, root, historyDir, store, cleanup } = storeFixture();
+  try {
+    approveNew(store);
+    const outside = join(base, "fuera");
+    renameSync(join(root, "migracion-reversible"), outside);
+    symlinkSync(outside, join(root, "migracion-reversible"), "dir");
+    const before = readFileSync(join(outside, "SKILL.md"), "utf8");
+    const update = store.propose({ ...DRAFT, source: "cowork-b", body: `${DRAFT.body}\n3. Con rollback.` });
+    assert.equal(update.kind, "update");
+    assert.throws(() => store.resolve(update.id, "approve", { contentHash: update.contentHash }), isSkillError("SKILL_INVALID", 400));
+    assert.equal(readFileSync(join(outside, "SKILL.md"), "utf8"), before);
+    assert.throws(() => store.saveEdited("migracion-reversible", update.content), isSkillError("SKILL_INVALID", 400));
+    assert.equal(readFileSync(join(outside, "SKILL.md"), "utf8"), before);
+
+    unlinkSync(join(root, "migracion-reversible"));
+    renameSync(outside, join(root, "migracion-reversible"));
+    const outsideHistory = join(base, "fuera-historial");
+    mkdirSync(outsideHistory);
+    mkdirSync(historyDir, { recursive: true });
+    symlinkSync(outsideHistory, join(historyDir, "migracion-reversible"), "dir");
+    assert.throws(() => store.saveEdited("migracion-reversible", update.content), isSkillError("SKILL_INVALID", 400));
+    assert.deepEqual(readdirSync(outsideHistory), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("fix F4: un learned.json corrupto se aparta como .corrupt-* antes del primer guardado", () => {
+  const { base, metaFile, store, cleanup } = storeFixture();
+  try {
+    mkdirSync(join(base, "skills"), { recursive: true });
+    writeFileSync(metaFile, "{roto");
+    assert.deepEqual(store.pending(), []);
+    assert.equal(readFileSync(metaFile, "utf8"), "{roto");
+    store.propose(DRAFT);
+    const aside = readdirSync(join(base, "skills")).filter((file) => file.startsWith("learned.json.corrupt-"));
+    assert.equal(aside.length, 1);
+    assert.equal(readFileSync(join(base, "skills", aside[0]), "utf8"), "{roto");
+    assert.equal(store.pendingCount(), 1);
+    store.propose({ ...DRAFT, name: "otra-skill" });
+    assert.equal(readdirSync(join(base, "skills")).filter((file) => file.startsWith("learned.json.corrupt-")).length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("fix F5: el sufijo también evita los nombres de propuestas nuevas pendientes", () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    store.propose({ ...DRAFT, name: "api-review-2" });
+    const suffixed = store.propose({ ...DRAFT, name: "api-review", reservedNames: ["api-review"] });
+    assert.equal(suffixed.name, "api-review-3");
+  } finally {
+    cleanup();
+  }
+});
+
+test("fix F6: editar conserva el aviso nombre-ajustado", () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    const proposal = store.propose({ ...DRAFT, name: "Migración Reversible" });
+    assert.deepEqual(proposal.warnings, ["nombre-ajustado"]);
+    const edited = store.resolve(proposal.id, "edit", { content: `${proposal.content}Ver https://example.com/guia.\n` });
+    assert.deepEqual(edited.proposal.warnings, ["url-externa", "nombre-ajustado"]);
   } finally {
     cleanup();
   }
