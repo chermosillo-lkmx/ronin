@@ -150,3 +150,17 @@ test("skills aprendidas: un error del servidor llega como Error con su mensaje y
     globalThis.fetch = originalFetch;
   }
 });
+
+test("F2: el error de resolveSkillProposal conserva el code del servidor (para poder ofrecer 'Recargar' ante SKILL_STALE)", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "el texto que aprobaste no coincide con la propuesta guardada", code: "SKILL_STALE" }), { status: 409 });
+    await assert.rejects(api.resolveSkillProposal("s_1", "approve", { contentHash: "x" }), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as { code?: string }).code, "SKILL_STALE");
+      return true;
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

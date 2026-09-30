@@ -262,11 +262,25 @@ export async function getRepoKnowledgeBaseGeneration(repo: string): Promise<Know
 
 const memoryUrl = (repo: string, suffix = "") => `/api/repos/${encodeURIComponent(repo)}/memory${suffix}`;
 
+/**
+ * Como WorkflowSaveError, pero para las rutas "memoria" (memoryRequest): conserva el `code` del
+ * servidor (p. ej. SKILL_STALE) sin dejar de ser un Error normal para quien sólo lee `.message`
+ * (T9/F2 — el consumidor que no lo necesita sigue funcionando igual).
+ */
+export class ApiRequestError extends Error {
+  readonly code?: string;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.code = code;
+  }
+}
+
 async function memoryRequest<T>(url: string, init: RequestInit, fallback: string): Promise<T> {
   const r = await fetch(url, init);
   if (!r.ok) {
     const e = await r.json().catch(() => ({}));
-    throw new Error(e.error || fallback);
+    throw new ApiRequestError(e.error || fallback, e.code);
   }
   return r.json();
 }

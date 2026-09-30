@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import type { SkillProposalDetail } from "../../types.js";
-import { diffLineClass, proposalActions, reachedEnd, SkillProposalsPanel, SkillProposalView, warningLabel } from "./SkillProposals.js";
+import { diffLineClass, initialReadOnMount, proposalActions, reachedEnd, SkillProposalsPanel, SkillProposalView, warningLabel } from "./SkillProposals.js";
 
 const CONTENT = "---\nname: migracion-reversible\ndescription: Migra.\n---\n\n1. Crea la migración.\n<!-- no borres esto -->\n";
 
@@ -67,6 +67,39 @@ test("reachedEnd, diffLineClass y warningLabel", () => {
   assert.equal(warningLabel("comando-destructivo"), "Tiene un comando destructivo");
   assert.equal(warningLabel("menciona-repo"), "Menciona el repo de origen");
   assert.equal(warningLabel("nombre-ajustado"), "Ronin ajustó el nombre");
+});
+
+test("F1: initialReadOnMount nunca hereda el 'leído' de un <pre> ajeno; sólo mide el propio o usa initialRead", () => {
+  assert.equal(initialReadOnMount(false, null), false);
+  assert.equal(initialReadOnMount(true, null), true);
+  // un <pre> que ya está al fondo (contenido corto que cabe sin scroll) sí cuenta como leído
+  assert.equal(initialReadOnMount(false, { scrollTop: 0, clientHeight: 200, scrollHeight: 200 }), true);
+  // uno recién montado que aún no llegó al fondo, no
+  assert.equal(initialReadOnMount(false, { scrollTop: 10, clientHeight: 100, scrollHeight: 400 }), false);
+});
+
+test("F1: cada propuesta nueva monta con Aprobar deshabilitado, sin importar el id anterior (el panel remonta con key={detail.id})", () => {
+  const first = renderToString(createElement(SkillProposalView, { detail: detail({ id: "s_1" }) }));
+  const second = renderToString(createElement(SkillProposalView, { detail: detail({ id: "s_2", name: "otra-skill" }) }));
+  for (const html of [first, second]) assert.match(html, /<button[^>]*disabled=""[^>]*>✅ Aprobar<\/button>/);
+});
+
+test("F2: un 409 SKILL_STALE muestra el aviso de recarga con un botón Recargar, y no el mensaje crudo del servidor", () => {
+  const html = renderToString(createElement(SkillProposalView, {
+    detail: detail(), initialRead: true,
+    initialError: { message: "el texto que aprobaste no coincide con la propuesta guardada", code: "SKILL_STALE" },
+  }));
+  assert.match(html, /La propuesta cambió; recárgala para ver el texto actual\./);
+  assert.match(html, /<button[^>]*>Recargar<\/button>/);
+  assert.doesNotMatch(html, /no coincide con la propuesta guardada/);
+});
+
+test("F2: otros errores muestran el mensaje del servidor tal cual, sin botón Recargar", () => {
+  const html = renderToString(createElement(SkillProposalView, {
+    detail: detail(), initialError: { message: "no se pudo resolver la propuesta" },
+  }));
+  assert.match(html, /no se pudo resolver la propuesta/);
+  assert.doesNotMatch(html, /Recargar/);
 });
 
 test("SkillProposalsPanel lista las pendientes con su tipo, repo y avisos", () => {

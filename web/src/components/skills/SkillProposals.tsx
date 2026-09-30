@@ -28,6 +28,16 @@ export function diffLineClass(line: string): string {
   return "ctx";
 }
 
+/**
+ * F1: estado inicial de "leído" al montar. Measurement-based, nunca hereda un `true` de otra
+ * propuesta: el panel monta una `SkillProposalView` nueva por cada `detail.id` (key={detail.id}),
+ * así que `box` siempre es el <pre> recién creado para ESTA propuesta (o `null` si aún no se pintó),
+ * jamás uno reciclado que conserve el scrollTop de la propuesta anterior.
+ */
+export function initialReadOnMount(initialRead: boolean, box: { scrollTop: number; clientHeight: number; scrollHeight: number } | null): boolean {
+  return initialRead || Boolean(box && reachedEnd(box));
+}
+
 /** Aprobar manda el hash del texto que se mostró: si la propuesta cambió, el servidor responde 409. */
 export function proposalActions(detail: SkillProposalDetail, api: { resolveSkillProposal: typeof resolveSkillProposal } = { resolveSkillProposal }) {
   return {
@@ -43,20 +53,28 @@ function diffLines(diff: string): string[] {
 
 /**
  * Detalle de una propuesta: el SKILL.md en crudo (monoespaciado, sin renderizar markdown, para que un
- * comentario HTML no esconda nada), los avisos y, en una actualización, el diff. `initialRead` e
- * `initialBusy` sólo existen para las pruebas SSR.
+ * comentario HTML no esconda nada), los avisos y, en una actualización, el diff. `initialRead`,
+ * `initialBusy` e `initialError` sólo existen para las pruebas SSR.
  */
-export function SkillProposalView({ detail, initialRead = false, initialBusy = false, onResolved }: { detail: SkillProposalDetail; initialRead?: boolean; initialBusy?: boolean; onResolved?: (result: SkillResolution) => void }) {
+export function SkillProposalView({ detail, initialRead = false, initialBusy = false, initialError = null, onResolved, onReload }: {
+  detail: SkillProposalDetail;
+  initialRead?: boolean;
+  initialBusy?: boolean;
+  initialError?: { message: string; code?: string } | null;
+  onResolved?: (result: SkillResolution) => void;
+  /** F2: refresca la propuesta cuando el servidor responde 409 SKILL_STALE (el texto mostrado ya no coincide). */
+  onReload?: () => void;
+}) {
   const [read, setRead] = useState(initialRead);
   const [busy, setBusy] = useState(initialBusy);
   const [editing, setEditing] = useState<string | null>(null);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ message: string; code?: string } | null>(initialError);
   const lock = useRef(false);
   const raw = useRef<HTMLPreElement>(null);
   useEffect(() => {
     setEditing(null);
-    setError("");
-    setRead(initialRead || Boolean(raw.current && reachedEnd(raw.current)));
+    setError(null);
+    setRead(initialReadOnMount(initialRead, raw.current));
   }, [detail.id]);
   const actions = proposalActions(detail);
   const run = async (action: () => Promise<SkillResolution>) => {
@@ -64,7 +82,8 @@ export function SkillProposalView({ detail, initialRead = false, initialBusy = f
       const result = await runExclusive(lock, setBusy, action);
       if (result) onResolved?.(result);
     } catch (failure) {
-      setError((failure as Error).message);
+      const err = failure as { message?: string; code?: string };
+      setError({ message: err.message || "no se pudo resolver la propuesta", code: err.code });
     }
   };
   return <article className="ron-skill-proposal" aria-label={`Propuesta ${detail.name}`}>
@@ -97,7 +116,12 @@ export function SkillProposalView({ detail, initialRead = false, initialBusy = f
           <button type="button" className="n-btn n-btn-secondary" disabled={busy} onClick={() => setEditing(null)}>Cancelar</button>
         </>}
     </footer>
-    {error && <p className="ronin-form-error" role="alert">{error}</p>}
+    {error && (error.code === "SKILL_STALE"
+      ? <p className="ronin-form-error" role="alert">
+          La propuesta cambió; recárgala para ver el texto actual.{" "}
+          <button type="button" className="n-btn n-btn-secondary" onClick={() => { setError(null); onReload?.(); }}>Recargar</button>
+        </p>
+      : <p className="ronin-form-error" role="alert">{error.message}</p>)}
   </article>;
 }
 
@@ -139,7 +163,9 @@ export function SkillProposalsPanel({ initial, initialDetail = null, onCount }: 
     </aside>
     <section className="ronin-skill-editor">
       {detail
-        ? <SkillProposalView detail={detail} onResolved={(result) => void resolved(result)} />
+        // F1: key={detail.id} fuerza un remonte por propuesta, para que el <pre> (y su scrollTop) de
+        // una propuesta anterior nunca se reutilice al elegir otra.
+        ? <SkillProposalView key={detail.id} detail={detail} onResolved={(result) => void resolved(result)} onReload={() => void open(detail.id)} />
         : <div className="ronin-empty-workspace"><span>propuestas</span><h1>Selecciona una propuesta</h1></div>}
       {note && <p className="ron-skill-note" role="status">{note}</p>}
     </section>
