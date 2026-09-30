@@ -458,7 +458,7 @@ app.post("/api/repo-config/:repo/validate", (req, res) => {
 
 function skillRefFromRequest(source: Record<string, unknown>) {
   return {
-    root: source.root as "global" | "repo-claude" | "repo-skills" | undefined,
+    root: source.root as "global" | "learned" | "repo-claude" | "repo-skills" | undefined,
     name: typeof source.name === "string" ? source.name : undefined,
     sourceRepo: typeof source.sourceRepo === "string" ? source.sourceRepo : undefined,
   };

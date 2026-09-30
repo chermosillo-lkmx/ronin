@@ -153,7 +153,11 @@ export function listSkills(repos: string[]): SkillSummary[] {
 /** Ruta real del SKILL.md de una skill existente (el índice de lanzamiento la da al agente). */
 export function skillFilePath(raw: Partial<SkillRef>): string {
   const { directory } = skillDirectory(normalizedRef(raw));
-  return join(directory, "SKILL.md");
+  const file = join(directory, "SKILL.md");
+  if (!existsSync(file)) throw new SkillError("SKILL_NOT_FOUND", "falta SKILL.md");
+  const resolvedFile = realpathSync(file);
+  if (!inside(directory, resolvedFile)) throw new SkillError("SKILL_PATH_OUTSIDE_ROOT", "SKILL.md abandona el directorio de la skill");
+  return resolvedFile;
 }
 
 function ensureCreationRoot(ref: SkillRef): string {

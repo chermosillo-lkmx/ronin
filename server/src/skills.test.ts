@@ -77,6 +77,27 @@ test("la raíz learned se lista y se lee sin sourceRepo, y da la ruta real de su
   });
 });
 
+test("skillFilePath lanza si la skill existe pero le falta SKILL.md", () => {
+  withLearnedRoot((learned) => {
+    mkdirSync(join(learned, "sin-skill"));
+    assert.throws(() => skillFilePath({ root: "learned", name: "sin-skill" }), /SKILL\.md/);
+  });
+});
+
+test("skillFilePath lanza si SKILL.md es un symlink que escapa su raíz", () => {
+  withLearnedRoot((learned) => {
+    const outside = mkdtempSync(join(tmpdir(), "cowork-outside-"));
+    try {
+      mkdirSync(join(learned, "con-symlink"));
+      writeFileSync(join(outside, "SKILL.md"), valid);
+      symlinkSync(join(outside, "SKILL.md"), join(learned, "con-symlink", "SKILL.md"));
+      assert.throws(() => skillFilePath({ root: "learned", name: "con-symlink" }), /abandona/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
 test("una skill learned no se crea ni se edita por el camino genérico", () => {
   withLearnedRoot((learned) => {
     mkdirSync(join(learned, "migracion-reversible"));
