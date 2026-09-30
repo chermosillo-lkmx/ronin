@@ -1,8 +1,9 @@
 # Gate de pruebas unitarias (`scripts/unit-gate.sh`)
 
-Regla que hace cumplir en **todos los workflows** de Ronin para el monorepo Liebre (2026‑09‑15):
+Regla que hace cumplir en **todos los workflows** de Ronin para el monorepo Liebre:
 
-> Ningún PR se mergea sin pruebas unitarias que lo cubran y sin la suite del servicio en verde.
+> Ningún PR se mergea sin pruebas unitarias que cubran sus líneas nuevas, sin la suite del
+> servicio en verde y sin respetar el piso de cobertura del repo.
 
 El gate es un `verifyCmd` de etapa (P2): Ronin lo corre en el **worktree de la sesión** cuando el
 worker toca el sentinela de la etapa y está ocioso; `maxRetries: 2`; el veredicto queda en
@@ -28,19 +29,41 @@ Las sesiones ya creadas conservan su `flow.json` congelado: el gate aplica a ses
 2. **Los tests tocados existen y se ejecutan**: cada archivo de tests cambiado debe tener al menos un
    caso en el `junit` que pase (un archivo que pytest no colecta, o que sólo tiene skips, falla).
    Puede apoyarse en junits de corridas aparte vía `UNIT_GATE_EXTRA_JUNIT` (ver abajo).
-3. **La suite completa pasa**: `0 failed / 0 errors` y `> 0` tests. Python:
-   `pytest tests -q -o addopts="" --continue-on-collection-errors -p no:cacheprovider --junitxml=reports/junit-gate.xml`
-   (`ant-ms-cfdis` añade `-o log_cli=false -m "not functional"`); Node: `npx vitest run --reporter=junit`.
-   Intérprete: `<repo>/.venv/bin/python` y, si el worktree no tiene, `~/code/lkmx/liebre/<repo>/.venv/bin/python`.
+3. **La suite completa pasa**: `0 failed / 0 errors` y `> 0` tests. Python ejecuta `pytest` con
+   `--cov=src --cov-report=xml:reports/coverage-gate.xml` además del junit (`ant-ms-cfdis` añade
+   `-o log_cli=false -m "not functional"`). Node ejecuta `npx vitest run --coverage
+   --coverage.reporter=cobertura --coverage.reportsDirectory=reports/coverage-gate` además del
+   reporter junit. Intérprete Python: `<repo>/.venv/bin/python` y, si el worktree no tiene,
+   `~/code/lkmx/liebre/<repo>/.venv/bin/python`.
+4. **Cobertura (default-deny)**, después de las reglas 1‑3:
+   - **4a. Líneas nuevas**: calcula las líneas agregadas o modificadas de cada archivo de `src`
+     respecto al `merge-base`, incluyendo todas las líneas de archivos sin rastrear. Resuelve cada
+     `class filename` de Cobertura contra sus elementos `<source>`. Las líneas ejecutables nuevas
+     deben tener `hits > 0`; lista los fallos como `archivo:línea`. Una línea ausente del XML se
+     considera no ejecutable y se ignora, pero un `.py`, `.ts`, `.tsx`, `.js` o `.jsx` cambiado que
+     no aparece en el reporte falla con «no aparece en el reporte de cobertura».
+   - **4b. Piso total**: multiplica por 100 el `line-rate` de `<coverage>` y lo redondea a dos
+     decimales. Python declara el piso en `.coveragerc` (`[report] fail_under`), o como alternativas
+     en `pyproject.toml` (`[tool.coverage.report]`) y `setup.cfg` (`[coverage:report]`). Node lo
+     declara en `vitest.config.ts`, `coverage.thresholds.lines`. Un repo sin piso falla.
+   - **4c. Trinquete**: el piso actual no puede ser menor que el del `merge-base`. También falla
+     cualquier línea agregada fuera de `tests/` con `pragma: no cover`, `istanbul ignore`,
+     `c8 ignore` o `v8 ignore`, así como entradas nuevas en `omit` o `coverage.exclude`.
 
-Default‑deny: sin intérprete, sin `junit`, sin `merge-base` o sin runner reconocible → `FAIL`.
+La regla existe porque **la cobertura bajó una semana sin que nada se pusiera rojo; el gate usaba
+`-o addopts=''` y anulaba el `--cov-fail-under` de cada `pytest.ini`**. Ahora `addopts` sigue
+neutralizado para que la corrida sea homogénea, pero el gate produce Cobertura y aplica por sí
+mismo el piso declarado en cada repo.
+
+Default‑deny: sin intérprete, sin `junit`, sin XML Cobertura, sin piso, sin `merge-base` o sin runner
+reconocible → `FAIL`.
 Sub‑repos sin cambios se omiten; `*-base` (checkouts de control) se ignoran.
 
 ## Uso a mano
 
 ```bash
 ~/code/claude-cowork/scripts/unit-gate.sh /ruta/al/worktree     # default: cwd
-UNIT_GATE_SKIP_SUITE=1 …   # sólo reglas 1‑2 (rápido, para depurar la clasificación de archivos)
+UNIT_GATE_SKIP_SUITE=1 …   # sólo reglas 1‑2; salta suite y cobertura (reglas 3‑4)
 UNIT_GATE_BASE=origin/main # base de comparación
 UNIT_GATE_EXTRA_JUNIT=a.xml:b.xml … # junits extra para la regla 2 (ver abajo)
 ```
@@ -78,11 +101,12 @@ Pruebas del propio gate: `node --test scripts/unit-gate.test.mjs` (`npm run test
 
 Salida: una línea `✅/❌` por regla y repo, cola de `reports/unit-gate.log` cuando la suite falla,
 y al final `UNIT-GATE: PASS` o `UNIT-GATE: FAIL` (exit 0 / 1). El log completo de la suite queda
-en `<repo>/reports/unit-gate.log` y el junit en `<repo>/reports/junit-gate.xml`.
+en `<repo>/reports/unit-gate.log`, el junit en `<repo>/reports/junit-gate.xml` y Cobertura en
+`<repo>/reports/coverage-gate.xml` (Python) o
+`<repo>/reports/coverage-gate/cobertura-coverage.xml` (Node).
 
 ## Qué NO es
 
 - No sustituye a `mcp__ronin__reportar_pruebas` (el gate no registra corridas en el harness).
-- No mide cobertura ni impone umbrales; los umbrales por repo viven en `liebre/CLAUDE.md`.
 - No detecta pruebas vacuas (mocks que afirman llamadas, `assert x is not None`): eso sigue siendo
   revisión humana/de Main con mutantes.
