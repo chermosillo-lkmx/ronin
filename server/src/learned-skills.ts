@@ -109,10 +109,30 @@ export interface ValidatedSkill {
   warnings: SkillWarning[];
 }
 
+// Límite antes de una ruta absoluta: inicio de texto o un carácter que normalmente introduce una
+// ruta (espacio, comillas, backtick, paréntesis/corchete de apertura, `=` o `:`). Así "src/home/x"
+// o "https://cdn.example.com/Users/a.png" (la subcadena sigue a una letra del host) no se marcan.
+const PATH_START_CHARS = '\\s"\'`\\(\\[=:>';
+const PATH_START = `(?:^|[${PATH_START_CHARS}])`;
+
+// Límite después de una ruta absoluta buscada literalmente (repoPath/dataDir): el siguiente
+// carácter debe cerrar la ruta (fin de texto, separador o puntuación), no seguir siendo parte del
+// mismo nombre — así "/srv/code/acme-apiary" no coincide con el repoPath "/srv/code/acme-api".
+const PATH_END_CHARS = '/\\s"\'`.,;:!?)\\]}>';
+const PATH_END = `(?=$|[${PATH_END_CHARS}])`;
+
+function absolutePathPattern(needle: string): RegExp {
+  return new RegExp(`${PATH_START}${escapeRegExp(needle)}`);
+}
+
+function includesBoundedPath(content: string, path: string): boolean {
+  return new RegExp(`${escapeRegExp(path)}${PATH_END}`).test(content);
+}
+
 const ABSOLUTE_PATHS: Array<[RegExp, string]> = [
-  [/\/Users\//, "/Users/"],
-  [/\/home\//, "/home/"],
-  [/\/tmp\/cowork-cycle-/, "/tmp/cowork-cycle-"],
+  [absolutePathPattern("/Users/"), "/Users/"],
+  [absolutePathPattern("/home/"), "/home/"],
+  [absolutePathPattern("/tmp/cowork-cycle-"), "/tmp/cowork-cycle-"],
   [/\b[A-Za-z]:\\/, "C:\\"],
 ];
 
@@ -143,7 +163,7 @@ function mentions(content: string, word: string): boolean {
 }
 
 function hasExternalUrl(content: string): boolean {
-  for (const match of content.matchAll(/\bhttps?:\/\/([^\s/?#)>\]"']+)/gi)) {
+  for (const match of content.matchAll(/\bhttps?:\/\/(\[[0-9a-fA-F:]+\]|[^\s/?#)>\]"']+)/gi)) {
     const host = match[1].toLowerCase().replace(/:\d+$/, "");
     if (!LOCAL_HOSTS.has(host)) return true;
   }
@@ -195,8 +215,8 @@ export function validateLearnedSkill(raw: unknown, context: SkillValidationConte
   if (count > LEARNED_SKILL_MAX_LINES) reasons.push(`tiene ${count} líneas; el tope es ${LEARNED_SKILL_MAX_LINES}`);
 
   for (const [pattern, label] of ABSOLUTE_PATHS) if (pattern.test(content)) reasons.push(`contiene una ruta absoluta (${label})`);
-  if (context.repoPath && context.repoPath.length > 1 && content.includes(context.repoPath)) reasons.push("contiene la ruta real del repo");
-  if (context.dataDir && context.dataDir.length > 1 && content.includes(context.dataDir)) reasons.push("contiene la ruta de datos de Ronin");
+  if (context.repoPath && context.repoPath.length > 1 && includesBoundedPath(content, context.repoPath)) reasons.push("contiene la ruta real del repo");
+  if (context.dataDir && context.dataDir.length > 1 && includesBoundedPath(content, context.dataDir)) reasons.push("contiene la ruta de datos de Ronin");
   for (const [pattern, label] of SECRETS) if (pattern.test(content)) reasons.push(`contiene un secreto: ${label}`);
   for (const [key, value] of Object.entries(context.vars ?? {})) {
     if (value.length >= SKILL_VAR_MIN_CHARS && content.includes(value)) reasons.push(`contiene el valor de una variable del repo (${key})`);

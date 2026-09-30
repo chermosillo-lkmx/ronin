@@ -143,6 +143,31 @@ test("validateLearnedSkill marca cada aviso sin bloquear, en orden estable", () 
   assert.deepEqual(warnings("<!-- x --> https://docs.example.com en acme-api con rm -rf tmp"), ["menciona-repo", "url-externa", "comentario-html", "comando-destructivo"]);
 });
 
+test("fix F1: sólo rutas absolutas reales se rechazan; subcadenas dentro de rutas relativas o de URLs se aceptan", () => {
+  for (const safe of ["src/home/index.tsx", "lib/Users/y", "usa https://cdn.example.com/Users/avatar.png"]) {
+    assert.doesNotThrow(() => validateLearnedSkill(doc(safe), CONTEXT), safe);
+  }
+  const cases: Array<[string, RegExp]> = [
+    ["/home/dev/x", /\/home\//],
+    ["abre `/Users/me`", /\/Users\//],
+    ["ejecuta (/tmp/cowork-cycle-build)", /\/tmp\/cowork-cycle-/],
+    ["abre C:\\repo", /C:\\/],
+  ];
+  for (const [body, reason] of cases) assert.match(reasonsOf(() => validateLearnedSkill(doc(body), CONTEXT)).join("|"), reason, body);
+});
+
+test("fix F2: repoPath y dataDir sólo se rechazan si el siguiente carácter es un límite real", () => {
+  assert.doesNotThrow(() => validateLearnedSkill(doc("clona /srv/code/acme-apiary y revisa"), CONTEXT));
+  assert.doesNotThrow(() => validateLearnedSkill(doc("copia a /srv/ronin-data-backup y listo"), CONTEXT));
+  assert.match(reasonsOf(() => validateLearnedSkill(doc("corre en /srv/code/acme-api."), CONTEXT)).join("|"), /ruta real del repo/);
+  assert.match(reasonsOf(() => validateLearnedSkill(doc("lee /srv/ronin-data,"), CONTEXT)).join("|"), /ruta de datos de Ronin/);
+});
+
+test("fix F3: una IPv6 local entre corchetes no cuenta como URL externa", () => {
+  assert.deepEqual(validateLearnedSkill(doc("visita http://[::1]:8080/panel"), CONTEXT).warnings, []);
+  assert.deepEqual(validateLearnedSkill(doc("visita http://[2001:db8::1]/panel"), CONTEXT).warnings, ["url-externa"]);
+});
+
 test("unifiedDiff produce un diff unificado con contexto de 3 líneas", () => {
   assert.equal(unifiedDiff("a\nb\nc\n", "a\nB\nc\n"), "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n");
   assert.equal(unifiedDiff("igual\n", "igual\n"), "");
