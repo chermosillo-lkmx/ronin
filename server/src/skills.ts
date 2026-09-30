@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { basename, join, relative } from "node:path";
 import { promisify } from "node:util";
+import { DATA_DIR } from "./data-dir.js";
 import { resolveCwd } from "./repos.js";
 import type { SkillRef, SkillRoot } from "./repo-config.js";
 
@@ -31,11 +32,21 @@ export interface SkillSummary {
   error?: string;
 }
 
+/**
+ * Skills aprendidas: fuera del repo (un `git add -A` del agente no las mete en el PR) y fuera de
+ * ~/.claude/skills (Claude Code las cargaría en todas las sesiones). `COWORK_LEARNED_SKILLS_ROOT`
+ * existe para las pruebas.
+ */
+export function learnedSkillsRoot(): string {
+  return process.env.COWORK_LEARNED_SKILLS_ROOT?.trim() || join(DATA_DIR, "skills", "learned");
+}
+
 function rootDirectory(root: SkillRoot, sourceRepo?: string): string {
   // Mirrors the mockup and Claude Code's conventional global location. `COWORK_SKILLS_ROOT`
   // makes tests and managed deployments deterministic without depending on the utility
   // process's cwd (which is not stable after Electron packaging).
   if (root === "global") return process.env.COWORK_SKILLS_ROOT?.trim() || join(homedir(), ".claude", "skills");
+  if (root === "learned") return learnedSkillsRoot();
   if (!sourceRepo) throw new SkillError("SKILL_REF_INVALID", "las skills de repositorio requieren sourceRepo");
   const resolved = resolveCwd(sourceRepo);
   if (!resolved.real) throw new SkillError("SKILL_REF_INVALID", "el repositorio de la skill no existe");
@@ -50,12 +61,12 @@ function safeName(value: unknown): string {
 
 function normalizedRef(raw: Partial<SkillRef>): SkillRef {
   const root = raw.root;
-  if (root !== "global" && root !== "repo-claude" && root !== "repo-skills") {
+  if (root !== "global" && root !== "learned" && root !== "repo-claude" && root !== "repo-skills") {
     throw new SkillError("SKILL_REF_INVALID", "raíz de skill inválida");
   }
   const name = safeName(raw.name);
   const sourceRepo = typeof raw.sourceRepo === "string" ? raw.sourceRepo.trim() : "";
-  if (root === "global") return { root, name };
+  if (root === "global" || root === "learned") return { root, name };
   if (!sourceRepo) throw new SkillError("SKILL_REF_INVALID", "las skills de repositorio requieren sourceRepo");
   return { root, name, sourceRepo };
 }
@@ -111,10 +122,11 @@ export function readSkill(raw: Partial<SkillRef>): SkillDocument {
 }
 
 function summariesAt(root: SkillRoot, sourceRepo?: string): SkillSummary[] {
+  const global = root === "global" || root === "learned";
   let directory: string;
-  try { directory = existingRoot(root === "global" ? { root, name: "x" } : { root, name: "x", sourceRepo }); }
+  try { directory = existingRoot(global ? { root, name: "x" } : { root, name: "x", sourceRepo }); }
   catch { return []; }
-  const source = root === "global" ? undefined : sourceRepo;
+  const source = global ? undefined : sourceRepo;
   const out: SkillSummary[] = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (!entry.isDirectory() || !NAME.test(entry.name)) continue;
@@ -133,8 +145,15 @@ function summariesAt(root: SkillRoot, sourceRepo?: string): SkillSummary[] {
 export function listSkills(repos: string[]): SkillSummary[] {
   return [
     ...summariesAt("global"),
+    ...summariesAt("learned"),
     ...repos.flatMap((repo) => [...summariesAt("repo-claude", repo), ...summariesAt("repo-skills", repo)]),
   ];
+}
+
+/** Ruta real del SKILL.md de una skill existente (el índice de lanzamiento la da al agente). */
+export function skillFilePath(raw: Partial<SkillRef>): string {
+  const { directory } = skillDirectory(normalizedRef(raw));
+  return join(directory, "SKILL.md");
 }
 
 function ensureCreationRoot(ref: SkillRef): string {
@@ -145,6 +164,7 @@ function ensureCreationRoot(ref: SkillRef): string {
 
 export function createSkill(raw: Partial<SkillRef>, content: string): SkillDocument {
   const ref = normalizedRef(raw);
+  if (ref.root === "learned") throw new SkillError("SKILL_REF_INVALID", "las skills aprendidas sólo nacen de una propuesta aprobada");
   parseSkillDocument(content, ref.name); // validate before writing anything
   const root = ensureCreationRoot(ref);
   const destination = join(root, ref.name);
@@ -163,6 +183,7 @@ export function createSkill(raw: Partial<SkillRef>, content: string): SkillDocum
 /** Validate first, then replace a single SKILL.md with a sibling temporary + atomic rename. */
 export function updateSkill(raw: Partial<SkillRef>, content: string): SkillDocument {
   const ref = normalizedRef(raw);
+  if (ref.root === "learned") throw new SkillError("SKILL_REF_INVALID", "una skill aprendida se guarda con el store de skills aprendidas (valida y versiona)");
   parseSkillDocument(content, ref.name);
   const { root, directory } = skillDirectory(ref);
   const destination = join(directory, "SKILL.md");
