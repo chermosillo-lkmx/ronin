@@ -81,6 +81,7 @@ test("tools/list publica reportar_pruebas y estado_pruebas con JSON Schema", asy
       "reportar_pruebas", "estado_pruebas",
       "listar_repos_y_workflows", "crear_sesion", "estado_sesiones", "responder_sesion",
       "memoria_pendiente", "resolver_memoria",
+      "skills_pendientes", "resolver_skill",
     ]);
     assert.equal(response.result.tools[0].inputSchema.type, "object");
     assert.deepEqual(response.result.tools[0].inputSchema.required, ["repo", "suite", "junitPath"]);

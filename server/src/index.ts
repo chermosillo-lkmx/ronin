@@ -59,6 +59,7 @@ import { handleMcp } from "./mcp.js";
 import { createSessionPort } from "./mcp-session-port.js";
 import type { McpSessionPort } from "./mcp-sessions.js";
 import { createMemoryPort, type McpMemoryPort } from "./mcp-memory.js";
+import { createSkillPort, type McpSkillPort } from "./mcp-skills.js";
 import { withMcpConfig, writeAgentMcpConfig } from "./agent-mcp.js";
 import { runClaudeP } from "./claude-p.js";
 import { createAnalyzer, type Analyzer } from "./workflow-insights/analyzer.js";
@@ -150,6 +151,8 @@ export interface CreateAppOptions {
   mcpSessions?: McpSessionPort;
   /** Puerto de memoria para /mcp; en producción usa el store real. */
   mcpMemory?: McpMemoryPort;
+  /** Puerto de skills aprendidas para /mcp; en producción usa el store real. */
+  mcpSkills?: McpSkillPort;
   /** Registro de respuestas del usuario (evento reply); las pruebas lo espían en vez de escribir history.jsonl. */
   recordReply?: (session: string, text: string) => void;
   /** Costuras de la memoria por repo para pruebas HTTP con un store temporal y un destilador falso. */
@@ -281,10 +284,11 @@ const mcpSessions = options.mcpSessions ?? createSessionPort({
   recordReply: recordSessionReply,
 });
 const mcpMemory = options.mcpMemory ?? createMemoryPort(memoryApi.store());
+const mcpSkills = options.mcpSkills ?? createSkillPort(skillsApi.store());
 app.post("/mcp", async (req, res) => {
   // Los agentes que lanza Ronin usan /mcp?scope=agent (agent-mcp.ts): sin puerto de sesiones, así
   // un worker no puede crear sesiones ni escribir en otras. Los clientes externos no cambian.
-  const deps = req.query.scope === "agent" ? { harness, scope: "agent" as const } : { harness, sessions: mcpSessions, memory: mcpMemory };
+  const deps = req.query.scope === "agent" ? { harness, scope: "agent" as const } : { harness, sessions: mcpSessions, memory: mcpMemory, skills: mcpSkills };
   const response = await handleMcp(req.body, deps);
   if (response === null) return void res.status(202).end();
   res.json(response);
