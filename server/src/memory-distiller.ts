@@ -560,3 +560,15 @@ export function attachSessionMemory(sessions: TmuxSessionInfo[], info: (name: st
     return memory ? { ...session, memory } : session;
   });
 }
+
+/** Cuelga `skills` (repo y estado de la parte de skill) de las gestionadas que ya traen `memory`. */
+export function attachSessionSkills(sessions: TmuxSessionInfo[], stateOf: (name: string) => SkillDistillState | null): TmuxSessionInfo[] {
+  return sessions.map((session) => {
+    if (session.kind !== "managed" || !session.memory) return session;
+    try {
+      return { ...session, skills: { repo: session.memory.repo, state: stateOf(session.name) } };
+    } catch {
+      return session;
+    }
+  });
+}

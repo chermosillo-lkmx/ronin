@@ -13,6 +13,7 @@ import { createApp, runConfiguredClaude, startServer } from "./index.js";
 import { createSession } from "./tmux.js";
 import { cycleDirForSession } from "./stages.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
+import { createLearnedSkillStore } from "./learned-skills.js";
 import { createMemoryStore } from "./memory.js";
 import type { Distiller } from "./memory-distiller.js";
 
@@ -419,6 +420,8 @@ function fakeDistiller(overrides: Partial<Distiller> = {}): Distiller {
     request: () => "queued",
     scan: () => [],
     stateOf: () => ({ status: "running", repo: "acme-api", at: 1 }),
+    requestSkill: () => "queued",
+    skillStateOf: () => ({ status: "running", at: 1 }),
     idle: async () => {},
     ...overrides,
   };
@@ -1456,4 +1459,235 @@ test("POST /api/sessions/:name/panes/:paneId/focus valida y cambia la ventana ac
     await releaseAdoption("t-focus");
     rmSync(cycleDirForSession("t-focus"), { recursive: true, force: true });
   });
+});
+
+// ---- Skills aprendidas: API local (spec skills aprendidas §7) ----
+
+function learnedFixture() {
+  const base = mkdtempSync(join(tmpdir(), "ronin-api-skills-"));
+  const root = join(base, "skills", "learned");
+  let seq = 0;
+  const store = createLearnedSkillStore({
+    root,
+    metaFile: join(base, "skills", "learned.json"),
+    historyDir: join(base, "skills", "history"),
+    listRepos: () => ["acme-api"],
+    contextFor: (repo) => ({ repo }),
+    associate: () => {},
+    now: () => 1_790_000_000_000,
+    newId: () => `s_${++seq}`,
+  });
+  return { base, root, store, cleanup: () => rmSync(base, { recursive: true, force: true }) };
+}
+
+const SKILL_DRAFT = {
+  repo: "acme-api",
+  source: "cowork-mig",
+  name: "migracion-reversible",
+  description: "Agrega una migración reversible y la prueba ida y vuelta.",
+  body: "1. Crea la migración.\n2. Pruébala ida y vuelta.",
+};
+
+test("aprendizaje por repo: capability, origen, lectura, cambio, 400 con reasons y 404 de repo desconocido", async () => {
+  const token = ensureCapabilityToken();
+  const { store, cleanup } = learnedFixture();
+  try {
+    const app = createApp({ skills: { store, globalEnabled: true } });
+    const headers = { "x-ronin-capability": token };
+    assert.equal((await invokeRequest(app, "GET", "/api/repos/acme-api/skills/learning")).status, 401);
+    assert.equal((await invokeRequest(app, "GET", "/api/repos/acme-api/skills/learning", { headers: { ...headers, origin: "https://evil.example" } })).status, 403);
+    assert.deepEqual(await invokeRequest(app, "GET", "/api/repos/acme-api/skills/learning", { headers }), { status: 200, body: { repo: "acme-api", enabled: true, globalEnabled: true } });
+    assert.deepEqual(
+      await invokeRequest(app, "PUT", "/api/repos/acme-api/skills/learning", { headers, body: { enabled: false } }),
+      { status: 200, body: { repo: "acme-api", enabled: false, globalEnabled: true } },
+    );
+    const bad = await invokeRequest(app, "PUT", "/api/repos/acme-api/skills/learning", { headers, body: { enabled: "no" } });
+    assert.equal(bad.status, 400);
+    assert.equal((bad.body as any).code, "SKILL_INVALID");
+    assert.deepEqual((bad.body as any).reasons, ["enabled debe ser true o false"]);
+    const unknown = await invokeRequest(app, "GET", "/api/repos/acme-otro/skills/learning", { headers });
+    assert.equal(unknown.status, 404);
+    assert.equal((unknown.body as any).code, "REPO_UNKNOWN");
+    assert.equal(typeof (unknown.body as any).error, "string");
+  } finally {
+    cleanup();
+  }
+});
+
+test("propuestas de skills: la lista no trae el texto, el detalle sí (con diff en una actualización); 404 y 401", async () => {
+  const token = ensureCapabilityToken();
+  const { store, cleanup } = learnedFixture();
+  try {
+    const created = store.propose(SKILL_DRAFT);
+    const app = createApp({ skills: { store } });
+    const headers = { "x-ronin-capability": token };
+    assert.equal((await invokeRequest(app, "GET", "/api/skills/proposals")).status, 401);
+    const list = await invokeRequest(app, "GET", "/api/skills/proposals", { headers });
+    assert.deepEqual(list, {
+      status: 200,
+      body: { proposals: [{ id: "s_1", kind: "new", name: "migracion-reversible", repo: "acme-api", source: "cowork-mig", description: SKILL_DRAFT.description, warnings: [], createdAt: 1_790_000_000_000 }] },
+    });
+    assert.equal((await invokeRequest(app, "GET", "/api/skills/proposals?repo=acme-api", { headers })).status, 200);
+    assert.equal((await invokeRequest(app, "GET", "/api/skills/proposals?repo=acme-otro", { headers })).status, 404);
+    const detail = await invokeRequest(app, "GET", "/api/skills/proposals/s_1", { headers });
+    assert.equal((detail.body as any).content, created.content);
+    assert.equal((detail.body as any).contentHash, created.contentHash);
+    assert.equal("diff" in (detail.body as any), false);
+    assert.equal((await invokeRequest(app, "GET", "/api/skills/proposals/s_1")).status, 401);
+    const missing = await invokeRequest(app, "GET", "/api/skills/proposals/s_nope", { headers });
+    assert.equal(missing.status, 404);
+    assert.equal((missing.body as any).code, "SKILL_PROPOSAL_NOT_FOUND");
+
+    store.resolve(created.id, "approve", { contentHash: created.contentHash });
+    const update = store.propose({ ...SKILL_DRAFT, source: "cowork-2", body: `${SKILL_DRAFT.body}\n3. Prueba el rollback.` });
+    const updateDetail = await invokeRequest(app, "GET", `/api/skills/proposals/${update.id}`, { headers });
+    assert.equal((updateDetail.body as any).kind, "update");
+    assert.equal((updateDetail.body as any).base.hash, update.baseHash);
+    assert.match((updateDetail.body as any).diff, /^\+3\. Prueba el rollback\.$/m);
+  } finally {
+    cleanup();
+  }
+});
+
+test("PATCH de propuestas: aprobar exige el hash (400 sin él, 409 si no coincide), base cambiada 409, editar revalida, descartar y 404", async () => {
+  const token = ensureCapabilityToken();
+  const { root, store, cleanup } = learnedFixture();
+  try {
+    const app = createApp({ skills: { store } });
+    const headers = { "x-ronin-capability": token };
+    const patch = (id: string, body: unknown) => invokeRequest(app, "PATCH", `/api/skills/proposals/${id}`, { headers, body });
+    const created = store.propose(SKILL_DRAFT);
+    assert.equal((await invokeRequest(app, "PATCH", `/api/skills/proposals/${created.id}`, { body: { action: "approve", contentHash: created.contentHash } })).status, 401);
+    const noHash = await patch(created.id, { action: "approve" });
+    assert.equal(noHash.status, 400);
+    assert.equal((noHash.body as any).code, "SKILL_INVALID");
+    const wrong = await patch(created.id, { action: "approve", contentHash: "sha256:otro" });
+    assert.equal(wrong.status, 409);
+    assert.equal((wrong.body as any).code, "SKILL_STALE");
+    const approved = await patch(created.id, { action: "approve", contentHash: created.contentHash });
+    assert.equal(approved.status, 200);
+    assert.deepEqual((approved.body as any).skill, { name: "migracion-reversible", version: 1, hash: created.contentHash, kind: "new", repo: "acme-api" });
+    assert.equal((await patch(created.id, { action: "approve", contentHash: created.contentHash })).status, 409);
+
+    const update = store.propose({ ...SKILL_DRAFT, source: "cowork-2", body: `${SKILL_DRAFT.body}\n3. Rollback.` });
+    writeFileSync(join(root, "migracion-reversible", "SKILL.md"), "cambiado a mano\n");
+    const stale = await patch(update.id, { action: "approve", contentHash: update.contentHash });
+    assert.equal(stale.status, 409);
+    assert.equal((stale.body as any).code, "SKILL_STALE");
+
+    const other = store.propose({ ...SKILL_DRAFT, name: "otra-skill" });
+    const badEdit = await patch(other.id, { action: "edit", content: other.content.replace("Pruébala", "password: hunter22hunter") });
+    assert.equal(badEdit.status, 400);
+    assert.equal((badEdit.body as any).code, "SKILL_INVALID");
+    assert.match((badEdit.body as any).reasons.join("|"), /credencial asignada/);
+    const edited = await patch(other.id, { action: "edit", content: other.content.replace("Pruébala ida y vuelta.", "Pruébala con make test.") });
+    assert.equal(edited.status, 200);
+    assert.equal((edited.body as any).skill.version, 1);
+
+    const third = store.propose({ ...SKILL_DRAFT, name: "tercera" });
+    const discarded = await patch(third.id, { action: "discard" });
+    assert.equal(discarded.status, 200);
+    assert.equal((discarded.body as any).proposal.status, "discarded");
+    assert.equal((await patch("s_nope", { action: "discard" })).status, 404);
+    assert.equal((await patch(update.id, { action: "borrar" })).status, 400);
+  } finally {
+    cleanup();
+  }
+});
+
+test("POST /api/sessions/:name/skill: 202, 409 en curso, flujo incompleto o apagado, 404, 400 y 401", async () => {
+  const token = ensureCapabilityToken();
+  const outcomes: Record<string, "busy" | "incomplete" | "unknown" | "disabled"> = {
+    "cowork-ocupada": "busy", "cowork-a-medias": "incomplete", "cowork-nada": "unknown", "cowork-apagada": "disabled",
+  };
+  const requested: string[] = [];
+  const distiller = fakeDistiller({ requestSkill: (name) => { requested.push(name); return outcomes[name] ?? "queued"; } });
+  const app = createApp({ memory: { distiller } });
+  const headers = { "x-ronin-capability": token };
+  assert.equal((await invokeRequest(app, "POST", "/api/sessions/cowork-mig/skill")).status, 401);
+  assert.deepEqual(await invokeRequest(app, "POST", "/api/sessions/cowork-mig/skill", { headers }), { status: 202, body: { status: "running", at: 1 } });
+  const expected: Array<[string, number, string]> = [
+    ["cowork-ocupada", 409, "SKILL_RUNNING"],
+    ["cowork-a-medias", 409, "SKILL_FLOW_INCOMPLETE"],
+    ["cowork-apagada", 409, "SKILL_LEARNING_DISABLED"],
+    ["cowork-nada", 404, "SESSION_NOT_FOUND"],
+    ["mal%20nombre", 400, "INVALID_SESSION"],
+  ];
+  for (const [name, status, code] of expected) {
+    const response = await invokeRequest(app, "POST", `/api/sessions/${name}/skill`, { headers });
+    assert.equal(response.status, status, name);
+    assert.equal((response.body as any).code, code, name);
+    assert.equal(typeof (response.body as any).error, "string", name);
+  }
+  assert.deepEqual(requested, ["cowork-mig", "cowork-ocupada", "cowork-a-medias", "cowork-apagada", "cowork-nada"]);
+});
+
+test("GET /api/skills marca integridad, versión y usos de las learned; PUT de una learned valida y la reaprueba; POST la rechaza", async () => {
+  const token = ensureCapabilityToken();
+  const { base, root, store, cleanup } = learnedFixture();
+  const previousLearned = process.env.COWORK_LEARNED_SKILLS_ROOT;
+  const previousGlobal = process.env.COWORK_SKILLS_ROOT;
+  process.env.COWORK_LEARNED_SKILLS_ROOT = root;
+  process.env.COWORK_SKILLS_ROOT = join(base, "global");
+  try {
+    const created = store.propose(SKILL_DRAFT);
+    store.resolve(created.id, "approve", { contentHash: created.contentHash });
+    store.markUsed(["migracion-reversible"]);
+    const app = createApp({ skills: { store } });
+    const headers = { "x-ronin-capability": token };
+    const learnedSummary = async () => ((await invokeRequest(app, "GET", "/api/skills")).body as any).skills.find((skill: any) => skill.ref.root === "learned");
+    assert.deepEqual(await learnedSummary(), {
+      ref: { root: "learned", name: "migracion-reversible" }, name: "migracion-reversible", description: SKILL_DRAFT.description, valid: true,
+      integrity: "ok", version: 1, uses: 1,
+    });
+    writeFileSync(join(root, "migracion-reversible", "SKILL.md"), `${created.content}\nA mano.\n`);
+    assert.equal((await learnedSummary()).integrity, "modified");
+
+    const bad = await invokeRequest(app, "PUT", "/api/skills", { headers, body: { root: "learned", name: "migracion-reversible", content: "---\nname: migracion-reversible\ndescription: x\nallowed-tools: Bash\n---\n" } });
+    assert.equal(bad.status, 400);
+    assert.equal((bad.body as any).code, "SKILL_INVALID");
+    assert.match((bad.body as any).reasons.join("|"), /allowed-tools/);
+    const good = await invokeRequest(app, "PUT", "/api/skills", { headers, body: { root: "learned", name: "migracion-reversible", content: `${created.content}\nA mano.\n` } });
+    assert.equal(good.status, 200);
+    assert.equal((good.body as any).name, "migracion-reversible");
+    assert.deepEqual([(await learnedSummary()).integrity, (await learnedSummary()).version], ["ok", 2]);
+
+    const post = await invokeRequest(app, "POST", "/api/skills", { headers, body: { root: "learned", name: "nueva", content: "---\nname: nueva\ndescription: x\n---\n" } });
+    assert.equal(post.status, 400);
+    assert.equal((post.body as any).code, "SKILL_REF_INVALID");
+  } finally {
+    if (previousLearned === undefined) delete process.env.COWORK_LEARNED_SKILLS_ROOT;
+    else process.env.COWORK_LEARNED_SKILLS_ROOT = previousLearned;
+    if (previousGlobal === undefined) delete process.env.COWORK_SKILLS_ROOT;
+    else process.env.COWORK_SKILLS_ROOT = previousGlobal;
+    cleanup();
+  }
+});
+
+test("GET /api/sessions añade skills (repo y estado de la parte de skill) a las gestionadas con repo conocido", async () => {
+  const { store, cleanup } = memoryFixture();
+  try {
+    const base = { windows: 1, panes: [], createdAt: 0, attached: false, adopted: false };
+    const app = createApp({
+      readTmuxInventory: async () => ({
+        sessions: [
+          { ...base, name: "cowork-skill-a", kind: "managed" as const },
+          { ...base, name: "cowork-skill-sin-repo", kind: "managed" as const },
+          { ...base, name: "skill-ajena", kind: "foreign" as const },
+        ],
+        diagnostic: null,
+      }),
+      memory: {
+        store,
+        distiller: fakeDistiller({ stateOf: () => null, skillStateOf: (name) => (name === "cowork-skill-a" ? { status: "done", at: 7, proposalId: "s_1" } : null) }),
+        repoOf: (name) => (name === "cowork-skill-sin-repo" ? null : "acme-api"),
+      },
+    });
+    const sessions = ((await invokeRequest(app, "GET", "/api/sessions")).body as any).sessions;
+    assert.deepEqual(sessions[0].skills, { repo: "acme-api", state: { status: "done", at: 7, proposalId: "s_1" } });
+    assert.equal("skills" in sessions[1], false);
+    assert.equal("skills" in sessions[2], false);
+  } finally {
+    cleanup();
+  }
 });

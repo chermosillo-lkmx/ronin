@@ -223,6 +223,8 @@ export interface TmuxSessionInfo {
   unrecorded?: boolean;
   /** Sólo gestionadas con repo conocido: pendientes de ese repo y estado de la destilación. */
   memory?: SessionMemoryInfo;
+  /** Sólo gestionadas con repo conocido: estado de la parte de skill (skills aprendidas). */
+  skills?: SessionSkillInfo;
 }
 
 // ---- Preflight (F1). Espejo manual en web/src/types.ts ----
@@ -272,4 +274,9 @@ export interface SkillDistillState {
   reason?: string;
   /** Sólo en failed. */
   error?: string;
+}
+
+export interface SessionSkillInfo {
+  repo: string;
+  state: SkillDistillState | null;
 }

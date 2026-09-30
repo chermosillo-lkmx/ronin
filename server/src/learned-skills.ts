@@ -7,7 +7,7 @@ import { LEARNED_SKILLS } from "./config.js";
 import { DATA_DIR } from "./data-dir.js";
 import { addRepoSkillAssociation, getRepoVars, readRepoConfigFull, type SkillRef } from "./repo-config.js";
 import { listRepos, resolveCwd } from "./repos.js";
-import { learnedSkillsRoot, readSkill, skillFilePath } from "./skills.js";
+import { learnedSkillsRoot, readSkill, skillFilePath, type SkillSummary } from "./skills.js";
 
 /**
  * Skills que se aprenden (spec 2026-09-30-skills-aprendidas-design.md). Este módulo reúne las
@@ -1049,4 +1049,21 @@ export function skillIndexForLaunch(repo: string, deps: SkillIndexDeps = {}): La
     text: index.text,
     skills: index.included.map(({ root, name, sourceRepo, hash }) => ({ root, name, ...(sourceRepo ? { sourceRepo } : {}), hash })),
   };
+}
+
+// ---- Lista de skills de la UI (GET /api/skills). ----
+
+export interface DecoratedSkillSummary extends SkillSummary {
+  /** "modified" = el SKILL.md de una learned ya no coincide con el hash aprobado: no entra al índice. */
+  integrity: SkillIntegrity;
+  version?: number;
+  uses?: number;
+}
+
+export function decorateSkillSummaries(summaries: SkillSummary[], store: Pick<LearnedSkillStore, "meta" | "integrity">): DecoratedSkillSummary[] {
+  return summaries.map((summary) => {
+    if (summary.ref.root !== "learned") return { ...summary, integrity: "ok" as const };
+    const meta = store.meta(summary.ref.name);
+    return { ...summary, integrity: store.integrity(summary.ref.name), ...(meta ? { version: meta.version, uses: meta.uses } : {}) };
+  });
 }
