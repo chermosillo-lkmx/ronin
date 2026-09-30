@@ -14,6 +14,8 @@ import {
   LearnedSkillError,
   normalizeSkillName,
   skillHash,
+  skillIndexForLaunch,
+  skillIndexHeader,
   SKILL_INDEX_MAX_BYTES,
   unifiedDiff,
   validateLearnedSkill,
@@ -627,4 +629,83 @@ test("fix F6: editar conserva el aviso nombre-ajustado", () => {
   } finally {
     cleanup();
   }
+});
+
+function indexFixture(options: { learnedEnabled?: boolean; refs?: Array<{ root: "global" | "learned" | "repo-claude" | "repo-skills"; name: string; sourceRepo?: string }> } = {}) {
+  const docs: Record<string, { content: string; description: string }> = {
+    "learned:migracion-reversible": { content: "---\nname: migracion-reversible\ndescription: Migra y prueba.\n---\n", description: "Migra y prueba." },
+    "learned:modificada": { content: "---\nname: modificada\ndescription: Tocada a mano.\n---\n", description: "Tocada a mano." },
+    "learned:sin-aprobar": { content: "---\nname: sin-aprobar\ndescription: Copiada a mano.\n---\n", description: "Copiada a mano." },
+    "global:api-review": { content: "---\nname: api-review\ndescription: Revisa APIs.\n---\n", description: "Revisa APIs." },
+    "repo-claude:deploy": { content: "---\nname: deploy\ndescription: Despliega.\n---\n", description: "Despliega." },
+  };
+  const used: string[][] = [];
+  const store = {
+    meta: (name: string) => (name === "migracion-reversible" || name === "modificada"
+      ? { originRepo: "acme-api", version: 1, hash: "sha256:x", sources: [], uses: name === "migracion-reversible" ? 3 : 9, approvedAt: 5 }
+      : null),
+    integrity: (name: string) => (name === "modificada" ? "modified" as const : "ok" as const),
+    markUsed: (names: string[]) => { used.push(names); },
+  };
+  const refs = options.refs ?? [
+    { root: "global", name: "api-review" },
+    { root: "learned", name: "migracion-reversible" },
+    { root: "learned", name: "modificada" },
+    { root: "learned", name: "sin-aprobar" },
+    { root: "repo-claude", name: "deploy", sourceRepo: "acme-api" },
+    { root: "global", name: "borrada" },
+  ];
+  const deps = {
+    refsFor: () => refs,
+    readSkill: (ref: { root: string; name: string }) => {
+      const found = docs[`${ref.root}:${ref.name}`];
+      if (!found) throw new Error("la skill no existe");
+      return found;
+    },
+    filePath: (ref: { root: string; name: string }) => `/skills/${ref.root}/${ref.name}/SKILL.md`,
+    store,
+    learnedEnabled: options.learnedEnabled ?? true,
+  };
+  return { deps, docs, used };
+}
+
+test("skillIndexForLaunch: sólo asociadas válidas y, si son learned, aprobadas e íntegras; suma usos a las learned incluidas", () => {
+  const { deps, docs, used } = indexFixture();
+  const index = skillIndexForLaunch("acme-api", deps);
+  assert.equal(index.text, [
+    skillIndexHeader("acme-api"),
+    "- migracion-reversible: Migra y prueba. → /skills/learned/migracion-reversible/SKILL.md",
+    "- api-review: Revisa APIs. → /skills/global/api-review/SKILL.md",
+    "- deploy: Despliega. → /skills/repo-claude/deploy/SKILL.md",
+  ].join("\n"));
+  assert.deepEqual(index.skills, [
+    { root: "learned", name: "migracion-reversible", hash: skillHash(docs["learned:migracion-reversible"].content) },
+    { root: "global", name: "api-review", hash: skillHash(docs["global:api-review"].content) },
+    { root: "repo-claude", name: "deploy", sourceRepo: "acme-api", hash: skillHash(docs["repo-claude:deploy"].content) },
+  ]);
+  assert.deepEqual(used, [["migracion-reversible"]]);
+});
+
+test("skillIndexForLaunch: con COWORK_LEARNED_SKILLS=0 quedan fuera sólo las learned; sin asociadas no hay índice ni usos", () => {
+  const off = indexFixture({ learnedEnabled: false });
+  const index = skillIndexForLaunch("acme-api", off.deps);
+  assert.deepEqual(index.skills.map((skill) => skill.name), ["api-review", "deploy"]);
+  assert.deepEqual(off.used, []);
+  const none = indexFixture({ refs: [] });
+  assert.deepEqual(skillIndexForLaunch("acme-api", none.deps), { text: "", skills: [] });
+  assert.deepEqual(none.used, []);
+});
+
+test("skillIndexForLaunch nunca lanza: si falla leer la asociación o guardar los usos, la sesión recibe lo que se pudo", () => {
+  const errors: unknown[] = [];
+  const broken = indexFixture();
+  assert.deepEqual(skillIndexForLaunch("acme-api", { ...broken.deps, refsFor: () => { throw new Error("repo-config ilegible"); }, logError: (error) => errors.push(error) }), { text: "", skills: [] });
+  const noCounter = indexFixture();
+  const index = skillIndexForLaunch("acme-api", {
+    ...noCounter.deps,
+    store: { ...noCounter.deps.store, markUsed: () => { throw new Error("EACCES"); } },
+    logError: (error) => errors.push(error),
+  });
+  assert.equal(index.skills.length, 3);
+  assert.equal(errors.length, 2);
 });

@@ -3,10 +3,11 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { basename, dirname, join } from "node:path";
 import { writeJsonAtomic } from "./atomic.js";
 import { readCapabilityToken } from "./capability.js";
+import { LEARNED_SKILLS } from "./config.js";
 import { DATA_DIR } from "./data-dir.js";
-import { addRepoSkillAssociation, getRepoVars } from "./repo-config.js";
+import { addRepoSkillAssociation, getRepoVars, readRepoConfigFull, type SkillRef } from "./repo-config.js";
 import { listRepos, resolveCwd } from "./repos.js";
-import { learnedSkillsRoot } from "./skills.js";
+import { learnedSkillsRoot, readSkill, skillFilePath } from "./skills.js";
 
 /**
  * Skills que se aprenden (spec 2026-09-30-skills-aprendidas-design.md). Este módulo reúne las
@@ -961,4 +962,91 @@ let sharedLearnedStore: LearnedSkillStore | null = null;
 /** Store de producción sobre <dataDir>/skills. Crearlo no toca el disco. */
 export function defaultLearnedSkillStore(): LearnedSkillStore {
   return (sharedLearnedStore ??= createLearnedSkillStore());
+}
+
+// ---- Índice de lanzamiento (§6): lo antepone session-launch.ts después del bloque de memoria. ----
+
+export interface LaunchSkillRef {
+  root: string;
+  name: string;
+  sourceRepo?: string;
+  hash: string;
+}
+
+export interface LaunchSkillIndex {
+  text: string;
+  skills: LaunchSkillRef[];
+}
+
+export interface SkillIndexDeps {
+  /** Skills asociadas al repo (las casillas de "activación por repo"). */
+  refsFor?: (repo: string) => SkillRef[];
+  readSkill?: (ref: SkillRef) => { content: string; description: string };
+  filePath?: (ref: SkillRef) => string;
+  store?: Pick<LearnedSkillStore, "meta" | "integrity" | "markUsed">;
+  /** COWORK_LEARNED_SKILLS; inyectable para pruebas. */
+  learnedEnabled?: boolean;
+  logError?: (error: unknown) => void;
+}
+
+/**
+ * Índice de las skills asociadas al repo que son válidas y, si son `learned`, aprobadas e íntegras.
+ * Suma `uses` a las learned incluidas. Nunca lanza: el índice no puede tumbar un lanzamiento; si no
+ * se puede guardar el contador, el índice se entrega igual.
+ */
+export function skillIndexForLaunch(repo: string, deps: SkillIndexDeps = {}): LaunchSkillIndex {
+  const empty: LaunchSkillIndex = { text: "", skills: [] };
+  const refsFor = deps.refsFor ?? ((target: string) => readRepoConfigFull(target).skills);
+  const read = deps.readSkill ?? readSkill;
+  const pathOf = deps.filePath ?? skillFilePath;
+  const learnedOn = deps.learnedEnabled ?? LEARNED_SKILLS;
+  let index: SkillIndex;
+  let store: Pick<LearnedSkillStore, "meta" | "integrity" | "markUsed">;
+  try {
+    store = deps.store ?? defaultLearnedSkillStore();
+    const candidates: SkillIndexCandidate[] = [];
+    for (const ref of refsFor(repo)) {
+      if (ref.root === "learned" && !learnedOn) continue;
+      try {
+        const document = read(ref);
+        let uses = 0;
+        let approvedAt = 0;
+        if (ref.root === "learned") {
+          const meta = store.meta(ref.name);
+          if (!meta || store.integrity(ref.name) !== "ok") continue;
+          uses = meta.uses;
+          approvedAt = meta.approvedAt;
+        }
+        candidates.push({
+          root: ref.root,
+          name: ref.name,
+          ...(ref.sourceRepo ? { sourceRepo: ref.sourceRepo } : {}),
+          description: document.description,
+          path: pathOf(ref),
+          hash: skillHash(document.content),
+          uses,
+          approvedAt,
+        });
+      } catch {
+        /* una skill inválida o que ya no existe no entra al índice */
+      }
+    }
+    index = buildSkillIndex(repo, candidates);
+  } catch (error) {
+    deps.logError?.(error);
+    return empty;
+  }
+  if (!index.text) return empty;
+  const learned = index.included.filter((item) => item.root === "learned").map((item) => item.name);
+  if (learned.length) {
+    try {
+      store.markUsed(learned);
+    } catch (error) {
+      deps.logError?.(error);
+    }
+  }
+  return {
+    text: index.text,
+    skills: index.included.map(({ root, name, sourceRepo, hash }) => ({ root, name, ...(sourceRepo ? { sourceRepo } : {}), hash })),
+  };
 }
