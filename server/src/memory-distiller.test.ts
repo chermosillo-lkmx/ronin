@@ -9,6 +9,7 @@ import { createMemoryStore } from "./memory.js";
 import {
   createDistiller,
   createDistillStateStore,
+  createSessionInfoReader,
   DISTILL_TIMEOUT_MS,
   listCycleSessions,
   startMemoryDistiller,
@@ -829,4 +830,67 @@ test("F4: entradas de memoria inválidas con un skill válido: la memoria queda 
   } finally {
     f.cleanup();
   }
+});
+
+test("final F2: snapshot() de state.json lee el archivo una vez y responde desde memoria", () => {
+  const f = fixture();
+  try {
+    f.state.set("cowork-a", { status: "done", repo: "acme-api", at: 2, proposed: 1 });
+    f.state.setSkill("cowork-a", "acme-api", { status: "done", at: 3, proposalId: "s_1" });
+    const snapshot = f.state.snapshot!();
+    rmSync(f.stateFile);
+    assert.deepEqual(snapshot.get("cowork-a"), { status: "done", repo: "acme-api", at: 2, proposed: 1 });
+    assert.deepEqual(snapshot.skill("cowork-a"), { status: "done", at: 3, proposalId: "s_1" });
+    assert.equal(snapshot.get("cowork-otra"), null);
+    assert.equal(f.state.get("cowork-a"), null);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("final F2: createSessionInfoReader carga state.json una vez por petición y cuenta pendientes una vez por repo", () => {
+  const f = fixture();
+  try {
+    f.store.propose("acme-api", [{ text: "Pendiente", kind: "trampa" }], "cowork-a");
+    f.state.set("cowork-a", { status: "done", repo: "acme-api", at: 2, proposed: 1 });
+    f.state.setSkill("cowork-b", "acme-api", { status: "running", at: 3 });
+    const counts = { snapshot: 0, get: 0, skill: 0, pending: 0, knows: 0 };
+    const state = {
+      ...f.state,
+      get: (session: string) => { counts.get++; return f.state.get(session); },
+      skill: (session: string) => { counts.skill++; return f.state.skill(session); },
+      snapshot: () => { counts.snapshot++; return f.state.snapshot!(); },
+    };
+    const distiller = createDistiller(f.deps({ state }));
+    const store = {
+      knows: (repo: string) => { counts.knows++; return f.store.knows(repo); },
+      pending: (repo?: string) => { counts.pending++; return f.store.pending(repo); },
+    };
+    const names = ["cowork-a", "cowork-b", "cowork-c", "cowork-d", "cowork-e"];
+    const reader = createSessionInfoReader({ store, distiller, repoOf: () => "acme-api" });
+    const memory = names.map((name) => reader.memory(name));
+    const skills = names.map((name) => reader.skill(name));
+    assert.deepEqual(counts, { snapshot: 1, get: 0, skill: 0, pending: 1, knows: 1 });
+    assert.deepEqual(memory[0], { repo: "acme-api", pending: 1, distill: { status: "done", repo: "acme-api", at: 2, proposed: 1 } });
+    assert.deepEqual(memory[4], { repo: "acme-api", pending: 1, distill: null });
+    // un running persistido sin nadie ejecutándolo se sigue viendo como interrumpido
+    assert.equal(skills[1]?.status, "failed");
+    assert.equal(skills[0], null);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("final F2: createSessionInfoReader es fail-soft: sin snapshot o si falla, usa las lecturas por sesión", () => {
+  const distiller: Pick<Distiller, "stateOf" | "skillStateOf" | "snapshot"> = {
+    stateOf: () => ({ status: "done", repo: "acme-api", at: 1 }),
+    skillStateOf: () => ({ status: "done", at: 1 }),
+    snapshot: () => { throw new Error("state.json ilegible"); },
+  };
+  const store = { knows: () => true, pending: () => [] };
+  const reader = createSessionInfoReader({ store, distiller, repoOf: () => "acme-api" });
+  assert.deepEqual(reader.memory("cowork-a"), { repo: "acme-api", pending: 0, distill: { status: "done", repo: "acme-api", at: 1 } });
+  assert.deepEqual(reader.skill("cowork-a"), { status: "done", at: 1 });
+  const broken = createSessionInfoReader({ store: { knows: () => { throw new Error("x"); }, pending: () => [] }, distiller, repoOf: () => "acme-api" });
+  assert.equal(broken.memory("cowork-a"), null);
 });

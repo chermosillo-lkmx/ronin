@@ -1691,3 +1691,35 @@ test("GET /api/sessions añade skills (repo y estado de la parte de skill) a las
     cleanup();
   }
 });
+
+test("final F2: GET /api/sessions arma una vista por petición: state.json una vez y pendientes una vez por repo", async () => {
+  const { store, cleanup } = memoryFixture();
+  try {
+    store.propose("acme-api", [{ text: "Pendiente", kind: "trampa" }], "cowork-f2-a");
+    const counts = { snapshot: 0, stateOf: 0, skillStateOf: 0, pending: 0 };
+    const view = { stateOf: () => ({ status: "done" as const, repo: "acme-api", at: 5 }), skillStateOf: () => ({ status: "done" as const, at: 6 }) };
+    const distiller = fakeDistiller({
+      stateOf: () => { counts.stateOf++; return null; },
+      skillStateOf: () => { counts.skillStateOf++; return null; },
+      snapshot: () => { counts.snapshot++; return view; },
+    });
+    const counted = Object.create(store) as typeof store;
+    counted.pending = (repo?: string) => { counts.pending++; return store.pending(repo); };
+    const base = { windows: 1, panes: [], createdAt: 0, attached: false, adopted: false };
+    const names = ["cowork-f2-a", "cowork-f2-b", "cowork-f2-c", "cowork-f2-d"];
+    const app = createApp({
+      readTmuxInventory: async () => ({ sessions: names.map((name) => ({ ...base, name, kind: "managed" as const })), diagnostic: null }),
+      memory: { store: counted, distiller, repoOf: () => "acme-api" },
+    });
+    const sessions = ((await invokeRequest(app, "GET", "/api/sessions")).body as any).sessions;
+    assert.deepEqual(counts, { snapshot: 1, stateOf: 0, skillStateOf: 0, pending: 1 });
+    for (const session of sessions) {
+      assert.deepEqual(session.memory, { repo: "acme-api", pending: 1, distill: { status: "done", repo: "acme-api", at: 5 } });
+      assert.deepEqual(session.skills, { repo: "acme-api", state: { status: "done", at: 6 } });
+    }
+    await invokeRequest(app, "GET", "/api/sessions");
+    assert.equal(counts.snapshot, 2, "cada petición arma su propia vista");
+  } finally {
+    cleanup();
+  }
+});

@@ -58,6 +58,8 @@ export interface DistillStateStore {
   setSkill(session: string, repo: string, state: SkillDistillState): void;
   since(): number | undefined;
   setSince(at: number): void;
+  /** Lectura única de state.json para una petición (GET /api/sessions): las consultas salen de memoria. */
+  snapshot?(): Pick<DistillStateStore, "get" | "skill">;
 }
 
 function sanitizeState(raw: unknown): DistillState | null {
@@ -143,6 +145,13 @@ export function createDistillStateStore(file: string): DistillStateStore {
       journal.since = at;
       save(journal);
     },
+    snapshot: () => {
+      const journal = load();
+      return {
+        get: (session) => journal.sessions[session]?.memory ?? null,
+        skill: (session) => journal.sessions[session]?.skill ?? null,
+      };
+    },
   };
 }
 
@@ -188,6 +197,11 @@ export interface Distiller {
   /** Propuesta manual de skill: salta el triaje y el requisito de verifyCmd, pero exige el flujo completo. */
   requestSkill(session: string): SkillRequestOutcome;
   skillStateOf(session: string): SkillDistillState | null;
+  /**
+   * Vista de stateOf/skillStateOf para una sola petición: lee state.json una vez (perezosamente) y
+   * responde las demás consultas desde memoria. Opcional para que los dobles de prueba no la necesiten.
+   */
+  snapshot?(): Pick<Distiller, "stateOf" | "skillStateOf">;
   /** Resuelve cuando todas las colas se vaciaron (lo usan las pruebas). */
   idle(): Promise<void>;
 }
@@ -451,18 +465,20 @@ export function createDistiller(deps: DistillerDeps): Distiller {
     return queued;
   }
 
-  function stateOf(session: string): DistillState | null {
+  type StateReader = Pick<DistillStateStore, "get" | "skill">;
+
+  function stateFrom(reader: StateReader, session: string): DistillState | null {
     const flight = inFlight.get(session);
-    const persisted = deps.state.get(session);
+    const persisted = reader.get(session);
     if (flight?.job === "distill") return persisted?.status === "running" ? persisted : { status: "running", repo: flight.repo, at: flight.at };
     // Un running persistido sin nadie ejecutándolo es de un proceso que murió: se reporta, no se reescribe.
     if (persisted?.status === "running") return { status: "failed", repo: persisted.repo, at: persisted.at, error: INTERRUPTED };
     return persisted;
   }
 
-  function skillStateOf(session: string): SkillDistillState | null {
+  function skillStateFrom(reader: StateReader, session: string): SkillDistillState | null {
     const flight = inFlight.get(session);
-    const persisted = deps.state.skill(session);
+    const persisted = reader.skill(session);
     if (flight?.job === "skill") return persisted?.status === "running" ? persisted : { status: "running", at: flight.at };
     // En una destilación en curso la parte de skill se decide adentro: se muestra lo persistido.
     if (flight?.job === "distill") return persisted;
@@ -470,11 +486,28 @@ export function createDistiller(deps: DistillerDeps): Distiller {
     return persisted;
   }
 
+  function stateOf(session: string): DistillState | null {
+    return stateFrom(deps.state, session);
+  }
+
+  function skillStateOf(session: string): SkillDistillState | null {
+    return skillStateFrom(deps.state, session);
+  }
+
+  function snapshot(): Pick<Distiller, "stateOf" | "skillStateOf"> {
+    let reader: StateReader | null = null;
+    const read = (): StateReader => (reader ??= deps.state.snapshot?.() ?? deps.state);
+    return {
+      stateOf: (session) => stateFrom(read(), session),
+      skillStateOf: (session) => skillStateFrom(read(), session),
+    };
+  }
+
   async function idle(): Promise<void> {
     while (tails.size) await Promise.all([...tails.values()]);
   }
 
-  return { request, scan, stateOf, requestSkill, skillStateOf, idle };
+  return { request, scan, stateOf, requestSkill, skillStateOf, snapshot, idle };
 }
 
 /** Sesiones con cycle dir en `root` (por defecto /tmp, donde lo crea cycleDirForSession). */
@@ -550,6 +583,50 @@ export function sessionMemoryInfo(session: string, deps: SessionMemoryDeps): Ses
   } catch {
     return null;
   }
+}
+
+export interface SessionInfoReaderDeps {
+  store: Pick<MemoryStore, "knows" | "pending">;
+  distiller: Pick<Distiller, "stateOf" | "skillStateOf" | "snapshot">;
+  repoOf(session: string): string | null;
+}
+
+/**
+ * Lecturas de una sola petición de GET /api/sessions: state.json se carga una vez (compartido por la
+ * parte de memoria y la de skill) y `knows`/`pending` se calculan una vez por repo. Fail-soft: si la
+ * vista no se puede armar se usan las lecturas por sesión, y nada de esto lanza hacia la ruta.
+ */
+export function createSessionInfoReader(deps: SessionInfoReaderDeps): {
+  memory(session: string): SessionMemoryInfo | null;
+  skill(session: string): SkillDistillState | null;
+} {
+  let view: Pick<Distiller, "stateOf" | "skillStateOf"> | null = null;
+  const states = (): Pick<Distiller, "stateOf" | "skillStateOf"> => {
+    if (view) return view;
+    try {
+      view = deps.distiller.snapshot?.() ?? deps.distiller;
+    } catch {
+      view = deps.distiller;
+    }
+    return view;
+  };
+  const known = new Map<string, boolean>();
+  const pending = new Map<string, ReturnType<MemoryStore["pending"]>>();
+  const store: Pick<MemoryStore, "knows" | "pending"> = {
+    knows: (repo) => {
+      if (!known.has(repo)) known.set(repo, deps.store.knows(repo));
+      return known.get(repo)!;
+    },
+    pending: (repo) => {
+      const key = repo ?? "";
+      if (!pending.has(key)) pending.set(key, deps.store.pending(repo));
+      return pending.get(key)!;
+    },
+  };
+  return {
+    memory: (session) => sessionMemoryInfo(session, { store, stateOf: (name) => states().stateOf(name), repoOf: deps.repoOf }),
+    skill: (session) => states().skillStateOf(session),
+  };
 }
 
 /** Cuelga `memory` sólo de las sesiones gestionadas con datos; las ajenas no se tocan. */

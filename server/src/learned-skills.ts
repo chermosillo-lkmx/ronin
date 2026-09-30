@@ -30,7 +30,16 @@ export const MAX_PENDING_SKILL_PROPOSALS = 10;
 /** Un valor de `vars` más corto que esto no se busca: "abc" aparecería en cualquier texto. */
 export const SKILL_VAR_MIN_CHARS = 6;
 
-export const SKILL_WARNINGS = ["menciona-repo", "url-externa", "comentario-html", "comando-destructivo", "nombre-ajustado"] as const;
+export const SKILL_WARNINGS = [
+  "menciona-repo",
+  "url-externa",
+  "comentario-html",
+  "comando-destructivo",
+  "ruta-sensible",
+  "exfiltracion",
+  "salta-controles",
+  "nombre-ajustado",
+] as const;
 export type SkillWarning = (typeof SKILL_WARNINGS)[number];
 
 export type LearnedSkillErrorCode = "SKILL_INVALID" | "SKILL_PROPOSAL_NOT_FOUND" | "SKILL_STALE" | "SKILL_FLOW_INCOMPLETE" | "REPO_UNKNOWN";
@@ -162,6 +171,42 @@ const DESTRUCTIVE = [
   /\b(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/,
 ];
 
+// Avisos de endurecimiento (nunca rechazan): el texto viene del modelo y un revisor humano decide.
+const SENSITIVE_PATHS = [
+  /\$HOME\//,
+  /\$\{HOME\}/,
+  /%USERPROFILE%/i,
+  /(?<![\w.-])\.ssh\b/,
+  /(?<![\w.-])\.aws\b/,
+  // `.env` y `.env.local`, pero no `process.env` ni las plantillas `.env.example|sample|template`.
+  /(?<![\w.-])\.env(?!\.(?:example|sample|template)\b)\b/,
+  /\bid_rsa\b/,
+  /~\/\.claude\b/,
+  /\bCLAUDE\.md\b/i,
+  /(?<![\w-])\.github\/workflows\b/,
+];
+
+const EXFILTRATION = [
+  /\bprintenv\b/,
+  // `env` suelto como comando (vuelca el entorno): solo en la línea, en una tubería, en backticks o en $( ).
+  /(?:^|[;&|`]|\$\()[ \t]*env[ \t]*(?=$|[|>;&)`])/m,
+  /\b(?:curl|wget)\b[^\n]*\s(?:-d|-F|-T|--data[\w-]*|--form|--upload-file|--post-(?:data|file))(?=[\s=@"']|$)/m,
+  /\b(?:nc|ncat|netcat)[ \t]/,
+  /\bscp[ \t]/,
+  /\bbase64[ \t]+(?:-d|-D|--decode)\b[^\n|]*\|/,
+  /\beval[ \t]/,
+  /\bsudo[ \t]/,
+];
+
+const BYPASS_CONTROLS = [
+  /(?<![\w-])--no-verify\b/,
+  /(?<![\w-])--dangerously-skip-permissions\b/,
+  /\bbypassPermissions\b/i,
+  /\bignora(?:r)?\s+(?:todas\s+)?(?:las\s+)?instrucciones\b/i,
+  /\bignore\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above)\s+instructions\b/i,
+  /\bno\s+le\s+digas\s+al\s+usuario\b/i,
+];
+
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 function escapeRegExp(text: string): string {
@@ -241,6 +286,9 @@ export function validateLearnedSkill(raw: unknown, context: SkillValidationConte
   if (hasExternalUrl(content)) warnings.push("url-externa");
   if (content.includes("<!--")) warnings.push("comentario-html");
   if (DESTRUCTIVE.some((pattern) => pattern.test(content))) warnings.push("comando-destructivo");
+  if (SENSITIVE_PATHS.some((pattern) => pattern.test(content))) warnings.push("ruta-sensible");
+  if (EXFILTRATION.some((pattern) => pattern.test(content))) warnings.push("exfiltracion");
+  if (BYPASS_CONTROLS.some((pattern) => pattern.test(content))) warnings.push("salta-controles");
   return { content, name, description, warnings: orderWarnings(warnings) };
 }
 

@@ -30,7 +30,7 @@ import { isReplyText, readHistory, recordEvent, recordReply } from "./history.js
 import { generateReport, listReports, readReport, BadRequest } from "./reports.js";
 import { startReportSchedule } from "./report-schedule.js";
 import { cycleDirForSession, readCycleRepo } from "./stages.js";
-import { attachSessionMemory, attachSessionSkills, getDefaultDistiller, sessionMemoryInfo, sessionRepo, startMemoryDistiller, type Distiller } from "./memory-distiller.js";
+import { attachSessionMemory, attachSessionSkills, createSessionInfoReader, getDefaultDistiller, sessionRepo, startMemoryDistiller, type Distiller } from "./memory-distiller.js";
 import { decorateSkillSummaries, defaultLearnedSkillStore, LearnedSkillError, type LearnedSkillStore } from "./learned-skills.js";
 import { defaultMemoryStore, MemoryError, memoryView, type MemoryStore, type RepoMemory } from "./memory.js";
 import { realVerifyDriverDeps } from "./verify-driver-deps.js";
@@ -732,14 +732,12 @@ app.get("/api/sessions", async (_req, res) => {
   const sessions = inventory.sessions.map((session) => presentations[session.name]
     ? { ...session, presentation: presentations[session.name] }
     : session);
-  const withMemory = attachSessionMemory(sessions, (name) => sessionMemoryInfo(name, {
-    store: memoryApi.store(),
-    stateOf: (session) => memoryApi.distiller().stateOf(session),
-    repoOf: memoryApi.repoOf,
-  }));
+  // Una vista por petición: state.json se lee una vez para memoria y skill, y los pendientes, una vez por repo.
+  const info = createSessionInfoReader({ store: memoryApi.store(), distiller: memoryApi.distiller(), repoOf: memoryApi.repoOf });
+  const withMemory = attachSessionMemory(sessions, info.memory);
   res.json({
     ...inventory,
-    sessions: attachSessionSkills(withMemory, (name) => memoryApi.distiller().skillStateOf(name)),
+    sessions: attachSessionSkills(withMemory, info.skill),
   });
 });
 
