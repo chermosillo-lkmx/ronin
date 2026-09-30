@@ -1,5 +1,12 @@
-import { createHash } from "node:crypto";
-import { basename } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { writeJsonAtomic } from "./atomic.js";
+import { readCapabilityToken } from "./capability.js";
+import { DATA_DIR } from "./data-dir.js";
+import { addRepoSkillAssociation, getRepoVars } from "./repo-config.js";
+import { listRepos, resolveCwd } from "./repos.js";
+import { learnedSkillsRoot } from "./skills.js";
 
 /**
  * Skills que se aprenden (spec 2026-09-30-skills-aprendidas-design.md). Este módulo reúne las
@@ -383,4 +390,517 @@ export function formatSkillCatalog(entries: SkillCatalogEntry[], maxBytes = SKIL
     lines.push(line);
   }
   return compose([], entries.length - lines.length);
+}
+
+// ---- Store: <dataDir>/skills/learned.json (metadatos, propuestas e interruptor por repo). ----
+
+export interface LearnedSkillMeta {
+  originRepo: string;
+  version: number;
+  hash: string;
+  /** Sesiones que la propusieron o la refinaron. */
+  sources: string[];
+  /** Veces que entró en el índice de una sesión nueva. */
+  uses: number;
+  approvedAt: number;
+}
+
+export type SkillProposalKind = "new" | "update";
+export type SkillProposalStatus = "pending" | "approved" | "discarded";
+
+export interface SkillProposal {
+  id: string;
+  kind: SkillProposalKind;
+  name: string;
+  repo: string;
+  source: string;
+  description: string;
+  /** SKILL.md completo; se vacía al resolver la propuesta (quedan name y description). */
+  content: string;
+  contentHash: string;
+  /** Sólo en update: hash del SKILL.md sobre el que se redactó. */
+  baseHash?: string;
+  changes: string;
+  warnings: SkillWarning[];
+  status: SkillProposalStatus;
+  createdAt: number;
+  resolvedAt?: number;
+}
+
+export interface LearnedSkillsFile {
+  repos: Record<string, { enabled: boolean }>;
+  skills: Record<string, LearnedSkillMeta>;
+  proposals: SkillProposal[];
+}
+
+export interface SkillProposalSummary {
+  id: string;
+  kind: SkillProposalKind;
+  name: string;
+  repo: string;
+  source: string;
+  description: string;
+  warnings: SkillWarning[];
+  createdAt: number;
+}
+
+export interface SkillProposalDetail extends SkillProposalSummary {
+  changes: string;
+  content: string;
+  contentHash: string;
+  base?: { content: string; hash: string };
+  diff?: string;
+}
+
+export interface ProposeSkillInput {
+  repo: string;
+  source: string;
+  name: string;
+  description: string;
+  body: string;
+  changes?: string;
+  /** Skill `learned` que el triaje pidió refinar. */
+  updates?: string | null;
+  /** Nombres de skills global y de repo: una colisión recibe el sufijo -2, -3… */
+  reservedNames?: string[];
+}
+
+export interface ApprovedSkill {
+  name: string;
+  version: number;
+  hash: string;
+  kind: SkillProposalKind;
+  repo: string;
+}
+
+export type SkillIntegrity = "ok" | "modified";
+export type SkillProposalAction = "approve" | "discard" | "edit";
+
+export interface SkillResolution {
+  proposal: SkillProposalSummary & { status: SkillProposalStatus };
+  skill?: ApprovedSkill;
+}
+
+export interface SkillLearningView {
+  repo: string;
+  enabled: boolean;
+}
+
+export interface LearnedSkillStoreOptions {
+  /** Carpeta de las skills aprendidas; por defecto learnedSkillsRoot(). */
+  root?: string;
+  /** Por defecto `learned.json` junto a la raíz. */
+  metaFile?: string;
+  /** Por defecto `history/` junto a la raíz. */
+  historyDir?: string;
+  listRepos?: () => string[];
+  contextFor?: (repo: string) => Omit<SkillValidationContext, "name">;
+  /** Asociar una skill nueva a su repo de origen; por defecto en repo-config.json. */
+  associate?: (repo: string, name: string) => void;
+  now?: () => number;
+  newId?: () => string;
+}
+
+function finiteOrZero(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function sanitizeMeta(raw: unknown): LearnedSkillMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.hash !== "string") return null;
+  return {
+    originRepo: typeof value.originRepo === "string" ? value.originRepo : "",
+    version: Math.max(1, Math.floor(finiteOrZero(value.version))),
+    hash: value.hash,
+    sources: stringList(value.sources),
+    uses: finiteOrZero(value.uses),
+    approvedAt: finiteOrZero(value.approvedAt),
+  };
+}
+
+function sanitizeProposal(raw: unknown): SkillProposal | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.id !== "string" || typeof value.name !== "string" || typeof value.repo !== "string") return null;
+  if (value.kind !== "new" && value.kind !== "update") return null;
+  if (value.status !== "pending" && value.status !== "approved" && value.status !== "discarded") return null;
+  return {
+    id: value.id,
+    kind: value.kind,
+    name: value.name,
+    repo: value.repo,
+    source: typeof value.source === "string" ? value.source : "",
+    description: typeof value.description === "string" ? value.description : "",
+    content: typeof value.content === "string" ? value.content : "",
+    contentHash: typeof value.contentHash === "string" ? value.contentHash : "",
+    ...(typeof value.baseHash === "string" ? { baseHash: value.baseHash } : {}),
+    changes: typeof value.changes === "string" ? value.changes : "",
+    warnings: orderWarnings(stringList(value.warnings) as SkillWarning[]),
+    status: value.status,
+    createdAt: finiteOrZero(value.createdAt),
+    ...(typeof value.resolvedAt === "number" ? { resolvedAt: value.resolvedAt } : {}),
+  };
+}
+
+function sanitizeLearnedFile(raw: unknown): LearnedSkillsFile {
+  const value = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const repos: LearnedSkillsFile["repos"] = {};
+  if (value.repos && typeof value.repos === "object") {
+    for (const [repo, entry] of Object.entries(value.repos as Record<string, unknown>)) {
+      if (entry && typeof entry === "object") repos[repo] = { enabled: (entry as { enabled?: unknown }).enabled !== false };
+    }
+  }
+  const skills: LearnedSkillsFile["skills"] = {};
+  if (value.skills && typeof value.skills === "object") {
+    for (const [name, entry] of Object.entries(value.skills as Record<string, unknown>)) {
+      const meta = sanitizeMeta(entry);
+      if (meta && isStrictSkillName(name)) skills[name] = meta;
+    }
+  }
+  const proposals = Array.isArray(value.proposals) ? value.proposals.flatMap((item) => { const clean = sanitizeProposal(item); return clean ? [clean] : []; }) : [];
+  return { repos, skills, proposals };
+}
+
+function summaryOf(proposal: SkillProposal): SkillProposalSummary {
+  const { id, kind, name, repo, source, description, warnings, createdAt } = proposal;
+  return { id, kind, name, repo, source, description, warnings, createdAt };
+}
+
+function describe(content: string | null): string {
+  return content?.match(/^description:[ \t]*(.*?)[ \t]*$/m)?.[1] ?? "";
+}
+
+/** Contexto real de validación: ruta del repo, dataDir, `vars` del repo y token de capacidad. */
+function defaultSkillContext(repo: string): Omit<SkillValidationContext, "name"> {
+  const base = { dataDir: DATA_DIR, token: readCapabilityToken() };
+  if (!repo) return base;
+  const resolved = resolveCwd(repo);
+  return { ...base, repo, ...(resolved.real ? { repoPath: resolved.cwd } : {}), vars: getRepoVars(repo) };
+}
+
+/**
+ * Store de las skills aprendidas. Cada operación relee `learned.json` (es pequeño) y lo escribe con
+ * `writeJsonAtomic`. Leer nunca escribe. Nada entra al catálogo sin una aprobación explícita con el
+ * hash del texto mostrado.
+ */
+export function createLearnedSkillStore(options: LearnedSkillStoreOptions = {}) {
+  const root = options.root ?? learnedSkillsRoot();
+  const metaFile = options.metaFile ?? join(dirname(root), "learned.json");
+  const historyDir = options.historyDir ?? join(dirname(root), "history");
+  const repos = options.listRepos ?? listRepos;
+  const contextFor = options.contextFor ?? defaultSkillContext;
+  const associate = options.associate ?? ((repo: string, name: string) => { addRepoSkillAssociation(repo, { root: "learned", name }); });
+  const now = options.now ?? (() => Date.now());
+  const newId = options.newId ?? (() => `s_${randomBytes(3).toString("hex")}`);
+
+  function load(): LearnedSkillsFile {
+    try {
+      return sanitizeLearnedFile(JSON.parse(readFileSync(metaFile, "utf8")));
+    } catch {
+      return { repos: {}, skills: {}, proposals: [] };
+    }
+  }
+
+  function save(file: LearnedSkillsFile): void {
+    mkdirSync(dirname(metaFile), { recursive: true });
+    writeJsonAtomic(metaFile, file);
+  }
+
+  const knows = (repo: string): boolean => repos().includes(repo);
+
+  function requireRepo(repo: string): void {
+    if (!knows(repo)) throw new LearnedSkillError("REPO_UNKNOWN", `el repositorio ${repo} no está configurado`, 404);
+  }
+
+  const fileOf = (name: string): string => join(root, name, "SKILL.md");
+
+  function current(name: string): string | null {
+    if (!isStrictSkillName(name)) return null;
+    try {
+      return readFileSync(fileOf(name), "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  function findProposal(file: LearnedSkillsFile, id: string): SkillProposal {
+    const found = file.proposals.find((proposal) => proposal.id === id);
+    if (!found) throw new LearnedSkillError("SKILL_PROPOSAL_NOT_FOUND", `no existe la propuesta ${id}`, 404);
+    return found;
+  }
+
+  function findPending(file: LearnedSkillsFile, id: string): SkillProposal {
+    const proposal = findProposal(file, id);
+    if (proposal.status !== "pending") throw new LearnedSkillError("SKILL_STALE", "la propuesta ya no está pendiente", 409);
+    return proposal;
+  }
+
+  function pruneHistory(directory: string): void {
+    const versions = readdirSync(directory)
+      .flatMap((file) => { const match = /^v(\d+)\.md$/.exec(file); return match ? [Number(match[1])] : []; })
+      .sort((a, b) => b - a);
+    for (const version of versions.slice(SKILL_HISTORY_KEEP)) rmSync(join(directory, `v${version}.md`), { force: true });
+  }
+
+  /** La versión anterior va a history/ (se conservan 5) y el SKILL.md se reemplaza con rename atómico. */
+  function writeVersion(name: string, content: string, previousVersion: number): void {
+    const previous = current(name);
+    if (previous !== null && previousVersion > 0) {
+      const directory = join(historyDir, name);
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, `v${previousVersion}.md`), previous);
+      pruneHistory(directory);
+    }
+    mkdirSync(join(root, name), { recursive: true });
+    const target = fileOf(name);
+    const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(temporary, content);
+    renameSync(temporary, target);
+  }
+
+  function approveWith(file: LearnedSkillsFile, proposal: SkillProposal, content: string): SkillResolution {
+    const previous = file.skills[proposal.name];
+    if (proposal.kind === "new" && (previous || existsSync(join(root, proposal.name)))) {
+      throw new LearnedSkillError("SKILL_STALE", `ya existe una skill aprendida llamada ${proposal.name}`, 409);
+    }
+    if (proposal.kind === "update") {
+      const base = current(proposal.name);
+      if (!previous || base === null || skillHash(base) !== proposal.baseHash) {
+        throw new LearnedSkillError("SKILL_STALE", `${proposal.name} cambió desde que se propuso la actualización`, 409);
+      }
+    }
+    const at = now();
+    const hash = skillHash(content);
+    writeVersion(proposal.name, content, previous?.version ?? 0);
+    const meta: LearnedSkillMeta = {
+      originRepo: previous?.originRepo ?? proposal.repo,
+      version: (previous?.version ?? 0) + 1,
+      hash,
+      sources: [...new Set([...(previous?.sources ?? []), proposal.source])],
+      uses: previous?.uses ?? 0,
+      approvedAt: at,
+    };
+    file.skills[proposal.name] = meta;
+    proposal.status = "approved";
+    proposal.resolvedAt = at;
+    proposal.content = "";
+    proposal.contentHash = hash;
+    save(file);
+    if (proposal.kind === "new") {
+      try {
+        associate(proposal.repo, proposal.name);
+      } catch {
+        /* la asociación es una comodidad: la skill ya quedó aprobada y se puede asociar a mano */
+      }
+    }
+    return {
+      proposal: { ...summaryOf(proposal), status: proposal.status },
+      skill: { name: proposal.name, version: meta.version, hash, kind: proposal.kind, repo: proposal.repo },
+    };
+  }
+
+  return {
+    root,
+    knows,
+
+    learning(repo: string): SkillLearningView {
+      requireRepo(repo);
+      return { repo, enabled: load().repos[repo]?.enabled !== false };
+    },
+
+    learningEnabled(repo: string): boolean {
+      try {
+        return knows(repo) && load().repos[repo]?.enabled !== false;
+      } catch {
+        return false;
+      }
+    },
+
+    setLearning(repo: string, enabled: unknown): SkillLearningView {
+      requireRepo(repo);
+      if (typeof enabled !== "boolean") throw skillInvalid(["enabled debe ser true o false"]);
+      const file = load();
+      file.repos[repo] = { enabled };
+      save(file);
+      return { repo, enabled };
+    },
+
+    names(): string[] {
+      return Object.keys(load().skills).sort();
+    },
+
+    meta(name: string): LearnedSkillMeta | null {
+      return load().skills[name] ?? null;
+    },
+
+    current,
+
+    integrity(name: string): SkillIntegrity {
+      const meta = load().skills[name];
+      const text = current(name);
+      return meta && text !== null && skillHash(text) === meta.hash ? "ok" : "modified";
+    },
+
+    /** Para el triaje: las learned y las descartadas (marcadas "no repetir"). */
+    catalog(): SkillCatalogEntry[] {
+      const file = load();
+      const entries: SkillCatalogEntry[] = Object.keys(file.skills).sort().map((name) => ({ name, description: describe(current(name)), discarded: false }));
+      const seen = new Set(entries.map((entry) => entry.name));
+      for (const proposal of file.proposals) {
+        if (proposal.status !== "discarded" || seen.has(proposal.name)) continue;
+        seen.add(proposal.name);
+        entries.push({ name: proposal.name, description: proposal.description, discarded: true });
+      }
+      return entries;
+    },
+
+    pending(repo?: string): SkillProposalSummary[] {
+      if (repo !== undefined) requireRepo(repo);
+      return load().proposals.filter((proposal) => proposal.status === "pending" && (repo === undefined || proposal.repo === repo)).map(summaryOf);
+    },
+
+    pendingCount(): number {
+      return load().proposals.filter((proposal) => proposal.status === "pending").length;
+    },
+
+    hasPendingUpdate(name: string): boolean {
+      return load().proposals.some((proposal) => proposal.status === "pending" && proposal.kind === "update" && proposal.name === name);
+    },
+
+    /** Texto completo, hash y, en una actualización, la versión actual y el diff. Sólo pendientes. */
+    detail(id: string): SkillProposalDetail {
+      const proposal = findProposal(load(), id);
+      if (proposal.status !== "pending") throw new LearnedSkillError("SKILL_PROPOSAL_NOT_FOUND", `la propuesta ${id} ya no está pendiente`, 404);
+      const base = proposal.kind === "update" ? current(proposal.name) ?? "" : null;
+      return {
+        ...summaryOf(proposal),
+        changes: proposal.changes,
+        content: proposal.content,
+        contentHash: proposal.contentHash,
+        ...(base !== null ? { base: { content: base, hash: skillHash(base) }, diff: unifiedDiff(base, proposal.content) } : {}),
+      };
+    },
+
+    /**
+     * Borrador de la redacción → propuesta `pending`. Si el nombre (o `updates`) es una learned, es una
+     * actualización con `baseHash`; si choca con una global o de repo, recibe sufijo y el aviso
+     * `nombre-ajustado`. Lanza si no pasa las reglas de §4.
+     */
+    propose(input: ProposeSkillInput): SkillProposal {
+      requireRepo(input.repo);
+      const file = load();
+      if (file.proposals.filter((proposal) => proposal.status === "pending").length >= MAX_PENDING_SKILL_PROPOSALS) {
+        throw new LearnedSkillError("SKILL_STALE", `ya hay ${MAX_PENDING_SKILL_PROPOSALS} propuestas pendientes`, 409);
+      }
+      const learned = new Set(Object.keys(file.skills));
+      let name = normalizeSkillName(input.updates && learned.has(input.updates) ? input.updates : input.name);
+      if (!name) throw skillInvalid(["el nombre propuesto no produce un slug válido"]);
+      const warnings: SkillWarning[] = name === input.name ? [] : ["nombre-ajustado"];
+      const kind: SkillProposalKind = learned.has(name) ? "update" : "new";
+      if (kind === "new" && (input.reservedNames ?? []).includes(name)) {
+        const taken = new Set([...(input.reservedNames ?? []), ...learned]);
+        const base = name;
+        for (let suffix = 2; taken.has(name); suffix++) {
+          const tail = `-${suffix}`;
+          name = `${base.slice(0, SKILL_NAME_MAX_CHARS - tail.length).replace(/-+$/, "")}${tail}`;
+        }
+        if (!warnings.includes("nombre-ajustado")) warnings.push("nombre-ajustado");
+      }
+      if (kind === "update" && file.proposals.some((proposal) => proposal.status === "pending" && proposal.kind === "update" && proposal.name === name)) {
+        throw new LearnedSkillError("SKILL_STALE", `ya hay una actualización pendiente para ${name}`, 409);
+      }
+      const validated = validateLearnedSkill(buildSkillDocument({ name, description: input.description, body: input.body }), { ...contextFor(input.repo), name });
+      const base = kind === "update" ? current(name) : null;
+      const proposal: SkillProposal = {
+        id: newId(),
+        kind,
+        name,
+        repo: input.repo,
+        source: input.source,
+        description: validated.description,
+        content: validated.content,
+        contentHash: skillHash(validated.content),
+        ...(kind === "update" ? { baseHash: base === null ? "" : skillHash(base) } : {}),
+        changes: singleLine(input.changes ?? "").slice(0, SKILL_CHANGES_MAX_CHARS),
+        warnings: orderWarnings([...warnings, ...validated.warnings]),
+        status: "pending",
+        createdAt: now(),
+      };
+      file.proposals.push(proposal);
+      save(file);
+      return proposal;
+    },
+
+    resolve(id: string, action: unknown, payload: { contentHash?: unknown; content?: unknown } = {}): SkillResolution {
+      if (action !== "approve" && action !== "discard" && action !== "edit") throw skillInvalid(["action debe ser approve, discard o edit"]);
+      const file = load();
+      const proposal = findPending(file, id);
+      if (action === "discard") {
+        proposal.status = "discarded";
+        proposal.resolvedAt = now();
+        proposal.content = "";
+        save(file);
+        return { proposal: { ...summaryOf(proposal), status: proposal.status } };
+      }
+      if (action === "approve") {
+        if (typeof payload.contentHash !== "string" || !payload.contentHash) throw skillInvalid(["contentHash es obligatorio para aprobar"]);
+        if (payload.contentHash !== proposal.contentHash) {
+          throw new LearnedSkillError("SKILL_STALE", "el texto que aprobaste no coincide con la propuesta guardada", 409);
+        }
+        return approveWith(file, proposal, proposal.content);
+      }
+      const validated = validateLearnedSkill(payload.content, { ...contextFor(proposal.repo), name: proposal.name });
+      proposal.description = validated.description;
+      proposal.warnings = validated.warnings;
+      return approveWith(file, proposal, validated.content);
+    },
+
+    /** Edición desde el editor de Ronin (PUT /api/skills): mismas reglas, versión nueva y hash al día. */
+    saveEdited(name: string, content: unknown): ApprovedSkill {
+      if (current(name) === null) throw skillInvalid([`no existe la skill aprendida ${name}`]);
+      const file = load();
+      const previous = file.skills[name];
+      const repo = previous?.originRepo ?? "";
+      const validated = validateLearnedSkill(content, { ...contextFor(repo), name });
+      const hash = skillHash(validated.content);
+      writeVersion(name, validated.content, previous?.version ?? 0);
+      const meta: LearnedSkillMeta = {
+        originRepo: repo,
+        version: (previous?.version ?? 0) + 1,
+        hash,
+        sources: previous?.sources ?? [],
+        uses: previous?.uses ?? 0,
+        approvedAt: now(),
+      };
+      file.skills[name] = meta;
+      save(file);
+      return { name, version: meta.version, hash, kind: previous ? "update" : "new", repo };
+    },
+
+    markUsed(names: string[]): void {
+      const file = load();
+      let changed = false;
+      for (const name of names) {
+        const meta = file.skills[name];
+        if (!meta) continue;
+        meta.uses += 1;
+        changed = true;
+      }
+      if (changed) save(file);
+    },
+  };
+}
+
+export type LearnedSkillStore = ReturnType<typeof createLearnedSkillStore>;
+
+let sharedLearnedStore: LearnedSkillStore | null = null;
+
+/** Store de producción sobre <dataDir>/skills. Crearlo no toca el disco. */
+export function defaultLearnedSkillStore(): LearnedSkillStore {
+  return (sharedLearnedStore ??= createLearnedSkillStore());
 }

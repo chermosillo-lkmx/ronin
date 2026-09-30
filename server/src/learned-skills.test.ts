@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   buildSkillDocument,
   buildSkillIndex,
   cleanSkillText,
+  createLearnedSkillStore,
   formatSkillCatalog,
   isStrictSkillName,
   LEARNED_SKILL_MAX_BYTES,
@@ -13,6 +17,8 @@ import {
   SKILL_INDEX_MAX_BYTES,
   unifiedDiff,
   validateLearnedSkill,
+  type LearnedSkillStore,
+  type ProposeSkillInput,
   type SkillIndexCandidate,
   type SkillValidationContext,
 } from "./learned-skills.js";
@@ -262,4 +268,250 @@ test("formatSkillCatalog lista aprendidas y descartadas dentro de 4 KB", () => {
   const big = formatSkillCatalog(Array.from({ length: 60 }, (_, index) => ({ name: `skill-${index}`, description: "d".repeat(100), discarded: false })));
   assert.ok(Buffer.byteLength(big, "utf8") <= 4096);
   assert.match(big, /\(\+\d+ omitidas\)$/);
+});
+
+function storeFixture() {
+  const base = mkdtempSync(join(tmpdir(), "ronin-learned-"));
+  const root = join(base, "skills", "learned");
+  const metaFile = join(base, "skills", "learned.json");
+  const historyDir = join(base, "skills", "history");
+  let clock = 1_790_000_000_000;
+  let seq = 0;
+  const associated: Array<[string, string]> = [];
+  const store = createLearnedSkillStore({
+    root,
+    metaFile,
+    historyDir,
+    listRepos: () => ["acme-api", "acme-web"],
+    contextFor: (repo) => ({ repo, repoPath: `/srv/code/${repo}`, dataDir: "/srv/ronin-data", vars: { TOKEN: "tok-123456" }, token: "cap-9f8e7d6c5b4a" }),
+    associate: (repo, name) => { associated.push([repo, name]); },
+    now: () => ++clock,
+    newId: () => `s_${++seq}`,
+  });
+  return { base, root, metaFile, historyDir, store, associated, cleanup: () => rmSync(base, { recursive: true, force: true }) };
+}
+
+const DRAFT: ProposeSkillInput = {
+  repo: "acme-api",
+  source: "cowork-mig",
+  name: "migracion-reversible",
+  description: "Agrega una migración reversible y la prueba ida y vuelta.",
+  body: "1. Crea la migración.\n2. Pruébala ida y vuelta.",
+  changes: "",
+};
+
+function isSkillError(code: string, status: number, message?: RegExp) {
+  return (error: unknown) => error instanceof LearnedSkillError && error.code === code && error.status === status && (!message || message.test(error.message));
+}
+
+function approveNew(store: LearnedSkillStore, input: ProposeSkillInput = DRAFT) {
+  const proposal = store.propose(input);
+  store.resolve(proposal.id, "approve", { contentHash: proposal.contentHash });
+  return proposal;
+}
+
+test("store: leer no escribe; propose deja pending en learned.json (atómico, sin temporales) y nada en el catálogo", () => {
+  const { base, root, metaFile, store, cleanup } = storeFixture();
+  try {
+    assert.deepEqual(store.pending(), []);
+    assert.equal(store.pendingCount(), 0);
+    assert.equal(existsSync(metaFile), false);
+    const proposal = store.propose(DRAFT);
+    assert.equal(proposal.id, "s_1");
+    assert.equal(proposal.kind, "new");
+    assert.equal(proposal.status, "pending");
+    assert.deepEqual(proposal.warnings, []);
+    assert.equal(proposal.contentHash, skillHash(proposal.content));
+    assert.equal(proposal.content, "---\nname: migracion-reversible\ndescription: Agrega una migración reversible y la prueba ida y vuelta.\n---\n\n1. Crea la migración.\n2. Pruébala ida y vuelta.\n");
+    assert.deepEqual(readdirSync(join(base, "skills")), ["learned.json"]);
+    assert.equal(JSON.parse(readFileSync(metaFile, "utf8")).proposals[0].status, "pending");
+    assert.equal(existsSync(join(root, "migracion-reversible")), false);
+    assert.deepEqual(store.pending("acme-api").map((item) => [item.id, item.name, item.source]), [["s_1", "migracion-reversible", "cowork-mig"]]);
+    assert.deepEqual(store.pending("acme-web"), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("store: aprobar exige el hash del texto mostrado; con el correcto escribe SKILL.md, versión 1 y asocia al repo de origen", () => {
+  const { root, metaFile, store, associated, cleanup } = storeFixture();
+  try {
+    const proposal = store.propose(DRAFT);
+    assert.throws(() => store.resolve(proposal.id, "approve", {}), isSkillError("SKILL_INVALID", 400, /contentHash es obligatorio/));
+    assert.throws(() => store.resolve(proposal.id, "approve", { contentHash: "sha256:otro" }), isSkillError("SKILL_STALE", 409));
+    const result = store.resolve(proposal.id, "approve", { contentHash: proposal.contentHash });
+    assert.deepEqual(result.skill, { name: "migracion-reversible", version: 1, hash: proposal.contentHash, kind: "new", repo: "acme-api" });
+    assert.equal(result.proposal.status, "approved");
+    assert.equal(readFileSync(join(root, "migracion-reversible", "SKILL.md"), "utf8"), proposal.content);
+    const meta = store.meta("migracion-reversible");
+    assert.deepEqual(meta, { originRepo: "acme-api", version: 1, hash: proposal.contentHash, sources: ["cowork-mig"], uses: 0, approvedAt: meta?.approvedAt });
+    assert.deepEqual(associated, [["acme-api", "migracion-reversible"]]);
+    assert.equal(store.integrity("migracion-reversible"), "ok");
+    assert.deepEqual(store.names(), ["migracion-reversible"]);
+    assert.deepEqual(store.pending(), []);
+    const saved = JSON.parse(readFileSync(metaFile, "utf8"));
+    assert.equal(saved.proposals[0].status, "approved");
+    assert.equal(saved.proposals[0].content, "");
+    assert.throws(() => store.resolve(proposal.id, "approve", { contentHash: proposal.contentHash }), isSkillError("SKILL_STALE", 409));
+    assert.throws(() => store.detail(proposal.id), isSkillError("SKILL_PROPOSAL_NOT_FOUND", 404));
+  } finally {
+    cleanup();
+  }
+});
+
+test("store: descartar conserva name y description; id desconocido 404; acción inválida 400; editar revalida y aprueba", () => {
+  const { root, metaFile, store, cleanup } = storeFixture();
+  try {
+    const first = store.propose(DRAFT);
+    assert.equal(store.resolve(first.id, "discard").proposal.status, "discarded");
+    const saved = JSON.parse(readFileSync(metaFile, "utf8")).proposals[0];
+    assert.deepEqual([saved.name, saved.description, saved.content], ["migracion-reversible", DRAFT.description, ""]);
+    assert.throws(() => store.resolve(first.id, "discard"), isSkillError("SKILL_STALE", 409));
+    assert.throws(() => store.resolve("s_nope", "approve", { contentHash: "x" }), isSkillError("SKILL_PROPOSAL_NOT_FOUND", 404));
+
+    const second = store.propose({ ...DRAFT, name: "otra-skill", source: "cowork-otra" });
+    assert.throws(() => store.resolve(second.id, "borrar"), isSkillError("SKILL_INVALID", 400));
+    assert.throws(
+      () => store.resolve(second.id, "edit", { content: second.content.replace("Pruébala", "password: hunter22hunter") }),
+      isSkillError("SKILL_INVALID", 400, /credencial asignada/),
+    );
+    assert.throws(() => store.resolve(second.id, "edit", {}), isSkillError("SKILL_INVALID", 400, /debe ser texto/));
+    assert.equal(store.pendingCount(), 1);
+    const edited = store.resolve(second.id, "edit", { content: second.content.replace("Pruébala ida y vuelta.", "Pruébala ida y vuelta con `make test`.") });
+    assert.equal(edited.skill?.version, 1);
+    assert.match(readFileSync(join(root, "otra-skill", "SKILL.md"), "utf8"), /con `make test`/);
+    assert.equal(store.meta("otra-skill")?.hash, edited.skill?.hash);
+    assert.deepEqual(store.catalog(), [
+      { name: "otra-skill", description: DRAFT.description, discarded: false },
+      { name: "migracion-reversible", description: DRAFT.description, discarded: true },
+    ]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("store: el mismo nombre que una learned es una actualización con base, diff y un historial de 5 versiones", () => {
+  const { historyDir, store, associated, cleanup } = storeFixture();
+  try {
+    approveNew(store);
+    for (let version = 2; version <= 7; version++) {
+      const update = store.propose({ ...DRAFT, source: `cowork-${version}`, body: `${DRAFT.body}\n${version + 1}. Paso nuevo ${version}.`, changes: `Agrega el paso ${version}` });
+      assert.equal(update.kind, "update");
+      if (version === 2) {
+        const detail = store.detail(update.id);
+        assert.equal(detail.base?.hash, update.baseHash);
+        assert.match(detail.diff ?? "", /^\+3\. Paso nuevo 2\.$/m);
+        assert.equal(detail.changes, "Agrega el paso 2");
+      }
+      assert.equal(store.resolve(update.id, "approve", { contentHash: update.contentHash }).skill?.version, version);
+    }
+    assert.deepEqual(readdirSync(join(historyDir, "migracion-reversible")).sort(), ["v2.md", "v3.md", "v4.md", "v5.md", "v6.md"]);
+    assert.equal(store.meta("migracion-reversible")?.sources.length, 7);
+    assert.equal(associated.length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("store: si la base cambió en disco, aprobar la actualización da SKILL_STALE y la skill queda modified; no hay dos actualizaciones pendientes", () => {
+  const { root, store, cleanup } = storeFixture();
+  try {
+    approveNew(store);
+    const update = store.propose({ ...DRAFT, source: "cowork-2", body: `${DRAFT.body}\n3. Más.` });
+    assert.equal(store.hasPendingUpdate("migracion-reversible"), true);
+    assert.throws(() => store.propose({ ...DRAFT, source: "cowork-3", body: `${DRAFT.body}\n3. Otra.` }), isSkillError("SKILL_STALE", 409, /actualización pendiente/));
+    const file = join(root, "migracion-reversible", "SKILL.md");
+    writeFileSync(file, `${readFileSync(file, "utf8")}\nextra\n`);
+    assert.equal(store.integrity("migracion-reversible"), "modified");
+    assert.throws(() => store.resolve(update.id, "approve", { contentHash: update.contentHash }), isSkillError("SKILL_STALE", 409, /cambió/));
+    assert.equal(store.pendingCount(), 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("store: colisión con global o de repo lleva sufijo y aviso; updates apunta a la learned; nombres imposibles o repos desconocidos se rechazan", () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    const suffixed = store.propose({ ...DRAFT, name: "api-review", reservedNames: ["api-review", "api-review-2"] });
+    assert.equal(suffixed.name, "api-review-3");
+    assert.equal(suffixed.kind, "new");
+    assert.deepEqual(suffixed.warnings, ["nombre-ajustado"]);
+    assert.match(suffixed.content, /^---\nname: api-review-3\n/);
+
+    const normalized = approveNew(store, { ...DRAFT, name: "Migración Reversible", source: "cowork-b" });
+    assert.equal(normalized.name, "migracion-reversible");
+    assert.deepEqual(normalized.warnings, ["nombre-ajustado"]);
+
+    const refined = store.propose({ ...DRAFT, name: "otro-nombre", updates: "migracion-reversible", source: "cowork-c", body: `${DRAFT.body}\n3. Con rollback.` });
+    assert.equal(refined.kind, "update");
+    assert.equal(refined.name, "migracion-reversible");
+
+    assert.throws(() => store.propose({ ...DRAFT, name: "¡¡!!" }), isSkillError("SKILL_INVALID", 400, /slug válido/));
+    assert.throws(() => store.propose({ ...DRAFT, repo: "acme-otro" }), isSkillError("REPO_UNKNOWN", 404));
+    assert.throws(() => store.propose({ ...DRAFT, name: "con-secreto", body: "exporta tok-123456" }), isSkillError("SKILL_INVALID", 400, /TOKEN/));
+  } finally {
+    cleanup();
+  }
+});
+
+test("store: no admite más de 10 propuestas pendientes", () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    for (let index = 0; index < 10; index++) store.propose({ ...DRAFT, name: `skill-${index}` });
+    assert.throws(() => store.propose({ ...DRAFT, name: "skill-10" }), isSkillError("SKILL_STALE", 409, /10 propuestas pendientes/));
+  } finally {
+    cleanup();
+  }
+});
+
+test("store: interruptor de aprendizaje encendido por defecto, validado y sólo para repos configurados", () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    assert.deepEqual(store.learning("acme-api"), { repo: "acme-api", enabled: true });
+    assert.deepEqual(store.setLearning("acme-api", false), { repo: "acme-api", enabled: false });
+    assert.equal(store.learningEnabled("acme-api"), false);
+    assert.equal(store.learningEnabled("acme-web"), true);
+    assert.throws(() => store.setLearning("acme-api", "no"), isSkillError("SKILL_INVALID", 400));
+    assert.throws(() => store.learning("acme-otro"), isSkillError("REPO_UNKNOWN", 404));
+    assert.equal(store.learningEnabled("acme-otro"), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("store: saveEdited valida con las mismas reglas, versiona y vuelve a dejar íntegra una skill modificada fuera de Ronin", () => {
+  const { root, historyDir, store, cleanup } = storeFixture();
+  try {
+    const proposal = approveNew(store);
+    const file = join(root, "migracion-reversible", "SKILL.md");
+    writeFileSync(file, `${proposal.content}\nEditada a mano.\n`);
+    assert.equal(store.integrity("migracion-reversible"), "modified");
+    assert.throws(
+      () => store.saveEdited("migracion-reversible", "---\nname: migracion-reversible\ndescription: x\nallowed-tools: Bash\n---\n"),
+      isSkillError("SKILL_INVALID", 400, /allowed-tools/),
+    );
+    const saved = store.saveEdited("migracion-reversible", readFileSync(file, "utf8"));
+    assert.equal(saved.version, 2);
+    assert.equal(store.integrity("migracion-reversible"), "ok");
+    assert.match(readFileSync(join(historyDir, "migracion-reversible", "v1.md"), "utf8"), /Editada a mano/);
+    assert.throws(() => store.saveEdited("no-existe", "---\nname: no-existe\ndescription: x\n---\n"), isSkillError("SKILL_INVALID", 400, /no existe/));
+  } finally {
+    cleanup();
+  }
+});
+
+test("store: markUsed sólo suma a learned conocidas y un learned.json corrupto se lee vacío", () => {
+  const { metaFile, store, cleanup } = storeFixture();
+  try {
+    approveNew(store);
+    store.markUsed(["migracion-reversible", "no-existe"]);
+    assert.equal(store.meta("migracion-reversible")?.uses, 1);
+    writeFileSync(metaFile, "{roto");
+    assert.deepEqual(store.pending(), []);
+    assert.equal(store.meta("migracion-reversible"), null);
+    assert.equal(store.integrity("migracion-reversible"), "modified");
+  } finally {
+    cleanup();
+  }
 });
