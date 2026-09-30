@@ -496,3 +496,30 @@ test("27. fail_under TOML acepta comentario inline", (t) => {
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /cobertura 90\.00 % ≥ piso 80\.00 %/);
 });
+
+test("28. Node: stories y .d.ts dentro de src (fuera de la cobertura) no cuentan como src sin reporte → PASS", (t) => {
+  const fx = nodeFixture(t);
+  fx.write("src/app.stories.tsx", "export default { title: 'App' };\n");
+  fx.write("src/types.d.ts", "export type X = number;\n");
+  const r = fx.run();
+  assert.equal(r.code, 0, r.out);
+  assert.doesNotMatch(r.out, /no aparece en el reporte de cobertura/);
+});
+
+test("29. Python: src cambiado bajo un omit que YA existía en main → aviso, no FAIL", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  fx.write(".coveragerc", "[run]\nomit =\n    src/legacy/*\n[report]\nfail_under = 80\n");
+  fx.write("src/legacy/old.py", "def g():\n    return 1\n");
+  fx.git("add", "-A");
+  fx.git("commit", "-q", "-m", "legacy omit");
+  fx.git("push", "-q", "origin", "HEAD:main");
+  fx.git("fetch", "-q", "origin");
+  fx.write("src/legacy/old.py", "def g():\n    return 2\n");
+  fx.write(TEST_FILE, "def test_app_db():\n    assert 3 == 3\n");
+  fx.write("src/app.py", "def f():\n    return 3\n");
+  const r = fx.run(withoutExtra);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /⚠.*omit.*src\/legacy\/old\.py/);
+  assert.doesNotMatch(r.out, /no aparece en el reporte de cobertura/);
+});
