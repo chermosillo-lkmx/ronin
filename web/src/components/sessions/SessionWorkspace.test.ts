@@ -174,3 +174,11 @@ test("SessionInspector: sin datos de memoria no pinta el panel de destilación",
   const html = renderToString(createElement(SessionInspector, { session: sessionFixture(), diagnostic: null }));
   assert.doesNotMatch(html, /Destilar aprendizajes/);
 });
+
+test("SessionInspector: con skills muestra el estado de la parte de skill y el botón Proponer skill", () => {
+  const sesion = { ...sessionFixture(), skills: { repo: "acme-api", state: { status: "skipped" as const, at: 1, reason: "sin gate determinista aprobado" } } };
+  const html = renderToString(createElement(SessionInspector, { session: sesion, diagnostic: null }));
+  assert.match(html, /Omitida: sin gate determinista aprobado/);
+  assert.match(html, /Proponer skill/);
+  assert.doesNotMatch(renderToString(createElement(SessionInspector, { session: sessionFixture(), diagnostic: null })), /Proponer skill/);
+});

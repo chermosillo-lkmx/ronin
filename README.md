@@ -22,6 +22,9 @@
   clientes externos pueden crear sesiones, seguirlas y responderles (`crear_sesion`, `estado_sesiones`, `responder_sesion`).
 - **Memoria por repo**: al terminar un flujo, Ronin propone aprendizajes y, cuando los apruebas, cada
   sesión nueva del repo los recibe al arrancar.
+- **Skills aprendidas**: cuando un flujo termina con sus gates deterministas en verde, Ronin puede
+  proponer un `SKILL.md` reutilizable; lo lees completo, lo apruebas con su hash y cada sesión nueva del
+  repo recibe un índice de sus skills asociadas.
 - Aplicación de escritorio (Electron) empaquetable para macOS, Windows y Linux.
 
 ### Nueva sesión con petición
@@ -216,6 +219,30 @@ PRs ni se comparte por git.
   en un pane y enviando con Enter) queda en `history.jsonl` como evento `reply`, recortado a 2000
   caracteres, para alimentar la destilación. Se asume que no es secreto porque es texto dirigido al
   agente: no pegues credenciales en una sesión.
+
+### Skills aprendidas
+
+- **Cuándo se propone.** Sólo si el flujo terminó, al menos un `verifyCmd` quedó `passed`, ningún
+  gate quedó `failed` y la destilación de memoria (que ahora trae el campo `skill`) juzgó el
+  procedimiento reutilizable. Entonces una segunda llamada con la plantilla editable `skill` redacta
+  el `SKILL.md`. Cada sesión propone una sola vez; desde el inspector puedes proponer o reintentar a
+  mano (salta el triaje y el `verifyCmd`, pero exige el flujo completo).
+- **Reglas.** Ronin arma el frontmatter (sólo `name` y `description`), limita a 8 KB y 200 líneas,
+  quita caracteres invisibles y rechaza rutas absolutas, secretos, valores de `vars` del repo y el
+  token de capability. Los avisos (`menciona-repo`, `url-externa`, `comentario-html`,
+  `comando-destructivo`, `ruta-sensible`, `exfiltracion`, `salta-controles`, `nombre-ajustado`) no
+  bloquean, pero se resaltan.
+- **Aprobación.** En Skills → Propuestas lees el texto crudo (y el diff, si es una actualización);
+  Aprobar (y Editar y aprobar) se habilita al llegar al final y envía el hash de lo que viste. Las skills aprobadas viven en
+  `<dataDir>/skills/learned/` con versión, usos e historial de 5 versiones; si alguien las modifica
+  fuera de Ronin aparecen con ⚠ Revisar y no entran al índice hasta reaprobarlas.
+- **Índice al lanzar (cambio de comportamiento).** Cada sesión nueva recibe, después de la memoria,
+  un índice de 1 KB como máximo (8 skills) con nombre, descripción y ruta de **todas** las skills
+  asociadas al repo, también las `global` y de repo: antes las casillas de asociación no tenían
+  efecto. Queda en `launch.json` como `skills`. Se apaga el aprendizaje por repo con "🧩 Aprender
+  skills" o para el equipo con `COWORK_LEARNED_SKILLS=0`.
+- **MCP.** `skills_pendientes(repo?)` y `resolver_skill(id, accion, hash?, contenido?)`, sólo en el
+  scope completo. El token compartido sigue siendo un riesgo residual, igual que en la memoria.
 
 ### Ejecutor y modelo por etapa
 
