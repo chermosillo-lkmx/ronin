@@ -120,6 +120,7 @@ PY
 coverage_rule() { # $1 base, $2 coverage.xml, $3 runner; usa GATE_CHANGED/GATE_SRC_CHANGED
   GATE_BASE="$1" GATE_COVERAGE="$2" GATE_RUNNER="$3" python3 <<'PY'
 import configparser
+import fnmatch
 import os
 import re
 import subprocess
@@ -347,6 +348,34 @@ def new_config_exclusions(path):
             found.append((number, stripped))
     return found
 
+NOT_MEASURED = re.compile(r"\.(test|spec|stories)\.[cm]?[jt]sx?$|(^|/)__tests__/|\.d\.ts$")
+
+def omit_patterns(text):
+    # Patrones de [run] omit de .coveragerc; sólo cuentan los del merge-base (un omit nuevo es trinquete aparte).
+    match = re.search(r"(?m)^\s*\[run\]\s*$", text or "")
+    if not match:
+        return []
+    patterns, in_omit = [], False
+    for line in text[match.end():].splitlines():
+        if re.match(r"\s*\[", line):
+            break
+        head = re.match(r"\s*omit\s*=\s*(.*)$", line)
+        if head:
+            in_omit = True
+            patterns += [p.strip() for p in head.group(1).split(",") if p.strip()]
+            continue
+        if in_omit and line[:1].isspace() and line.strip() and not line.strip().startswith(("#", ";")):
+            patterns.append(line.strip())
+        elif line.strip() and not line[:1].isspace():
+            in_omit = False
+    return patterns
+
+base_omit = []
+if runner == "python":
+    shown = subprocess.run(["git", "show", f"{base}:.coveragerc"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if shown.returncode == 0:
+        base_omit = omit_patterns(shown.stdout)
+
 if not coverage_path.is_file():
     emit("BAD", f"la suite no produjo {coverage_path.as_posix()} (XML de cobertura)")
 else:
@@ -378,10 +407,16 @@ else:
         uncovered = []
         missing_files = []
         executable_new = 0
+        omitted = []
         for path in src_changed:
             file_path = repo / path
+            if NOT_MEASURED.search(path):
+                continue  # pruebas/stories/tipos: la cobertura no los mide
             if file_path.is_file() and file_path.suffix in {".py", ".ts", ".tsx", ".js", ".jsx"} and path not in reported_files:
-                missing_files.append(path)
+                if any(fnmatch.fnmatch(path, pattern) for pattern in base_omit):
+                    omitted.append(path)
+                else:
+                    missing_files.append(path)
                 continue
             for number in sorted(added_lines(path)):
                 if number not in report_lines.get(path, {}):
@@ -389,6 +424,8 @@ else:
                 executable_new += 1
                 if report_lines[path][number] == 0:
                     uncovered.append(f"{path}:{number}")
+        if omitted:
+            emit("WARN", "src cambiado bajo un omit que ya existía en el merge-base (no se mide; es deuda): " + " ".join(omitted))
         if missing_files:
             emit("BAD", "archivo(s) de src cambiado(s) no aparece en el reporte de cobertura: " + " ".join(missing_files))
         if uncovered:
@@ -444,7 +481,7 @@ for repo in "${candidates[@]}"; do
       [ -z "$f" ] && continue
       stem="$(basename "$f")"; stem="${stem%.*}"
       if ! printf '%s\n' "$test_changed" | xargs -I{} grep -l -- "$stem" {} 2>/dev/null | grep -q .; then
-        say "   ⚠ $f: ningún test tocado menciona «$stem» (revisa que el cambio tenga prueba propia)"
+        say "   ⚠ $f: ningún test tocado menciona «${stem}» (revisa que el cambio tenga prueba propia)"
       fi
     done <<< "$src_changed"
   else
@@ -503,6 +540,7 @@ for repo in "${candidates[@]}"; do
       case "$result" in
         OK) ok "$name: $message";;
         BAD) bad "$name: $message";;
+        WARN) say "   ⚠ $name: $message";;
       esac
     done <<< "$coverage_output"
   fi
