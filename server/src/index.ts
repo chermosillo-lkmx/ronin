@@ -5,7 +5,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { MEMORY, PORT, REPORT_SCHEDULE, VERIFY_GATE } from "./config.js";
+import { LEARNED_SKILLS, MEMORY, PORT, REPORT_SCHEDULE, VERIFY_GATE } from "./config.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
 import { AdoptCommitError, AdoptValidationError, type AdoptErrorCode } from "./adopt.js";
 import {
@@ -1149,7 +1149,8 @@ async function startDefaultBackground(): Promise<Cleanup> {
       const verifyDriver = startVerifyDriver(realVerifyDriverDeps);
       cleanups.push(() => verifyDriver.stop());
     }
-    if (MEMORY) {
+    // El barrido sirve a la memoria y al triaje de skills: corre si cualquiera de los dos está activo.
+    if (MEMORY || LEARNED_SKILLS) {
       const memoryDistiller = startMemoryDistiller(getDefaultDistiller());
       cleanups.push(() => memoryDistiller.stop());
     }

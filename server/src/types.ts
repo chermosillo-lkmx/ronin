@@ -259,3 +259,17 @@ export interface SessionMemoryInfo {
   pending: number;
   distill: DistillState | null;
 }
+
+// ---- Skills aprendidas (spec 2026-09-30). Espejo manual en web/src/types.ts ----
+
+/** Parte de skill de una sesión: subcampo `skill` de su entrada en <dataDir>/memory/state.json. */
+export interface SkillDistillState {
+  status: DistillStatus;
+  at: number;
+  /** Sólo en done: la propuesta que quedó pendiente. */
+  proposalId?: string;
+  /** Sólo en skipped. */
+  reason?: string;
+  /** Sólo en failed. */
+  error?: string;
+}
