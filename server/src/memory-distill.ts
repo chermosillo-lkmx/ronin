@@ -115,6 +115,10 @@ export interface DistillPromptInput {
   replies: string[];
   /** Memoria actual; sólo se usan las activas y las descartadas. */
   known: MemoryEntry[];
+  /** Catálogo de skills aprendidas ya formateado (formatSkillCatalog); por defecto "(vacío)". */
+  skillCatalog?: string;
+  /** Skills del índice de launch.json ya formateadas (formatOfferedSkills); por defecto "(ninguna)". */
+  offeredSkills?: string;
 }
 
 export function buildDistillPrompt(input: DistillPromptInput, template = getPromptTemplate("memory")): string {
@@ -134,6 +138,8 @@ export function buildDistillPrompt(input: DistillPromptInput, template = getProm
     evidence: input.evidence,
     replies: replies.length ? replies.join("\n") : "(ninguna)",
     known: known.length ? known.join("\n") : "(vacía)",
+    skillCatalog: input.skillCatalog ?? "(vacío)",
+    offeredSkills: input.offeredSkills ?? "(ninguna)",
   });
 }
 
@@ -142,7 +148,7 @@ export interface DistillCandidate {
   kind: MemoryKind;
 }
 
-function extractJsonObject(stdout: string): unknown {
+export function extractJsonObject(stdout: string): unknown {
   const start = stdout.indexOf("{");
   const end = stdout.lastIndexOf("}");
   if (start < 0 || end < start) throw new Error("la salida no contiene JSON");
