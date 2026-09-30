@@ -110,9 +110,10 @@ export interface ValidatedSkill {
 }
 
 // Límite antes de una ruta absoluta: inicio de texto o un carácter que normalmente introduce una
-// ruta (espacio, comillas, backtick, paréntesis/corchete de apertura, `=` o `:`). Así "src/home/x"
-// o "https://cdn.example.com/Users/a.png" (la subcadena sigue a una letra del host) no se marcan.
-const PATH_START_CHARS = '\\s"\'`\\(\\[=:>';
+// ruta (espacio, comillas, backtick, paréntesis/corchete de apertura, `=`, `:`, `>` o `/`). Así
+// "src/home/x" o "https://cdn.example.com/Users/a.png" (la subcadena sigue a una letra del host) no
+// se marcan, pero "file:///Users/x" y "///Users/x" sí (la barra que precede es otra barra, `/`).
+const PATH_START_CHARS = '\\s"\'`\\(\\[=:>/';
 const PATH_START = `(?:^|[${PATH_START_CHARS}])`;
 
 // Límite después de una ruta absoluta buscada literalmente (repoPath/dataDir): el siguiente
@@ -133,6 +134,7 @@ const ABSOLUTE_PATHS: Array<[RegExp, string]> = [
   [absolutePathPattern("/Users/"), "/Users/"],
   [absolutePathPattern("/home/"), "/home/"],
   [absolutePathPattern("/tmp/cowork-cycle-"), "/tmp/cowork-cycle-"],
+  [absolutePathPattern("~/"), "~/"],
   [/\b[A-Za-z]:\\/, "C:\\"],
 ];
 

@@ -168,6 +168,27 @@ test("fix F3: una IPv6 local entre corchetes no cuenta como URL externa", () => 
   assert.deepEqual(validateLearnedSkill(doc("visita http://[2001:db8::1]/panel"), CONTEXT).warnings, ["url-externa"]);
 });
 
+test("fix F4: file:// y rutas con múltiples barras iniciales se rechazan como rutas absolutas", () => {
+  const cases: Array<[string, RegExp]> = [
+    ["descarga file:///Users/x", /\/Users\//],
+    ["descarga file:///home/x", /\/home\//],
+    ["mira ///Users/x", /\/Users\//],
+  ];
+  for (const [body, reason] of cases) assert.match(reasonsOf(() => validateLearnedSkill(doc(body), CONTEXT)).join("|"), reason, body);
+  for (const safe of ["src/home/index.tsx", "lib/Users/y", "usa https://cdn.example.com/Users/avatar.png"]) {
+    assert.doesNotThrow(() => validateLearnedSkill(doc(safe), CONTEXT), safe);
+  }
+});
+
+test("fix F5: rutas que empiezan con ~/ se rechazan con el mismo límite de inicio", () => {
+  const cases: Array<[string, RegExp]> = [
+    ["borra ~/.ssh/id_rsa", /~\//],
+    ["cd ~/proyecto", /~\//],
+  ];
+  for (const [body, reason] of cases) assert.match(reasonsOf(() => validateLearnedSkill(doc(body), CONTEXT)).join("|"), reason, body);
+  assert.doesNotThrow(() => validateLearnedSkill(doc("a~/b"), CONTEXT));
+});
+
 test("unifiedDiff produce un diff unificado con contexto de 3 líneas", () => {
   assert.equal(unifiedDiff("a\nb\nc\n", "a\nB\nc\n"), "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n");
   assert.equal(unifiedDiff("igual\n", "igual\n"), "");
