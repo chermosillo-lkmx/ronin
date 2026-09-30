@@ -30,7 +30,7 @@ export function diffLineClass(line: string): string {
 
 /**
  * F1: estado inicial de "leído" al montar. Measurement-based, nunca hereda un `true` de otra
- * propuesta: el panel monta una `SkillProposalView` nueva por cada `detail.id` (key={detail.id}),
+ * propuesta: el panel monta una `SkillProposalView` nueva por cada `detail.id` (key={detail.id + ":" + detail.contentHash}),
  * así que `box` siempre es el <pre> recién creado para ESTA propuesta (o `null` si aún no se pintó),
  * jamás uno reciclado que conserve el scrollTop de la propuesta anterior.
  */
@@ -163,9 +163,9 @@ export function SkillProposalsPanel({ initial, initialDetail = null, onCount }: 
     </aside>
     <section className="ronin-skill-editor">
       {detail
-        // F1: key={detail.id} fuerza un remonte por propuesta, para que el <pre> (y su scrollTop) de
-        // una propuesta anterior nunca se reutilice al elegir otra.
-        ? <SkillProposalView key={detail.id} detail={detail} onResolved={(result) => void resolved(result)} onReload={() => void open(detail.id)} />
+        // F1: la key (id + hash del texto) fuerza un remonte por propuesta y por versión del texto: ni otra
+        // propuesta ni un "Recargar" con texto nuevo heredan el scrollTop ni el "leído" anterior.
+        ? <SkillProposalView key={`${detail.id}:${detail.contentHash}`} detail={detail} onResolved={(result) => void resolved(result)} onReload={() => void open(detail.id)} />
         : <div className="ronin-empty-workspace"><span>propuestas</span><h1>Selecciona una propuesta</h1></div>}
       {note && <p className="ron-skill-note" role="status">{note}</p>}
     </section>
