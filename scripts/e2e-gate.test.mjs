@@ -414,3 +414,14 @@ test("18. sin merge-base con la base → FAIL", (t) => {
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /sin merge-base/);
 });
+
+test("11b. línea del skip SIN motivo no excusa y es FAIL", (t) => {
+  const fx = fixture(t);
+  fx.addRoutes(NEW_ROUTE);
+  fx.write("e2e_dev/.e2e-gate-skip", "POST /businesses/{business_id}/things/{thing_id}/archive\n");
+  fx.commit();
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /se espera «METHOD \/path  # motivo»/);
+  assert.match(r.out, /cambiaron rutas/);
+});
