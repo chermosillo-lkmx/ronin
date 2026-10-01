@@ -76,7 +76,6 @@ Una ruta sólo se excusa por escrito, en el propio sub‑repo (queda en el PR y 
 # METHOD path  # motivo (obligatorio)
 POST /admin/rebuild-cache  # interno/M2M: el token de DEV no tiene el scope
 DELETE /businesses/{business_id}/things/{thing_id}  # destructivo en DEV; cubierto por guarda unitaria
-GET ""  # path vacío con prefijo montado fuera del archivo (ver limitaciones)
 ```
 
 El path es el del decorador (con el prefijo del archivo, si lo hay) o el path completo del XML.
@@ -84,6 +83,23 @@ Una línea sin `# motivo` no excusa y es `FAIL`. Las rutas excusadas salen como
 `⚠ <repo>: ruta M path excusada por e2e_dev/.e2e-gate-skip — <motivo>` y no cuentan para A ni D.
 Pensado para rutas que DEV no permite ejercitar (internas/admin/M2M, destructivas, cubiertas sólo
 por una guarda), no para ahorrarse la prueba.
+
+## Rutas de path vacío: `e2e_dev/.e2e-gate-routes`
+
+Un decorador `@router.get("")` cuyo prefijo se monta fuera del archivo (variable, `routing.py`,
+`include_router(…, prefix=…)`) no se puede ubicar en la cobertura. Ejemplo real:
+`ant-ms-cfdis/src/endpoints/platform_credentials/*` construye el router con `_build_router(prefix)`.
+Sin más datos el gate falla («path vacío … declárala en e2e_dev/.e2e-gate-routes»). Se resuelve
+declarando el path completo por archivo y método:
+
+```
+# METHOD archivo-de-src path-completo-sin-/api/v1 (también vale con él: se compara por sufijo)
+GET  src/endpoints/platform_credentials/platform_credentials_get.py  /businesses/{business_id}/credentials
+POST src/endpoints/platform_credentials/platform_credentials_post.py /businesses/{business_id}/credentials
+```
+
+**Resolver no es excusar**: la ruta resuelta pasa por las reglas A y D como cualquier otra (tiene
+que aparecer ejercitada en la cobertura). Una línea mal formada es `FAIL`.
 
 ## Lo que corre el agente antes del gate
 
@@ -113,10 +129,10 @@ Si después de la corrida hay otro commit, la evidencia queda vieja: se vuelve a
   del `curl`/revisión.
 - El path tiene que ser un literal de string. Un decorador añadido con path no literal (constante,
   f‑string) sale como `⚠ … decorador de ruta sin path literal reconocible` y no se gatea.
-- El prefijo sólo se resuelve si está en el `APIRouter(prefix=…)` del **mismo archivo**. Un path
-  vacío (`""`/`"/"`) cuyo prefijo se monta en `include_router(…, prefix=…)` de otro archivo no se
-  puede ubicar en la cobertura → `FAIL` («path vacío»); hoy hay una sola ruta así en
-  `ant-liebre-api`. Si aparece, excúsala con `GET ""  # motivo` o declara el prefijo en el router.
+- El prefijo se resuelve automáticamente sólo si es un literal en el `APIRouter(prefix=…)` del **mismo
+  archivo**. Un path vacío (`""`/`"/"`) con prefijo montado en otra parte → `FAIL` («path vacío»)
+  hasta declararlo en `e2e_dev/.e2e-gate-routes` (ver arriba). Un path no vacío con prefijo
+  externo funciona igual porque se compara por sufijo.
 - Un path de decorador corto (p. ej. `/{id}`) puede ser sufijo de varias rutas del XML; basta con
   que una tenga hits (`⚠`).
 - No valida que la prueba e2e **afirme** algo útil: eso sigue siendo revisión con mutantes.

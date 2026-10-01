@@ -12,6 +12,7 @@
 #      de OTROS archivos no cuentan).
 #   D. Cada ruta cambiada aparece ejercitada (hits>0) en la cobertura.
 # Válvula: `e2e_dev/.e2e-gate-skip` con líneas `METHOD /path  # motivo` (⚠, no falla).
+# Paths vacíos con prefijo externo: `e2e_dev/.e2e-gate-routes` (`METHOD src/archivo.py /path`).
 # Sin red, sin DEV: sólo lee git, junit y XML. Cualquier duda es fallo (default-deny).
 #
 # Uso: e2e-gate.sh [DIR]   (DIR = worktree de la sesión; default: cwd, que es lo que pasa Ronin)
