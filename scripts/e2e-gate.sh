@@ -29,7 +29,9 @@ command -v python3 >/dev/null 2>&1 || { say "❌ sin python3: no puedo leer juni
 
 # Sub-repos candidatos: directorios git inmediatos (o el propio ROOT si es un repo de servicio).
 candidates=()
-if [ -d "$ROOT/.git" ] || [ -f "$ROOT/.git" ]; then candidates+=("$ROOT"); fi
+# La raíz sólo cuenta si es ella misma un repo con suite e2e (como unit-gate exige tests/ o package.json):
+# en Ronin la raíz de la sesión es el monorepo, sin remoto ni e2e_dev.
+if { [ -d "$ROOT/.git" ] || [ -f "$ROOT/.git" ]; } && [ -d "$ROOT/e2e_dev" ]; then candidates+=("$ROOT"); fi
 for d in "$ROOT"/*/; do
   [ -d "$d" ] || continue
   d="${d%/}"; name="$(basename "$d")"
@@ -225,6 +227,8 @@ def gate_repo(repo_dir):
     global checked
     name = os.path.basename(os.path.abspath(repo_dir))
     os.chdir(repo_dir)
+    if not os.path.isdir("e2e_dev"):
+        say(f"· {name}: sin suite e2e_dev — se omite"); return
     try:
         base = git("merge-base", "HEAD", BASE_REF).strip()
     except RuntimeError:

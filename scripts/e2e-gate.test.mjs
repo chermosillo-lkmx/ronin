@@ -150,6 +150,19 @@ test("1. sub-repo sin e2e_dev/ → se omite y PASS", (t) => {
   assert.match(r.out, /E2E-GATE: PASS/);
 });
 
+test("1b. la raíz de la sesión es un repo git sin remoto ni e2e_dev (monorepo de Ronin) → se ignora y PASS", (t) => {
+  const fx = fixture(t, { e2e: false });
+  const session = dirname(fx.repo);
+  sh("git", ["init", "-q", "-b", "main", session]);
+  writeFileSync(join(session, "README.md"), "# monorepo de la sesión\n");
+  fx.addRoutes(NEW_ROUTE);
+  fx.commit();
+  const r = fx.run();
+  assert.equal(r.code, 0, r.out);
+  assert.doesNotMatch(r.out, /sin merge-base/);
+  assert.match(r.out, /E2E-GATE: PASS/);
+});
+
 test("2. ruta nueva sin ningún e2e_dev/test_*.py tocado → FAIL (regla A)", (t) => {
   const fx = fixture(t);
   fx.addRoutes(NEW_ROUTE);
