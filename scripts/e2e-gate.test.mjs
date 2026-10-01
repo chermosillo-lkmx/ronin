@@ -187,7 +187,10 @@ test("5. la ruta no aparece en la cobertura → FAIL (regla D)", (t) => {
 
 test("5b. un template de ruta que sólo coincide a medio segmento NO cuenta", (t) => {
   const fx = greenScenario(t);
-  fx.writeCoverage(".e2e_history/route-coverage.xml", [["POST /api/v1/businesses/{business_id}/xthings/{thing_id}/archive", 1]]);
+  fx.writeCoverage(".e2e_history/route-coverage.xml", [
+    ["POST /api/v1/businesses/{business_id}/xthings/{thing_id}/archive", 1],
+    ["POST /api/v1/xbusinesses/{business_id}/things/{thing_id}/archive", 1],
+  ]);
   const r = fx.run();
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /no aparece en la cobertura/);
@@ -424,4 +427,12 @@ test("11b. línea del skip SIN motivo no excusa y es FAIL", (t) => {
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /se espera «METHOD \/path  # motivo»/);
   assert.match(r.out, /cambiaron rutas/);
+});
+
+test("16b. archivo de rutas NUEVO sin rastrear (untracked) también cuenta", (t) => {
+  const fx = fixture(t);
+  fx.write("src/endpoints/gadgets.py", `from fastapi import APIRouter\n\nrouter = APIRouter()\n\n\n@router.get("/gadgets")\ndef g():\n    return []\n`);
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /cambiaron rutas \(GET \/gadgets\)/);
 });
