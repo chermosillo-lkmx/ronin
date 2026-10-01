@@ -436,3 +436,31 @@ test("16b. archivo de rutas NUEVO sin rastrear (untracked) también cuenta", (t)
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /cambiaron rutas \(GET \/gadgets\)/);
 });
+
+const EMPTY_PATH_FILE = `from fastapi import APIRouter\n\nfrom .routing import PREFIX\n\nrouter = APIRouter(prefix=PREFIX)\n\n\n@router.get(\n    "",\n)\ndef list_widgets(business_id: str):\n    return []\n`;
+
+test("17c. path vacío resuelto en e2e_dev/.e2e-gate-routes y ejercitado → PASS", (t) => {
+  const fx = fixture(t);
+  fx.write("src/endpoints/widgets.py", EMPTY_PATH_FILE);
+  fx.write("e2e_dev/.e2e-gate-routes", "# prefijo dinámico (routing.py)\nGET src/endpoints/widgets.py /businesses/{business_id}/widgets\n");
+  fx.touchTest();
+  fx.commit();
+  fx.writeJunit(".e2e_history/junit.xml", [THINGS_PASS]);
+  fx.writeCoverage(".e2e_history/route-coverage.xml", [["GET /api/v1/businesses/{business_id}/widgets", 1]]);
+  const r = fx.run();
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /ruta GET \/businesses\/\{business_id\}\/widgets ejercitada por e2e/);
+});
+
+test("17d. path vacío resuelto vía .e2e-gate-routes pero con 0 hits → FAIL (resolver no es excusar)", (t) => {
+  const fx = fixture(t);
+  fx.write("src/endpoints/widgets.py", EMPTY_PATH_FILE);
+  fx.write("e2e_dev/.e2e-gate-routes", "GET src/endpoints/widgets.py /businesses/{business_id}/widgets\n");
+  fx.touchTest();
+  fx.commit();
+  fx.writeJunit(".e2e_history/junit.xml", [THINGS_PASS]);
+  fx.writeCoverage(".e2e_history/route-coverage.xml", [["GET /api/v1/businesses/{business_id}/widgets", 0]]);
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /ruta GET \/businesses\/\{business_id\}\/widgets no fue ejercitada por e2e/);
+});

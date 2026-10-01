@@ -63,6 +63,9 @@ DECO_RE = re.compile(
 DECO_START_RE = re.compile(r"^\s*@\s*\w+\s*\.\s*(?:" + METHODS + r"|api_route)\s*\(")
 ROUTER_RE = re.compile(r"(\w+)\s*(?::[^=\n]*)?=\s*(?:\w+\.)?APIRouter\s*\(")
 
+def src_of(where):
+    return where.rsplit(":", 1)[0]
+
 def show(p):
     return p or '""'
 
@@ -136,6 +139,24 @@ def read_skip(path):
             p = "" if parts[1] in ('""', "''") else norm(parts[1])
             skips[(parts[0].upper(), p)] = reason.strip()
     return skips, problems
+
+def read_aliases(path):
+    """`METHOD src/archivo.py /path` → resuelve el path VACÍO de los decoradores de ese archivo
+    (prefijo montado fuera del archivo). Resolver no excusa: la ruta resuelta sigue pasando por D."""
+    aliases, problems = {}, []
+    if not os.path.isfile(path):
+        return aliases, problems
+    with open(path, encoding="utf-8") as fh:
+        for n, raw in enumerate(fh, 1):
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) != 3 or not parts[2].startswith("/"):
+                problems.append(f"{path}:{n}: se espera «METHOD src/archivo.py /path» — «{raw.strip()}»")
+                continue
+            aliases[(parts[0].upper(), parts[1])] = norm(parts[2])
+    return aliases, problems
 
 def excused(route, skips):
     m, p = route
@@ -237,6 +258,18 @@ def gate_repo(repo_dir):
                and added_lines(f, base, f in untracked)]
 
     skips, problems = read_skip("e2e_dev/.e2e-gate-skip")
+    aliases, alias_problems = read_aliases("e2e_dev/.e2e-gate-routes")
+    for pr in alias_problems:
+        bad(f"{name}: {pr}")
+    resolved = []
+    for m, p, where in routes:
+        alias = aliases.get((m, src_of(where))) if not p else None
+        if alias:
+            say(f"   · {name}: {m} \"\" de {where} resuelta como {m} {alias} (e2e_dev/.e2e-gate-routes)")
+            p = alias
+        if (m, p) not in [(rm, rp) for rm, rp, _ in resolved] or not p:
+            resolved.append((m, p, where))
+    routes = resolved
     for pr in problems:
         bad(f"{name}: {pr}")
     pending = []
@@ -287,7 +320,7 @@ def gate_repo(repo_dir):
                 cov[k] = cov.get(k, False) or v
         for m, p, where in pending:
             if not p:
-                bad(f"{name}: ruta {m} con path vacío ({where}): el prefijo se monta fuera del archivo y no puedo ubicarla en la cobertura")
+                bad(f"{name}: ruta {m} con path vacío ({where}): el prefijo se monta fuera del archivo y no puedo ubicarla en la cobertura — declárala en e2e_dev/.e2e-gate-routes («{m} {src_of(where)} /path/completa»)")
                 continue
             cands = [(k, v) for k, v in cov.items() if k[0] == m and (k[1] == p or k[1].endswith(p))]
             if not cands:
