@@ -25,6 +25,12 @@ etapa le pide al worker correr el mismo script y no avanzar sin `I18N-GATE: PASS
 
 ## Qué comprueba (por cada sub‑repo con líneas nuevas bajo `src/`)
 
+«Bajo `src/`» significa bajo el código de producto del repo, que detecta
+`scripts/gate-source-dirs.sh` (el mismo helper de `unit-gate.sh`; ver `docs/unit-gate.md`): coverage
+`source` declarado → `src/` → `[tool.setuptools.packages.find] include` (p. ej. `hub/` en
+messaging-gateway). Un repo con `tests/` o `package.json` cuyo código no se puede ubicar y que trae
+cambios falla cerrado («no sé dónde está el código de producto de <repo>»).
+
 1. **Ningún 4xx nuevo con mensaje escrito a mano.** En `ant-liebre-api` lo comprueba el trinquete
    del propio repo, `tests/contracts/test_no_new_error_literals.py`, que recorre TODO
    `src/endpoints/` por AST y lo compara contra su inventario `PENDIENTES` (92 raises en 18

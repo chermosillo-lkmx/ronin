@@ -31,6 +31,8 @@ fail=0; checked=0
 say() { printf '%s\n' "$*"; }
 bad() { say "❌ $*"; fail=1; }
 ok()  { say "✅ $*"; }
+# shellcheck source=gate-source-dirs.sh
+. "$(dirname "${BASH_SOURCE[0]}")/gate-source-dirs.sh" || { bad "no pude cargar gate-source-dirs.sh"; say "I18N-GATE: FAIL"; exit 1; }
 
 # El catálogo vive en las migraciones de siembra de ant-ms-i18n. Se busca primero en el
 # worktree (un ciclo puede estar sembrando códigos nuevos) y luego en el checkout principal.
@@ -43,15 +45,19 @@ if [ ${#catalog_dirs[@]} -eq 0 ]; then
   say "I18N-GATE: FAIL"; exit 1
 fi
 
+# Repos de servicio: los que tienen src/ (como siempre) y los que guardan su código en otro
+# directorio (gate-source-dirs.sh, p. ej. hub/). Uno con tests/ o package.json cuyo código no se
+# puede ubicar entra también: si trae cambios, falla cerrado.
+is_candidate() { [ -d "$1/src" ] || [ -d "$1/tests" ] || [ -f "$1/package.json" ]; }
 candidates=()
 if [ -d "$ROOT/.git" ] || [ -f "$ROOT/.git" ]; then
-  [ -d "$ROOT/src" ] && candidates+=("$ROOT")
+  is_candidate "$ROOT" && candidates+=("$ROOT")
 fi
 for d in "$ROOT"/*/; do
   d="${d%/}"; name="$(basename "$d")"
   case "$name" in *-base|node_modules|reports|.*) continue;; esac
   { [ -d "$d/.git" ] || [ -f "$d/.git" ]; } || continue
-  [ -d "$d/src" ] || continue
+  is_candidate "$d" || continue
   candidates+=("$d")
 done
 [ ${#candidates[@]} -eq 0 ] && { bad "no encontré ningún repo de servicio bajo $ROOT"; say "I18N-GATE: FAIL"; exit 1; }
@@ -62,10 +68,12 @@ py_for() { # $1 = repo dir
   return 1
 }
 
-# Las líneas AÑADIDAS del diff (rama + working tree + sin rastrear), sólo bajo src/.
-added_lines() { # $1 = base sha
-  { git diff -U0 "$1" HEAD -- src; git diff -U0 HEAD -- src; } 2>/dev/null | grep '^+' | grep -v '^+++'
-  for f in $(git ls-files --others --exclude-standard -- src 2>/dev/null); do sed 's/^/+/' "$f"; done
+# Las líneas AÑADIDAS del diff (rama + working tree + sin rastrear), sólo bajo el código de
+# producto del repo (src/ o lo que detecte source_dirs).
+added_lines() { # $1 = base sha, $2.. = directorios de producto
+  local b="$1"; shift
+  { git diff -U0 "$b" HEAD -- "$@"; git diff -U0 HEAD -- "$@"; } 2>/dev/null | grep '^+' | grep -v '^+++'
+  for f in $(git ls-files --others --exclude-standard -- "$@" 2>/dev/null); do sed 's/^/+/' "$f"; done
 }
 
 for repo in "${candidates[@]}"; do
@@ -73,8 +81,18 @@ for repo in "${candidates[@]}"; do
   cd "$repo" || { bad "$name: no puedo entrar"; continue; }
   git fetch -q origin main 2>/dev/null || true
   base="$(git merge-base HEAD "$BASE_REF" 2>/dev/null)" || { bad "$name: sin merge-base con $BASE_REF"; continue; }
-  added="$(added_lines "$base")"
-  [ -z "$added" ] && { say "· $name: sin líneas nuevas bajo src/ — se omite"; continue; }
+  if ! src_out="$(source_dirs "$repo" 2>&1)"; then   # en fallo, la salida es el motivo
+    if [ -n "$( { git diff --name-only "$base" HEAD; git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null)" ]; then
+      bad "$name: no sé dónde está el código de producto de $name ($src_out): declara [run] source en .coveragerc"
+    else
+      say "· $name: sin cambios — se omite"
+    fi
+    continue
+  fi
+  src_dirs=(); while IFS= read -r d; do [ -n "$d" ] && src_dirs+=("$d"); done <<< "$src_out"
+  src_label="$(printf '%s/ ' "${src_dirs[@]}")"; src_label="${src_label% }"
+  added="$(added_lines "$base" "${src_dirs[@]}")"
+  [ -z "$added" ] && { say "· $name: sin líneas nuevas bajo $src_label — se omite"; continue; }
   checked=$((checked+1))
   say "── $name  (base $(git rev-parse --short "$base"))"
 
@@ -140,6 +158,6 @@ for repo in "${candidates[@]}"; do
   fi
 done
 
-[ "$checked" -eq 0 ] && say "· ningún sub-repo con cambios en src/: nada que gatear (verde)"
+[ "$checked" -eq 0 ] && say "· ningún sub-repo con cambios en código de producto: nada que gatear (verde)"
 if [ "$fail" -ne 0 ]; then say "I18N-GATE: FAIL"; exit 1; fi
 say "I18N-GATE: PASS"; exit 0

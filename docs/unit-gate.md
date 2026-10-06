@@ -22,7 +22,7 @@ Las sesiones ya creadas conservan su `flow.json` congelado: el gate aplica a ses
 
 ## Qué comprueba (por cada sub‑repo con cambios respecto a `origin/main`)
 
-1. **Cambios en código de producto traen tests.** `src/**` (o `app/`, `lib/`), excluyendo
+1. **Cambios en código de producto traen tests.** El código de producto (ver «Dónde está el código de producto» abajo), excluyendo
    `migrations/`, requiere al menos un archivo bajo `tests/` (o `*.test.*`/`*.spec.*`) tocado en la
    misma rama o working tree. Aviso (no bloquea) por cada módulo de `src` cuyo nombre no aparece en
    ningún test tocado.
@@ -30,7 +30,7 @@ Las sesiones ya creadas conservan su `flow.json` congelado: el gate aplica a ses
    caso en el `junit` que pase (un archivo que pytest no colecta, o que sólo tiene skips, falla).
    Puede apoyarse en junits de corridas aparte vía `UNIT_GATE_EXTRA_JUNIT` (ver abajo).
 3. **La suite completa pasa**: `0 failed / 0 errors` y `> 0` tests. Python ejecuta `pytest` con
-   `--cov=src --cov-report=xml:reports/coverage-gate.xml` además del junit (`ant-ms-cfdis` añade
+   `--cov=<dir> --cov-report=xml:reports/coverage-gate.xml` (una `--cov` por directorio de producto) además del junit (`ant-ms-cfdis` añade
    `-o log_cli=false -m "not functional"`). Node ejecuta `npx vitest run --coverage
    --coverage.reporter=cobertura --coverage.reportsDirectory=reports/coverage-gate` además del
    reporter junit. Intérprete Python: `<repo>/.venv/bin/python` y, si el worktree no tiene,
@@ -49,6 +49,22 @@ Las sesiones ya creadas conservan su `flow.json` congelado: el gate aplica a ses
    - **4c. Trinquete**: el piso actual no puede ser menor que el del `merge-base`. También falla
      cualquier línea agregada fuera de `tests/` con `pragma: no cover`, `istanbul ignore`,
      `c8 ignore` o `v8 ignore`, así como entradas nuevas en `omit` o `coverage.exclude`.
+
+### Dónde está el código de producto
+
+`scripts/gate-source-dirs.sh` (`source_dirs <repo>`), compartido con `i18n-gate.sh`, decide por repo:
+
+1. `source` de coverage declarado (`.coveragerc [run]`, `pyproject [tool.coverage.run]`,
+   `setup.cfg [coverage:run]`) → esos directorios. Si declara y ninguno existe → `FAIL`.
+2. si no, existe `src/` → `src` (el comportamiento de siempre).
+3. si no, `pyproject [tool.setuptools.packages.find] include` sin el `*` final, los que existan
+   (messaging-gateway: `include = ["hub*"]` → `hub`).
+4. si no → `FAIL` cerrado: «no sé dónde está el código de producto de <repo>».
+
+Eso alimenta la regla 1, las `--cov=<dir>` y los «archivos/líneas nuevas» de la regla 4 (Cobertura
+escribe `<source>…/hub</source>` con `filename` relativo a él, igual que con `src`). Node conserva
+`src|app|lib`. Antes un cambio en `hub/` sin tests pasaba la regla 1 como «sin cambios en src» y la
+cobertura se medía sobre `--cov=src`, que no existe.
 
 La regla existe porque **la cobertura bajó una semana sin que nada se pusiera rojo; el gate usaba
 `-o addopts=''` y anulaba el `--cov-fail-under` de cada `pytest.ini`**. Ahora `addopts` sigue

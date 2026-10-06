@@ -2,7 +2,8 @@
 # unit-gate.sh — gate de pruebas unitarias para los workflows de Ronin (verifyCmd por etapa).
 #
 # Regla que hace cumplir (ver docs/unit-gate.md):
-#   1. Todo cambio en código de producto (src/**, fuera de migraciones) viene con cambios en tests.
+#   1. Todo cambio en código de producto (src/** o el directorio que declare el repo, ver
+#      gate-source-dirs.sh; fuera de migraciones) viene con cambios en tests.
 #   2. Los tests nuevos/modificados EXISTEN y se EJECUTAN (aparecen en el junit y pasan).
 #   3. La suite unitaria completa del repo pasa (0 failed / 0 errors, >0 tests).
 #   4. Las líneas nuevas están cubiertas, el total respeta el piso y el piso no retrocede.
@@ -21,6 +22,8 @@ fail=0; checked=0
 say() { printf '%s\n' "$*"; }
 bad() { say "❌ $*"; fail=1; }
 ok()  { say "✅ $*"; }
+# shellcheck source=gate-source-dirs.sh
+. "$(dirname "${BASH_SOURCE[0]}")/gate-source-dirs.sh" || { bad "no pude cargar gate-source-dirs.sh"; say "UNIT-GATE: FAIL"; exit 1; }
 
 # Sub-repos candidatos: directorios git inmediatos (o el propio ROOT si es un repo de servicio).
 candidates=()
@@ -134,6 +137,7 @@ coverage_path = Path(os.environ["GATE_COVERAGE"])
 runner = os.environ["GATE_RUNNER"]
 changed = [p for p in os.environ.get("GATE_CHANGED", "").splitlines() if p]
 src_changed = [p for p in os.environ.get("GATE_SRC_CHANGED", "").splitlines() if p]
+label = os.environ.get("GATE_SRC_LABEL") or "src"
 
 def emit(kind, message):
     print(f"{kind}\t{message}")
@@ -425,13 +429,13 @@ else:
                 if report_lines[path][number] == 0:
                     uncovered.append(f"{path}:{number}")
         if omitted:
-            emit("WARN", "src cambiado bajo un omit que ya existía en el merge-base (no se mide; es deuda): " + " ".join(omitted))
+            emit("WARN", f"{label} cambiado bajo un omit que ya existía en el merge-base (no se mide; es deuda): " + " ".join(omitted))
         if missing_files:
-            emit("BAD", "archivo(s) de src cambiado(s) no aparece en el reporte de cobertura: " + " ".join(missing_files))
+            emit("BAD", f"archivo(s) de {label} cambiado(s) no aparece en el reporte de cobertura: " + " ".join(missing_files))
         if uncovered:
             emit("BAD", "líneas nuevas sin cubrir: " + " ".join(uncovered))
         elif not missing_files:
-            emit("OK", f"{executable_new} líneas nuevas de src, todas cubiertas")
+            emit("OK", f"{executable_new} líneas nuevas de {label}, todas cubiertas")
 
         floor = current_floor()
         if floor is None:
@@ -466,7 +470,21 @@ for repo in "${candidates[@]}"; do
   changed="$( { git diff --name-only "$base" HEAD; git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u)"
   [ -z "$changed" ] && { say "· $name: sin cambios respecto a $BASE_REF — se omite"; continue; }
   checked=$((checked+1))
-  src_changed="$(printf '%s\n' "$changed" | grep -E '^(src|app|lib)/.*\.(py|ts|tsx|js|jsx)$' | grep -vE '/migrations/|/__pycache__/' || true)"
+  # Runner y directorio(s) de código de producto. Python: los que declara el repo (coverage
+  # `source` → src/ → packages.find; si no se sabe, FAIL cerrado). Node: src|app|lib como siempre.
+  if [ -d tests ] && { [ -f pytest.ini ] || [ -f pyproject.toml ] || [ -f setup.cfg ] || find tests -name 'test_*.py' -print -quit 2>/dev/null | grep -q .; }; then
+    runner="python"
+    if ! src_dirs="$(source_dirs "$repo" 2>&1)"; then   # en fallo, la salida es el motivo
+      bad "$name: no sé dónde está el código de producto de $name ($src_dirs): declara [run] source en .coveragerc"
+      continue
+    fi
+    src_re="$(printf '%s\n' "$src_dirs" | sed 's/[][\.*^$+?(){}|]/\\&/g' | paste -sd'|' -)"
+    src_label="$(printf '%s\n' "$src_dirs" | paste -sd',' -)"
+  else
+    runner=""; [ -f package.json ] && runner="node"
+    src_re="src|app|lib"; src_label="src"
+  fi
+  src_changed="$(printf '%s\n' "$changed" | grep -E "^($src_re)/.*\.(py|ts|tsx|js|jsx)\$" | grep -vE '/migrations/|/__pycache__/' || true)"
   test_changed="$(printf '%s\n' "$changed" | grep -E '(^|/)tests?/.*\.(py|ts|tsx|js|jsx)$|\.(test|spec)\.(ts|tsx|js|jsx)$' | grep -vE 'conftest\.py$|/fixtures?/|/support/|/__snapshots__/' || true)"
   # Regla 2 sólo aplica a tests que EXISTEN y traen líneas NUEVAS: un test borrado (p.ej.
   # al podar un módulo) no es nuevo ni modificado y no puede aparecer ejecutándose en el
@@ -485,8 +503,8 @@ for repo in "${candidates[@]}"; do
     bad "$name: hay cambios en código de producto sin ningún cambio en tests:"
     printf '%s\n' "$src_changed" | sed 's/^/     /'
   elif [ -n "$src_changed" ]; then
-    ok "$name: $(printf '%s\n' "$src_changed" | wc -l | tr -d ' ') archivo(s) de src con $(printf '%s\n' "$test_changed" | wc -l | tr -d ' ') archivo(s) de tests tocados"
-    # Aviso (no bloquea): módulos de src cuyo nombre no aparece en ningún test tocado.
+    ok "$name: $(printf '%s\n' "$src_changed" | wc -l | tr -d ' ') archivo(s) de $src_label con $(printf '%s\n' "$test_changed" | wc -l | tr -d ' ') archivo(s) de tests tocados"
+    # Aviso (no bloquea): módulos de producto cuyo nombre no aparece en ningún test tocado.
     while IFS= read -r f; do
       [ -z "$f" ] && continue
       stem="$(basename "$f")"; stem="${stem%.*}"
@@ -495,7 +513,7 @@ for repo in "${candidates[@]}"; do
       fi
     done <<< "$src_changed"
   else
-    ok "$name: sin cambios en src (sólo tests/docs/config)"
+    ok "$name: sin cambios en $src_label (sólo tests/docs/config)"
   fi
 
   [ "${UNIT_GATE_SKIP_SUITE:-0}" = "1" ] && continue
@@ -503,17 +521,18 @@ for repo in "${candidates[@]}"; do
   # Reglas 3 y 4 comparten la misma corrida: suite completa + XML de cobertura.
   mkdir -p reports
   junit="reports/junit-gate.xml"; rm -f "$junit"
-  if [ -d tests ] && { [ -f pytest.ini ] || [ -f pyproject.toml ] || [ -f setup.cfg ] || find tests -name 'test_*.py' -print -quit 2>/dev/null | grep -q .; }; then
-    runner="python"; coverage_xml="reports/coverage-gate.xml"; rm -f "$coverage_xml"
+  if [ "$runner" = "python" ]; then
+    coverage_xml="reports/coverage-gate.xml"; rm -f "$coverage_xml"
     PY="$(py_for "$repo")" || { bad "$name: sin intérprete (.venv) ni en el worktree ni en $MAIN_ROOT/$name"; continue; }
     extra=()
     case "$name" in ant-ms-cfdis) extra=(-o log_cli=false -m "not functional");; esac
-    say "   → $PY -m pytest tests -q -o addopts='' ${extra[*]+"${extra[*]}"} -p no:cacheprovider --cov=src --cov-report=xml:$coverage_xml --junitxml=$junit"
-    "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider --cov=src --cov-report="xml:$coverage_xml" --junitxml="$junit" > reports/unit-gate.log 2>&1
+    cov=(); while IFS= read -r d; do [ -n "$d" ] && cov+=("--cov=$d"); done <<< "$src_dirs"
+    say "   → $PY -m pytest tests -q -o addopts='' ${extra[*]+"${extra[*]}"} -p no:cacheprovider ${cov[*]} --cov-report=xml:$coverage_xml --junitxml=$junit"
+    "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > reports/unit-gate.log 2>&1
     rc=$?
-  elif [ -f package.json ]; then
+  elif [ "$runner" = "node" ]; then
     [ -d node_modules ] || { bad "$name: sin node_modules en el worktree (corre npm ci antes)"; continue; }
-    runner="node"; coverage_xml="reports/coverage-gate/cobertura-coverage.xml"
+    coverage_xml="reports/coverage-gate/cobertura-coverage.xml"
     mkdir -p reports/coverage-gate; rm -f "$coverage_xml"
     say "   → npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory=reports/coverage-gate --reporter=junit --outputFile=$junit"
     npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory=reports/coverage-gate --reporter=junit --outputFile="$junit" > reports/unit-gate.log 2>&1
@@ -541,7 +560,7 @@ for repo in "${candidates[@]}"; do
   fi
 
   # Regla 4: líneas nuevas cubiertas, piso total y trinquete de exclusiones/umbral.
-  coverage_output="$(GATE_CHANGED="$changed" GATE_SRC_CHANGED="$src_changed" coverage_rule "$base" "$coverage_xml" "$runner" 2>&1)"
+  coverage_output="$(GATE_CHANGED="$changed" GATE_SRC_CHANGED="$src_changed" GATE_SRC_LABEL="$src_label" coverage_rule "$base" "$coverage_xml" "$runner" 2>&1)"
   coverage_rc=$?
   if [ "$coverage_rc" -ne 0 ]; then
     bad "$name: el analizador de cobertura falló (rc=$coverage_rc)"
