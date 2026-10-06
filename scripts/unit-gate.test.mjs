@@ -523,3 +523,259 @@ test("29. Python: src cambiado bajo un omit que YA existía en main → aviso, n
   assert.match(r.out, /⚠.*omit.*src\/legacy\/old\.py/);
   assert.doesNotMatch(r.out, /no aparece en el reporte de cobertura/);
 });
+
+// ── Detección del directorio de código de producto por repo (lib/source-dirs.sh) ──
+// Un repo de servicio no siempre guarda su código en src/: messaging-gateway lo tiene en hub/
+// (pyproject `[tool.setuptools.packages.find] include = ["hub*"]`). Antes el gate leía un cambio en
+// hub/ sin tests como «sin cambios en src» y medía la cobertura sobre --cov=src (nada).
+function layoutFixture(t, { name = "messaging-fake", base, change }) {
+  const tmp = mkdtempSync(join(tmpdir(), "unit-gate-layout-test-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
+    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
+  };
+  const git = (cwd, ...args) => sh("git", args, { cwd, env: gitEnv });
+  const origin = join(tmp, "origin.git");
+  const session = join(tmp, "session");
+  const repo = join(session, name);
+  const mainRoot = join(tmp, "main-root");
+  mkdirSync(session, { recursive: true });
+  git(tmp, "init", "-q", "--bare", "-b", "main", origin);
+  git(session, "clone", "-q", origin, name);
+  const write = (rel, body) => {
+    mkdirSync(dirname(join(repo, rel)), { recursive: true });
+    writeFileSync(join(repo, rel), body);
+  };
+  write(".gitignore", "reports/\n.venv/\n*.xml\n");
+  write("tests/test_app.py", "def test_app_db():\n    assert True\n");
+  for (const [rel, body] of Object.entries(base)) write(rel, body);
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "init");
+  git(repo, "push", "-q", "origin", "HEAD:main");
+  git(repo, "fetch", "-q", "origin");
+  git(repo, "checkout", "-q", "-b", "feat/x");
+  for (const [rel, body] of Object.entries(change)) write(rel, body);
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "change");
+
+  const py = join(mainRoot, name, ".venv", "bin", "python");
+  mkdirSync(dirname(py), { recursive: true });
+  writeFileSync(
+    py,
+    `#!/bin/bash\nfor a in "$@"; do case "$a" in\n` +
+    `  --junitxml=*) cp "$FAKE_SUITE_JUNIT" "\${a#--junitxml=}";;\n` +
+    `  --cov-report=xml:*) [ -f "$FAKE_SUITE_COVERAGE" ] && cp "$FAKE_SUITE_COVERAGE" "\${a#--cov-report=xml:}";;\n` +
+    `esac; done\necho "fake pytest"\nexit 0\n`,
+  );
+  chmodSync(py, 0o755);
+  const suiteJunit = join(tmp, "suite.xml");
+  const suiteCoverage = join(tmp, "coverage.xml");
+  writeFileSync(suiteJunit, junit([OTHER_PASS, APP("passed")]));
+  return {
+    repo, session, mainRoot,
+    setCoverage: (options = {}) => writeFileSync(suiteCoverage, cobertura({ source: repo, ...options })),
+    run: (script = GATE, env = {}) => {
+      const r = spawnSync("bash", [script, session], {
+        encoding: "utf8",
+        env: {
+          ...gitEnv,
+          UNIT_GATE_BASE: "origin/main",
+          UNIT_GATE_MAIN_ROOT: mainRoot,
+          UNIT_GATE_EXTRA_JUNIT: "",
+          FAKE_SUITE_JUNIT: suiteJunit,
+          FAKE_SUITE_COVERAGE: suiteCoverage,
+          ...env,
+        },
+      });
+      return { code: r.status, out: r.stdout + r.stderr };
+    },
+  };
+}
+
+const HUB_PYPROJECT =
+  "[project]\nname = 'mg'\n\n[tool.setuptools.packages.find]\ninclude = [\"hub*\"]\n\n" +
+  "[tool.coverage.report]\nfail_under = 80\n";
+
+test("30. layout hub/ (packages.find): cambio en hub/ sin tests → FAIL de la regla 1", (t) => {
+  const fx = layoutFixture(t, {
+    base: { "pyproject.toml": HUB_PYPROJECT, "hub/app.py": "def f():\n    return 1\n" },
+    change: { "hub/app.py": "def f():\n    return 2\n" },
+  });
+  fx.setCoverage({ source: join(fx.repo, "hub"), classes: [{ filename: "app.py", lines: [{ number: 2, hits: 1 }] }] });
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /hay cambios en código de producto sin ningún cambio en tests/);
+  assert.match(r.out, /^\s+hub\/app\.py$/m);
+  assert.doesNotMatch(r.out, /sin cambios en src/);
+  assert.match(r.out, /UNIT-GATE: FAIL/);
+});
+
+test("31. layout hub/ con tests: --cov=hub y las líneas nuevas se resuelven contra <source>/hub → PASS", (t) => {
+  const fx = layoutFixture(t, {
+    base: { "pyproject.toml": HUB_PYPROJECT, "hub/app.py": "def f():\n    return 1\n" },
+    change: { "hub/app.py": "def f():\n    return 2\n", "tests/test_app.py": "def test_app_db():\n    assert 2 == 2\n" },
+  });
+  fx.setCoverage({ source: join(fx.repo, "hub"), classes: [{ filename: "app.py", lines: [{ number: 2, hits: 1 }] }] });
+  const r = fx.run();
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /--cov=hub /);
+  assert.doesNotMatch(r.out, /--cov=src/);
+  assert.match(r.out, /1 líneas nuevas de hub, todas cubiertas/);
+  assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
+test("32. layout hub/ con línea nueva sin cubrir → FAIL con hub/app.py:2", (t) => {
+  const fx = layoutFixture(t, {
+    base: { "pyproject.toml": HUB_PYPROJECT, "hub/app.py": "def f():\n    return 1\n" },
+    change: { "hub/app.py": "def f():\n    return 2\n", "tests/test_app.py": "def test_app_db():\n    assert 2 == 2\n" },
+  });
+  fx.setCoverage({ source: join(fx.repo, "hub"), classes: [{ filename: "app.py", lines: [{ number: 2, hits: 0 }] }] });
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /líneas nuevas sin cubrir: hub\/app\.py:2/);
+});
+
+test("33. coverage `source` declarado gana sobre src/ y packages.find (una --cov por directorio)", (t) => {
+  const fx = layoutFixture(t, {
+    base: {
+      ".coveragerc": "[run]\nsource =\n    hub\n    tools\n[report]\nfail_under = 80\n",
+      "pyproject.toml": "[tool.setuptools.packages.find]\ninclude = [\"other*\"]\n",
+      "src/script.py": "x = 1\n",
+      "hub/app.py": "def f():\n    return 1\n",
+      "tools/t.py": "y = 1\n",
+    },
+    change: { "hub/app.py": "def f():\n    return 2\n", "src/script.py": "x = 2\n" },
+  });
+  fx.setCoverage({ source: join(fx.repo, "hub"), classes: [{ filename: "app.py", lines: [{ number: 2, hits: 1 }] }] });
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /hay cambios en código de producto sin ningún cambio en tests/);
+  assert.match(r.out, /^\s+hub\/app\.py$/m);
+  assert.doesNotMatch(r.out, /^\s+src\/script\.py$/m);
+  assert.match(r.out, /--cov=hub --cov=tools /);
+});
+
+test("34. pyproject [tool.coverage.run] source (lista TOML) también declara el directorio", (t) => {
+  const fx = layoutFixture(t, {
+    base: {
+      "pyproject.toml": "[tool.coverage.run]\nsource = [\"hub\"]\n\n[tool.coverage.report]\nfail_under = 80\n",
+      "hub/app.py": "def f():\n    return 1\n",
+    },
+    change: { "hub/app.py": "def f():\n    return 2\n" },
+  });
+  fx.setCoverage({ source: join(fx.repo, "hub"), classes: [{ filename: "app.py", lines: [{ number: 2, hits: 1 }] }] });
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /^\s+hub\/app\.py$/m);
+  assert.match(r.out, /--cov=hub /);
+});
+
+test("35. repo src/ sin source declarado: sigue siendo src aunque packages.find diga otra cosa", (t) => {
+  const fx = layoutFixture(t, {
+    base: {
+      "pyproject.toml": "[tool.setuptools.packages.find]\ninclude = [\"hub*\"]\n\n[tool.coverage.report]\nfail_under = 80\n",
+      "src/app.py": "def f():\n    return 1\n",
+      "hub/x.py": "z = 1\n",
+    },
+    change: { "src/app.py": "def f():\n    return 2\n", "tests/test_app.py": "def test_app_db():\n    assert 2 == 2\n" },
+  });
+  fx.setCoverage();
+  const r = fx.run();
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /--cov=src /);
+  assert.match(r.out, /1 líneas nuevas de src, todas cubiertas/);
+});
+
+test("36. src repo clásico: el comando y los mensajes no cambian", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const r = fx.run(withoutExtra);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /-p no:cacheprovider --cov=src --cov-report=xml:reports\/coverage-gate\.xml/);
+  assert.match(r.out, /1 archivo\(s\) de src con 1 archivo\(s\) de tests tocados/);
+});
+
+test("37. sin src/, sin source y sin packages.find → FAIL cerrado «no sé dónde está el código»", (t) => {
+  const fx = layoutFixture(t, {
+    name: "ant-misterio",
+    base: { "pyproject.toml": "[tool.coverage.report]\nfail_under = 80\n", "pkg/app.py": "def f():\n    return 1\n" },
+    change: { "pkg/app.py": "def f():\n    return 2\n" },
+  });
+  fx.setCoverage();
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /no sé dónde está el código de producto de ant-misterio/);
+  assert.match(r.out, /UNIT-GATE: FAIL/);
+});
+
+test("38. source declarado que no existe en el repo → FAIL cerrado", (t) => {
+  const fx = layoutFixture(t, {
+    base: { ".coveragerc": "[run]\nsource = nope\n[report]\nfail_under = 80\n", "src/app.py": "x = 1\n" },
+    change: { "src/app.py": "x = 2\n" },
+  });
+  fx.setCoverage();
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /no sé dónde está el código de producto de messaging-fake/);
+});
+
+// ── i18n-gate.sh usa la misma detección ──
+const I18N_GATE = join(dirname(fileURLToPath(import.meta.url)), "i18n-gate.sh");
+function i18nRun(fx) {
+  const catalog = join(fx.mainRoot, "ant-ms-i18n", "src", "database", "migrations", "versions");
+  mkdirSync(catalog, { recursive: true });
+  writeFileSync(join(catalog, "001_seed.py"), "CODES = ['KNOWN_CODE']\n");
+  return fx.run(I18N_GATE, { I18N_GATE_BASE: "origin/main", I18N_GATE_MAIN_ROOT: fx.mainRoot });
+}
+
+test("39. i18n-gate: un 4xx con literal añadido bajo hub/ → FAIL (antes ni veía el repo)", (t) => {
+  const fx = layoutFixture(t, {
+    base: { "pyproject.toml": HUB_PYPROJECT, "hub/app.py": "def f():\n    return 1\n" },
+    change: { "hub/app.py": "def f():\n    raise HTTPException(status_code=404, detail=\"Not found\")\n" },
+  });
+  const r = i18nRun(fx);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /── messaging-fake/);
+  assert.match(r.out, /4xx nuevos con mensaje escrito a mano/);
+  assert.match(r.out, /I18N-GATE: FAIL/);
+});
+
+test("40. i18n-gate: cambio fuera del código de producto (tests/) no cuenta como línea nueva", (t) => {
+  const fx = layoutFixture(t, {
+    base: { "pyproject.toml": HUB_PYPROJECT, "hub/app.py": "def f():\n    return 1\n" },
+    change: { "tests/test_app.py": "def test_app_db():\n    raise HTTPException(status_code=404, detail=\"x\")\n" },
+  });
+  const r = i18nRun(fx);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /messaging-fake: sin líneas nuevas bajo hub\/ — se omite/);
+  assert.match(r.out, /I18N-GATE: PASS/);
+});
+
+test("41. i18n-gate: repo de servicio con tests/ pero sin código detectable → FAIL cerrado", (t) => {
+  const fx = layoutFixture(t, {
+    name: "ant-misterio",
+    base: { "pkg/app.py": "def f():\n    return 1\n" },
+    change: { "pkg/app.py": "def f():\n    return 2\n" },
+  });
+  const r = i18nRun(fx);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /no sé dónde está el código de producto de ant-misterio/);
+  assert.match(r.out, /I18N-GATE: FAIL/);
+});
+
+test("42. setup.cfg [coverage:run] source también declara el directorio", (t) => {
+  const fx = layoutFixture(t, {
+    base: {
+      "setup.cfg": "[metadata]\nname = mg\n[coverage:run]\nsource = hub\n[coverage:report]\nfail_under = 80\n",
+      "hub/app.py": "def f():\n    return 1\n",
+    },
+    change: { "hub/app.py": "def f():\n    return 2\n" },
+  });
+  fx.setCoverage({ source: join(fx.repo, "hub"), classes: [{ filename: "app.py", lines: [{ number: 2, hits: 1 }] }] });
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /^\s+hub\/app\.py$/m);
+  assert.match(r.out, /--cov=hub /);
+});
