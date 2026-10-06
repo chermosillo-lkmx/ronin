@@ -54,3 +54,113 @@ test("closeTmuxSession solicita cleanup y devuelve el reporte del servidor", asy
     globalThis.fetch = originalFetch;
   }
 });
+
+test("memoria: cada acción llama a la ruta, el método y el cuerpo correctos", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  const view = { repo: "acme-api", enabled: true, globalEnabled: true, entries: [], kbSuggestions: [], preview: { text: "", bytes: 0, maxBytes: 2048, omitted: 0 } };
+  try {
+    globalThis.fetch = async (input, init) => {
+      calls.push({ url: String(input), method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      return new Response(JSON.stringify(view));
+    };
+    assert.deepEqual(await api.getRepoMemory("acme-api"), view);
+    await api.setRepoMemoryEnabled("acme-api", false);
+    await api.addRepoMemory("acme-api", { text: "Tests: usar make test-unit", kind: "comando" });
+    await api.resolveRepoMemory("acme-api", "m_1", "approve");
+    await api.resolveRepoMemory("acme-api", "m_2", "edit", "Texto editado");
+    await api.resolveRepoMemory("acme-api", "m_3", "discard");
+    await api.deleteRepoMemory("acme-api", "k_1");
+    assert.deepEqual(calls, [
+      { url: "/api/repos/acme-api/memory", method: "GET", body: undefined },
+      { url: "/api/repos/acme-api/memory/enabled", method: "PUT", body: { enabled: false } },
+      { url: "/api/repos/acme-api/memory", method: "POST", body: { text: "Tests: usar make test-unit", kind: "comando" } },
+      { url: "/api/repos/acme-api/memory/m_1", method: "PATCH", body: { action: "approve" } },
+      { url: "/api/repos/acme-api/memory/m_2", method: "PATCH", body: { action: "edit", text: "Texto editado" } },
+      { url: "/api/repos/acme-api/memory/m_3", method: "PATCH", body: { action: "discard" } },
+      { url: "/api/repos/acme-api/memory/k_1", method: "DELETE", body: undefined },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("memoria y destilación: un error del servidor llega como Error con su mensaje", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "sólo se puede aprobar una entrada pendiente", code: "MEMORY_INVALID" }), { status: 409 });
+    await assert.rejects(api.resolveRepoMemory("acme-api", "m_1", "approve"), /sólo se puede aprobar una entrada pendiente/);
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "ya hay una destilación en curso para esta sesión", code: "DISTILL_RUNNING" }), { status: 409 });
+    await assert.rejects(api.distillSession("cowork-csv"), /ya hay una destilación en curso/);
+    globalThis.fetch = async (input, init) => {
+      assert.equal(input, "/api/sessions/cowork-csv/distill");
+      assert.equal(init?.method, "POST");
+      return new Response(JSON.stringify({ status: "running", repo: "acme-api", at: 1 }), { status: 202 });
+    };
+    assert.deepEqual(await api.distillSession("cowork-csv"), { status: "running", repo: "acme-api", at: 1 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("skills aprendidas: cada acción llama a la ruta, el método y el cuerpo correctos", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  try {
+    globalThis.fetch = async (input, init) => {
+      calls.push({ url: String(input), method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      const url = String(input);
+      if (url.startsWith("/api/skills/proposals?") || url === "/api/skills/proposals") return new Response(JSON.stringify({ proposals: [{ id: "s_1" }] }));
+      return new Response(JSON.stringify({ ok: true }), { status: url.endsWith("/skill") ? 202 : 200 });
+    };
+    assert.deepEqual(await api.listSkillProposals(), [{ id: "s_1" }]);
+    await api.listSkillProposals("acme-api");
+    await api.getSkillProposal("s_1");
+    await api.resolveSkillProposal("s_1", "approve", { contentHash: "sha256:abc" });
+    await api.resolveSkillProposal("s_2", "edit", { content: "---\nname: x\n---\n" });
+    await api.resolveSkillProposal("s_3", "discard");
+    await api.getRepoSkillLearning("acme-api");
+    await api.setRepoSkillLearning("acme-api", false);
+    await api.proposeSessionSkill("cowork-mig");
+    assert.deepEqual(calls, [
+      { url: "/api/skills/proposals", method: "GET", body: undefined },
+      { url: "/api/skills/proposals?repo=acme-api", method: "GET", body: undefined },
+      { url: "/api/skills/proposals/s_1", method: "GET", body: undefined },
+      { url: "/api/skills/proposals/s_1", method: "PATCH", body: { action: "approve", contentHash: "sha256:abc" } },
+      { url: "/api/skills/proposals/s_2", method: "PATCH", body: { action: "edit", content: "---\nname: x\n---\n" } },
+      { url: "/api/skills/proposals/s_3", method: "PATCH", body: { action: "discard" } },
+      { url: "/api/repos/acme-api/skills/learning", method: "GET", body: undefined },
+      { url: "/api/repos/acme-api/skills/learning", method: "PUT", body: { enabled: false } },
+      { url: "/api/sessions/cowork-mig/skill", method: "POST", body: undefined },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("skills aprendidas: un error del servidor llega como Error con su mensaje y la lista falla a vacío", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "el texto que aprobaste no coincide con la propuesta guardada", code: "SKILL_STALE" }), { status: 409 });
+    await assert.rejects(api.resolveSkillProposal("s_1", "approve", { contentHash: "x" }), /no coincide con la propuesta guardada/);
+    await assert.rejects(api.proposeSessionSkill("cowork-mig"), /no coincide/);
+    assert.deepEqual(await api.listSkillProposals(), []);
+    assert.equal(await api.getRepoSkillLearning("acme-api"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("F2: el error de resolveSkillProposal conserva el code del servidor (para poder ofrecer 'Recargar' ante SKILL_STALE)", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "el texto que aprobaste no coincide con la propuesta guardada", code: "SKILL_STALE" }), { status: 409 });
+    await assert.rejects(api.resolveSkillProposal("s_1", "approve", { contentHash: "x" }), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as { code?: string }).code, "SKILL_STALE");
+      return true;
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

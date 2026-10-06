@@ -80,6 +80,8 @@ test("tools/list publica reportar_pruebas y estado_pruebas con JSON Schema", asy
     assert.deepEqual(response.result.tools.map((tool: { name: string }) => tool.name), [
       "reportar_pruebas", "estado_pruebas",
       "listar_repos_y_workflows", "crear_sesion", "estado_sesiones", "responder_sesion",
+      "memoria_pendiente", "resolver_memoria",
+      "skills_pendientes", "resolver_skill",
     ]);
     assert.equal(response.result.tools[0].inputSchema.type, "object");
     assert.deepEqual(response.result.tools[0].inputSchema.required, ["repo", "suite", "junitPath"]);
@@ -244,6 +246,31 @@ test("POST /mcp enruta crear_sesion al puerto de sesiones con capability", async
     assert.equal(result.isError, undefined);
     assert.deepEqual(JSON.parse(result.content[0].text), { name: "cowork-http", branch: "ronin/cowork-http" });
     assert.deepEqual(launched, [{ repo: "fixture", workflowId: "wf-1", request: "hola", name: "cowork-http" }]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("POST /mcp: memoria_pendiente sólo existe sin scope; con scope=agent se rechaza sin tocar el puerto", async () => {
+  const { harness, cleanup } = setup();
+  try {
+    let calls = 0;
+    const mcpMemory = {
+      pending: async () => { calls++; return [{ id: "m_1", repo: "fixture", text: "Pendiente", kind: "trampa" as const, source: "cowork-a" }]; },
+      resolve: async () => { throw new Error("no debería resolver"); },
+    };
+    const app = createApp({ harness, mcpMemory });
+    const headers = { "x-ronin-capability": ensureCapabilityToken() };
+    const body = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memoria_pendiente", arguments: {} } };
+    const agent: any = await invokeMcp(app, body, headers, "/mcp?scope=agent");
+    assert.equal(agent.body.result.isError, true);
+    assert.equal(calls, 0);
+    const agentList: any = await invokeMcp(app, { jsonrpc: "2.0", id: 2, method: "tools/list" }, headers, "/mcp?scope=agent");
+    assert.equal(agentList.body.result.tools.some((tool: { name: string }) => tool.name === "memoria_pendiente"), false);
+    const external: any = await invokeMcp(app, body, headers);
+    assert.equal(external.body.result.isError, undefined);
+    assert.equal(JSON.parse(external.body.result.content[0].text)[0].id, "m_1");
+    assert.equal(calls, 1);
   } finally {
     cleanup();
   }

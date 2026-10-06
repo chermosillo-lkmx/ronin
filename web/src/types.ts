@@ -78,6 +78,7 @@ export interface PromptTemplate {
   template: string;          // texto efectivo (override o default)
   isDefault: boolean;
   placeholders: string[];
+  warning?: string;          // p. ej. una plantilla memory sin el triaje de skills
 }
 
 export interface ReportMeta {
@@ -133,7 +134,7 @@ export interface KnowledgeBaseGeneration {
   error?: string;
 }
 
-export type SkillRoot = "global" | "repo-claude" | "repo-skills";
+export type SkillRoot = "global" | "learned" | "repo-claude" | "repo-skills";
 export interface SkillRef {
   root: SkillRoot;
   name: string;
@@ -145,6 +146,10 @@ export interface SkillSummary {
   description: string;
   valid: boolean;
   error?: string;
+  /** "modified" = una learned cuyo SKILL.md ya no coincide con el hash aprobado (no entra al índice). */
+  integrity?: "ok" | "modified";
+  version?: number;
+  uses?: number;
 }
 export interface SkillDocument extends SkillSummary {
   content: string;
@@ -210,6 +215,10 @@ export interface TmuxSessionInfo {
   flow?: SessionFlow;
   /** Gestionada pero sin nada anotado en su cycle dir: adoptarla es lo que le da un flujo. */
   unrecorded?: boolean;
+  /** Pendientes del repo y estado de la destilación (sólo gestionadas con repo conocido). */
+  memory?: SessionMemoryInfo;
+  /** Estado de la parte de skill (sólo gestionadas con repo conocido). */
+  skills?: SessionSkillInfo;
 }
 
 // Espejo de server/src/types.ts. Lo calcula flow-progress.ts leyendo el cycle dir.
@@ -401,4 +410,111 @@ export interface WorkflowAnalysis {
   discarded: { name?: string; reason: string }[];
   error?: string;
   signals: { tasks: number; commits: number; evidenceFiles: number };
+}
+
+// ---- Memoria por repo. Espejo manual de server/src/memory.ts y server/src/types.ts ----
+
+export type MemoryKind = "comando" | "trampa" | "preferencia" | "decision" | "arquitectura";
+export type MemoryStatus = "pending" | "active" | "discarded";
+export type MemoryAction = "approve" | "discard" | "edit";
+
+export interface MemoryEntry {
+  id: string;
+  text: string;
+  kind: MemoryKind;
+  source: string;
+  createdAt: number;
+  updatedAt: number;
+  status: MemoryStatus;
+  uses: number;
+}
+
+export interface KbSuggestion {
+  id: string;
+  text: string;
+  source: string;
+  createdAt: number;
+}
+
+export interface RepoMemoryView {
+  repo: string;
+  enabled: boolean;
+  globalEnabled: boolean;
+  entries: MemoryEntry[];
+  kbSuggestions: KbSuggestion[];
+  preview: { text: string; bytes: number; maxBytes: number; omitted: number };
+}
+
+export type DistillStatus = "running" | "done" | "failed" | "skipped";
+
+export interface DistillState {
+  status: DistillStatus;
+  repo: string;
+  at: number;
+  error?: string;
+  reason?: string;
+  proposed?: number;
+}
+
+export interface SessionMemoryInfo {
+  repo: string;
+  pending: number;
+  distill: DistillState | null;
+}
+
+// ---- Skills aprendidas. Espejo manual de server/src/learned-skills.ts y server/src/types.ts ----
+
+export type SkillWarning =
+  | "menciona-repo"
+  | "url-externa"
+  | "comentario-html"
+  | "comando-destructivo"
+  | "ruta-sensible"
+  | "exfiltracion"
+  | "salta-controles"
+  | "nombre-ajustado";
+export type SkillProposalKind = "new" | "update";
+export type SkillProposalAction = "approve" | "discard" | "edit";
+
+export interface SkillProposalSummary {
+  id: string;
+  kind: SkillProposalKind;
+  name: string;
+  repo: string;
+  source: string;
+  description: string;
+  warnings: SkillWarning[];
+  createdAt: number;
+}
+
+export interface SkillProposalDetail extends SkillProposalSummary {
+  changes: string;
+  content: string;
+  contentHash: string;
+  base?: { content: string; hash: string };
+  diff?: string;
+}
+
+export interface SkillResolution {
+  proposal: SkillProposalSummary & { status: "pending" | "approved" | "discarded" };
+  skill?: { name: string; version: number; hash: string; kind: SkillProposalKind; repo: string };
+}
+
+export interface SkillLearningView {
+  repo: string;
+  enabled: boolean;
+  globalEnabled: boolean;
+}
+
+export interface SkillDistillState {
+  status: DistillStatus;
+  at: number;
+  proposalId?: string;
+  reason?: string;
+  error?: string;
+}
+
+export interface SessionSkillInfo {
+  repo: string;
+  state: SkillDistillState | null;
 }

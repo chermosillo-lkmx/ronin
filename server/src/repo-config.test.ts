@@ -129,3 +129,34 @@ test("kbPath se guarda recortado, se lee crudo y un override exclusivo no se des
   assert.equal(full.kbPath, "contexto/documentos");
   assert.equal(readRepoConfigFull(KB_KEY).kbPath, "contexto/documentos");
 });
+
+const { addRepoSkillAssociation } = await import("./repo-config.js");
+
+test("sanitizeEntry conserva referencias learned sin sourceRepo y sin duplicados", () => {
+  assert.deepEqual(
+    sanitizeEntry({ skills: [{ root: "learned", name: "migracion-reversible", sourceRepo: "acme-api" }, { root: "learned", name: "migracion-reversible" }, { root: "otra", name: "x" }] }).skills,
+    [{ root: "learned", name: "migracion-reversible" }],
+  );
+});
+
+test("addRepoSkillAssociation agrega la referencia conservando el resto del override y es idempotente", () => {
+  const base = {
+    workflow: null, vars: { DEV_URL: "http://localhost:3000" }, startCommand: "claude", setupCommand: "npm ci", kbPath: "docs/kb",
+    plannerModel: "", workerModel: "", usesDefaultWorkflow: true, skills: [{ root: "global" as const, name: "api-review" }],
+  };
+  const saved: Array<[string, any]> = [];
+  const io = {
+    read: () => base,
+    save: (repo: string, input: any) => { saved.push([repo, input]); return { ...base, skills: input.skills }; },
+  };
+  const result = addRepoSkillAssociation("acme-api", { root: "learned", name: "migracion-reversible" }, io);
+  assert.deepEqual(result.skills, [{ root: "global", name: "api-review" }, { root: "learned", name: "migracion-reversible" }]);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0][0], "acme-api");
+  assert.deepEqual(
+    { inheritWorkflow: saved[0][1].inheritWorkflow, vars: saved[0][1].vars, startCommand: saved[0][1].startCommand, setupCommand: saved[0][1].setupCommand, kbPath: saved[0][1].kbPath },
+    { inheritWorkflow: true, vars: { DEV_URL: "http://localhost:3000" }, startCommand: "claude", setupCommand: "npm ci", kbPath: "docs/kb" },
+  );
+  addRepoSkillAssociation("acme-api", { root: "global", name: "api-review" }, io);
+  assert.equal(saved.length, 1);
+});

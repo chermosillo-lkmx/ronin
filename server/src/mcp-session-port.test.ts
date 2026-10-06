@@ -260,3 +260,13 @@ test("status toma como question el último párrafo de Claude en un pane real co
     "Decision needed: should I relaunch the cycle on a new worktree of ant-liebre-api from origin/main and continue from the implementation stage?",
   );
 });
+
+test("reply con texto libre queda registrado; una opción de menú no", async () => {
+  const recorded: Array<[string, string]> = [];
+  const free = deps({ inventory: async () => [session({ attention: { level: "idle", paneId: "%7" } })], recordReply: (name, text) => { recorded.push([name, text]); } });
+  await createSessionPort(free.deps).reply("cowork-a", "usa make\0 test-unit");
+  const menu = deps({ inventory: async () => [menuSession()], recordReply: (name, text) => { recorded.push([name, text]); } }, { "%7": PERMISSION_MENU });
+  await createSessionPort(menu.deps).reply("cowork-a", "2");
+  assert.deepEqual(recorded, [["cowork-a", "usa make test-unit"]]);
+  assert.deepEqual(menu.sent, [["%7", "2", false]]);
+});

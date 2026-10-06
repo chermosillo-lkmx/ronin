@@ -34,6 +34,8 @@ function launchDeps(overrides: Partial<ManagedSessionLaunchDeps> = {}): ManagedS
     writeFlow: () => {},
     writeJsonAtomic: (file, value) => writes.set(file, value),
     readWrite: (file) => writes.get(file),
+    memoryBlockFor: () => "",
+    skillIndexFor: () => ({ text: "", skills: [] }),
     ...overrides,
   };
 }
@@ -264,4 +266,115 @@ test("origen de más de 200 caracteres se rechaza con ORIGIN_INVALID", () => {
     () => validateManagedSessionLaunch({ repo: "monorepo", workflowId: "wf-test", name: "cowork-x", origin: "a".repeat(201) }, { listRepos: () => ["monorepo"] }),
     (error: unknown) => error instanceof SessionLaunchError && error.code === "ORIGIN_INVALID",
   );
+});
+
+const BLOCK = "Memoria del repo monorepo (aprendizajes aprobados por el usuario; verifícalos si algo no cuadra):\n- [trampa] no expandas {repo} aquí";
+
+test("memoria: el bloque se antepone literal al prompt y queda en launch.json", async () => {
+  const delivered: string[] = [];
+  const deps = launchDeps({ memoryBlockFor: () => BLOCK, deliverPrompt: async (_session, prompt) => { delivered.push(prompt); } });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-memoria", request: "arregla el csv" }, deps);
+  const launch = deps.readWrite?.("/cycles/cowork-memoria/launch.json") as Record<string, unknown>;
+  assert.equal(launch.memory, BLOCK);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.length, 1);
+  assert.ok(delivered[0].startsWith(`${BLOCK}\n\n`));
+  assert.match(delivered[0], /no expandas \{repo\} aquí/);
+  assert.match(delivered[0], /arregla el csv/);
+});
+
+test("memoria: sin bloque no hay campo memory ni prefijo", async () => {
+  const delivered: string[] = [];
+  const deps = launchDeps({ memoryBlockFor: () => "", deliverPrompt: async (_session, prompt) => { delivered.push(prompt); } });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-memoria", request: "arregla el csv" }, deps);
+  const launch = deps.readWrite?.("/cycles/cowork-sin-memoria/launch.json") as Record<string, unknown>;
+  assert.equal("memory" in launch, false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered[0].startsWith("Memoria del repo"), false);
+});
+
+test("memoria: sin prompt que entregar (o en terminal) no se consulta, así que no suma usos", async () => {
+  let calls = 0;
+  const deps = launchDeps({
+    memoryBlockFor: () => { calls++; return BLOCK; },
+    deliverPrompt: async () => {},
+    findWorkflowCatalogItem: () => ({
+      id: "wf-test", name: "sin-inputs", updatedAt: 1,
+      config: { stages: [{ key: "plan", label: "Plan", icon: "P" }], verifyAfter: [] },
+    }),
+  });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-prompt" }, deps);
+  await launchManagedSession({ repo: "monorepo", name: "cowork-terminal-memoria", mode: "terminal", agent: "claude", request: "ignorada" }, deps);
+  assert.equal(calls, 0);
+  const launch = deps.readWrite?.("/cycles/cowork-sin-prompt/launch.json") as Record<string, unknown>;
+  assert.equal("memory" in launch, false);
+});
+
+test("memoria: si el bloque lanza, la sesión se lanza igual sin memoria y se registra el error", async () => {
+  const errors: unknown[] = [];
+  const delivered: string[] = [];
+  const deps = launchDeps({
+    memoryBlockFor: () => { throw new Error("EACCES"); },
+    deliverPrompt: async (_session, prompt) => { delivered.push(prompt); },
+    logError: (error) => { errors.push(error); },
+  });
+  const launched = await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-memoria-rota", request: "hazlo" }, deps);
+  assert.equal(launched.name, "cowork-memoria-rota");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].startsWith("Memoria del repo"), false);
+  assert.equal(errors.length, 1);
+});
+
+const INDEX = {
+  text: "Skills disponibles para monorepo (aprobadas por el usuario; lee el SKILL.md sólo si la tarea encaja):\n- migracion-reversible: Migra {repo}. → /datos/skills/learned/migracion-reversible/SKILL.md",
+  skills: [{ root: "learned", name: "migracion-reversible", hash: "sha256:abc" }],
+};
+
+test("skills: el índice va literal después de la memoria y queda en launch.json", async () => {
+  const delivered: string[] = [];
+  const deps = launchDeps({ memoryBlockFor: () => BLOCK, skillIndexFor: () => INDEX, deliverPrompt: async (_session, prompt) => { delivered.push(prompt); } });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-skills", request: "arregla el csv" }, deps);
+  const launch = deps.readWrite?.("/cycles/cowork-skills/launch.json") as Record<string, unknown>;
+  assert.deepEqual(launch.skills, INDEX.skills);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(delivered[0].startsWith(`${BLOCK}\n\n${INDEX.text}\n\n`));
+  assert.match(delivered[0], /Migra \{repo\}\./);
+  assert.match(delivered[0], /arregla el csv/);
+});
+
+test("skills: sin memoria el índice encabeza el prompt; sin índice no hay campo skills", async () => {
+  const delivered: string[] = [];
+  const withIndex = launchDeps({ skillIndexFor: () => INDEX, deliverPrompt: async (_session, prompt) => { delivered.push(prompt); } });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-solo-indice", request: "hazlo" }, withIndex);
+  const empty = launchDeps({ deliverPrompt: async (_session, prompt) => { delivered.push(prompt); } });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-indice", request: "hazlo" }, empty);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(delivered[0].startsWith(`${INDEX.text}\n\n`));
+  assert.equal(delivered[1].startsWith("Skills disponibles"), false);
+  assert.equal("skills" in (empty.readWrite?.("/cycles/cowork-sin-indice/launch.json") as Record<string, unknown>), false);
+});
+
+test("skills: sin prompt que entregar no se consulta el índice; si el índice lanza, la sesión arranca igual", async () => {
+  let calls = 0;
+  const quiet = launchDeps({
+    skillIndexFor: () => { calls++; return INDEX; },
+    deliverPrompt: async () => {},
+    findWorkflowCatalogItem: () => ({ id: "wf-test", name: "sin-inputs", updatedAt: 1, config: { stages: [{ key: "plan", label: "Plan", icon: "P" }], verifyAfter: [] } }),
+  });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-sin-prompt-skills" }, quiet);
+  await launchManagedSession({ repo: "monorepo", name: "cowork-terminal-skills", mode: "terminal", agent: "claude", request: "ignorada" }, quiet);
+  assert.equal(calls, 0);
+
+  const errors: unknown[] = [];
+  const delivered: string[] = [];
+  const broken = launchDeps({
+    skillIndexFor: () => { throw new Error("EACCES"); },
+    deliverPrompt: async (_session, prompt) => { delivered.push(prompt); },
+    logError: (error) => { errors.push(error); },
+  });
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-indice-roto", request: "hazlo" }, broken);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.length, 1);
+  assert.equal(errors.length, 1);
 });

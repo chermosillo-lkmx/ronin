@@ -23,6 +23,13 @@ const FIXTURE: SettingsScreenData = {
     "con-kb": { exists: true, relativePath: "knowledge-base", files: 28, bytes: 1887436, candidates: [] },
     "sin-kb": { exists: false, relativePath: "", files: 0, bytes: 0, candidates: ["kb"] },
   },
+  memories: {
+    "con-kb": {
+      repo: "con-kb", enabled: true, globalEnabled: true, kbSuggestions: [],
+      entries: [{ id: "m_2", text: "El puerto 5432 lo ocupa docker", kind: "trampa", source: "cowork-csv-retry", createdAt: 2, updatedAt: 2, status: "pending", uses: 0 }],
+      preview: { text: "", bytes: 0, maxBytes: 2048, omitted: 0 },
+    },
+  },
 };
 
 test("SettingsScreen lista estados de KB y cambia la acción principal por repositorio", () => {
@@ -50,4 +57,19 @@ test("DesktopApp declara la vista settings y su acceso en el rail", () => {
   assert.match(source, /\| "settings"/);
   assert.match(source, /label="Configuración"/);
   assert.match(source, /view === "settings" && <SettingsScreen/);
+});
+
+test("SettingsScreen muestra la sección Memoria de cada repo junto a su KB, con sus pendientes", () => {
+  const html = renderToString(createElement(SettingsScreen, { initial: FIXTURE }));
+  assert.match(html, /🧠 Memoria · 1 pendiente</);
+  assert.match(html, /Esto recibe cada sesión nueva/);
+  assert.match(html, /Cargando memoria…/);
+});
+
+test("SettingsScreen muestra el interruptor Aprender skills de cada repo junto a Memoria", () => {
+  const html = renderToString(createElement(SettingsScreen, {
+    initial: { ...FIXTURE, skillLearning: { "con-kb": { repo: "con-kb", enabled: false, globalEnabled: true } } },
+  }));
+  assert.equal((html.match(/🧩 Aprender skills/g) ?? []).length, 2);
+  assert.match(html, /🧠 Memoria · 1 pendiente<\/summary>[\s\S]*🧩 Aprender skills/);
 });

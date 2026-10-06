@@ -34,3 +34,31 @@ html:has(.ronin-desktop), body:has(.ronin-desktop), #root:has(.ronin-desktop) { 
 .ronin-session-entry { position: relative; }.ronin-session-entry .ronin-session-row { margin-bottom: 2px; padding-right: 30px; }.ronin-session-edit { position: absolute; top: 6px; right: 5px; width: 23px; height: 23px; border: 0; border-radius: var(--radius-sm); color: var(--color-neutral-500); background: transparent; font: 16px/1 ui-monospace, monospace; cursor: pointer; opacity: 0; }.ronin-session-entry:hover .ronin-session-edit,.ronin-session-row.selected + .ronin-session-edit,.ronin-session-edit:focus-visible { opacity: 1; }.ronin-session-edit:hover { color: var(--color-accent-200); background: var(--color-accent-800); }.ronin-add-repo { align-self: flex-start; margin-top: -4px; font-size: 11px; }
 .ronin-view-error { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 28px; }.ronin-view-error h2 { margin: 0; font-size: 16px; }.ronin-view-error p { margin: 0; color: var(--color-neutral-500); font-size: 12px; }.ronin-view-error code { max-width: 100%; padding: 8px 10px; border-radius: var(--radius-md); color: var(--status-fail); background: color-mix(in srgb, var(--status-fail) 10%, transparent); font: 11px ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
 .ronin-pane-list button[data-active="true"] code { color: var(--status-ok); }.ronin-pane-active { color: var(--status-ok); font-weight: 500; }
+.ronin-memory-badge { margin-left: 4px; color: var(--color-accent); white-space: nowrap; }
+.ron-distill { display: grid; gap: 6px; margin: 12px 0; }
+.ron-distill-status { margin: 0; }
+.ron-distill-status.failed { color: var(--status-warn); }
+.ron-skills-tabs { display: flex; gap: 4px; padding: 6px 16px; border-bottom: 1px solid var(--color-divider); }
+.ron-skills-tabs button { border: 1px solid transparent; border-radius: var(--radius-md); padding: 4px 10px; color: var(--color-neutral-400); background: transparent; cursor: pointer; }
+.ron-skills-tabs button.on { border-color: var(--color-accent-600); color: var(--color-text); background: var(--color-accent-900); }
+.ron-skill-proposals { min-height: 0; flex: 1; display: flex; }
+.ron-skill-proposal { min-height: 0; flex: 1; display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; overflow: auto; }
+.ron-skill-proposal header h2 { margin: 4px 0; font: 16px ui-monospace, monospace; }
+.ron-skill-proposal header p, .ron-skill-proposal footer small, .ron-skill-empty, .ron-skill-note { margin: 0; color: var(--color-neutral-500); }
+.ron-skill-warnings { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.ron-skill-warning { color: var(--status-warn); font-size: 12px; }
+.ron-skill-raw { min-height: 160px; max-height: 50vh; margin: 0; overflow: auto; border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--color-neutral-300); background: #10121d; font: 12px/1.55 ui-monospace, monospace; }
+textarea.ron-skill-raw { resize: vertical; }
+.ron-skill-diff { max-height: 30vh; margin: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px 12px; border-radius: var(--radius-md); background: #10121d; font: 11px/1.5 ui-monospace, monospace; }
+.ron-skill-diff .add { color: var(--status-ok); }
+.ron-skill-diff .del { color: var(--status-fail); }
+.ron-skill-diff .hunk { color: var(--color-accent); }
+.ron-skill-diff .meta, .ron-skill-diff .ctx { color: var(--color-neutral-500); }
+.ron-skill-proposal footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ronin-skill-review { margin-left: 6px; color: var(--status-warn); font-size: 10px; }
+.ronin-skill-review-note { color: var(--status-warn); }
+.ronin-rail-button { position: relative; }
+.ronin-rail-badge { position: absolute; top: -3px; right: -8px; padding: 0 3px; border-radius: 6px; color: var(--color-accent); background: var(--color-surface); font: 9px/14px ui-monospace, monospace; white-space: nowrap; }
+.ronin-skills-badge { margin-left: 4px; color: var(--color-accent); font-size: 11px; }
+.ron-skill-learning { display: grid; gap: 4px; padding-top: var(--space-2); }
+.ron-skill-learning small { color: var(--color-neutral-500); }

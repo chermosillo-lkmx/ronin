@@ -15,6 +15,7 @@ import {
   modelSwitched,
   modelSwitchFailed,
   parseParkedLimit,
+  readCycleRepo,
   readDriverInfo,
   readModelsInfo,
   readSentinelsTail,
@@ -260,5 +261,22 @@ test("lastSentinelAt: mtime del sentinel de etapa más reciente, null si no hay 
     assert.ok(at! <= Date.now() + 1000);
   } finally {
     rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("readCycleRepo lee el repo de launch.json y, si falta o está roto, de adopted.json", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-cycle-repo-"));
+  try {
+    assert.equal(readCycleRepo(dir), null);
+    writeFileSync(join(dir, "adopted.json"), JSON.stringify({ repo: "acme-web" }));
+    assert.equal(readCycleRepo(dir), "acme-web");
+    writeFileSync(join(dir, "launch.json"), JSON.stringify({ repo: "acme-api" }));
+    assert.equal(readCycleRepo(dir), "acme-api");
+    writeFileSync(join(dir, "launch.json"), "{roto");
+    assert.equal(readCycleRepo(dir), "acme-web");
+    writeFileSync(join(dir, "launch.json"), JSON.stringify({ repo: "" }));
+    assert.equal(readCycleRepo(dir), "acme-web");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

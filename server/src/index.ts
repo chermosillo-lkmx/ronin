@@ -5,7 +5,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { PORT, REPORT_SCHEDULE, VERIFY_GATE } from "./config.js";
+import { LEARNED_SKILLS, MEMORY, PORT, REPORT_SCHEDULE, VERIFY_GATE } from "./config.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
 import { AdoptCommitError, AdoptValidationError, type AdoptErrorCode } from "./adopt.js";
 import {
@@ -26,10 +26,13 @@ import {
 } from "./tmux.js";
 import { classifySession } from "./sessions.js";
 import { isSafeSessionName } from "./session-name.js";
-import { readHistory, recordEvent } from "./history.js";
+import { isReplyText, readHistory, recordEvent, recordReply } from "./history.js";
 import { generateReport, listReports, readReport, BadRequest } from "./reports.js";
 import { startReportSchedule } from "./report-schedule.js";
-import { cycleDirForSession } from "./stages.js";
+import { cycleDirForSession, readCycleRepo } from "./stages.js";
+import { attachSessionMemory, attachSessionSkills, createSessionInfoReader, getDefaultDistiller, sessionRepo, startMemoryDistiller, type Distiller } from "./memory-distiller.js";
+import { decorateSkillSummaries, defaultLearnedSkillStore, LearnedSkillError, type LearnedSkillStore } from "./learned-skills.js";
+import { defaultMemoryStore, MemoryError, memoryView, type MemoryStore, type RepoMemory } from "./memory.js";
 import { realVerifyDriverDeps } from "./verify-driver-deps.js";
 import { startVerifyDriver } from "./verify-driver.js";
 import { startTtyd } from "./ttyd.js";
@@ -55,6 +58,8 @@ import { createTestHarnessService, HarnessError, type TestHarnessService } from 
 import { handleMcp } from "./mcp.js";
 import { createSessionPort } from "./mcp-session-port.js";
 import type { McpSessionPort } from "./mcp-sessions.js";
+import { createMemoryPort, type McpMemoryPort } from "./mcp-memory.js";
+import { createSkillPort, type McpSkillPort } from "./mcp-skills.js";
 import { withMcpConfig, writeAgentMcpConfig } from "./agent-mcp.js";
 import { runClaudeP } from "./claude-p.js";
 import { createAnalyzer, type Analyzer } from "./workflow-insights/analyzer.js";
@@ -144,6 +149,24 @@ export interface CreateAppOptions {
   readTmuxInventory?: typeof readTmuxInventory;
   /** Puerto de sesiones para /mcp; en producción se construye con las dependencias reales. */
   mcpSessions?: McpSessionPort;
+  /** Puerto de memoria para /mcp; en producción usa el store real. */
+  mcpMemory?: McpMemoryPort;
+  /** Puerto de skills aprendidas para /mcp; en producción usa el store real. */
+  mcpSkills?: McpSkillPort;
+  /** Registro de respuestas del usuario (evento reply); las pruebas lo espían en vez de escribir history.jsonl. */
+  recordReply?: (session: string, text: string) => void;
+  /** Costuras de la memoria por repo para pruebas HTTP con un store temporal y un destilador falso. */
+  memory?: {
+    store?: MemoryStore;
+    distiller?: Distiller;
+    globalEnabled?: boolean;
+    repoOf?: (session: string) => string | null;
+  };
+  /** Costuras de las skills aprendidas para pruebas HTTP con un store temporal. */
+  skills?: {
+    store?: LearnedSkillStore;
+    globalEnabled?: boolean;
+  };
   /** Costuras de las rutas KB para pruebas HTTP con un repositorio temporal. */
   kb?: {
     listRepos?: typeof listRepos;
@@ -165,6 +188,17 @@ export function runConfiguredClaude(
   run: typeof runClaudeP = runClaudeP,
 ): (prompt: string) => Promise<string> {
   return (prompt) => run(prompt, { timeoutMs: 300_000, maxBytes: 256 * 1024, ...engineInvocation(read()) });
+}
+
+/** Registra una respuesta con el repo del ciclo, si se conoce. Un nombre inseguro se registra sin repo. */
+function recordSessionReplyDefault(session: string, text: string): void {
+  let repo = "";
+  try {
+    repo = readCycleRepo(cycleDirForSession(session)) ?? "";
+  } catch {
+    /* cycleDirForSession rechaza nombres inseguros: sin repo, pero la respuesta se conserva */
+  }
+  recordReply(session, text, repo);
 }
 
 export function createApp(options: CreateAppOptions = {}): express.Express {
@@ -196,6 +230,7 @@ const sessionActions = {
 };
 const performLaunchManagedSession = options.launchManagedSession ?? launchManagedSession;
 const readInventory = options.readTmuxInventory ?? readTmuxInventory;
+const recordSessionReply = options.recordReply ?? recordSessionReplyDefault;
 const trustedRootsApi = options.trustedRoots ?? {
   read: () => ({ roots: trustedRoots(), source: process.env.COWORK_ALLOWED_ROOTS !== undefined ? "env" as const : "settings" as const }),
   save: (input: unknown) => {
@@ -216,6 +251,17 @@ const kbApi = {
   temporaryDirectory: options.kb?.temporaryDirectory ?? tmpdir,
   now: options.kb?.now ?? (() => new Date()),
 };
+// Perezoso: ni el store ni el destilador de producción se construyen hasta que una ruta los usa.
+const memoryApi = {
+  store: (): MemoryStore => options.memory?.store ?? defaultMemoryStore(),
+  distiller: (): Distiller => options.memory?.distiller ?? getDefaultDistiller(),
+  globalEnabled: options.memory?.globalEnabled ?? MEMORY,
+  repoOf: options.memory?.repoOf ?? sessionRepo,
+};
+const skillsApi = {
+  store: (): LearnedSkillStore => options.skills?.store ?? defaultLearnedSkillStore(),
+  globalEnabled: options.skills?.globalEnabled ?? LEARNED_SKILLS,
+};
 app.use(cors(corsOptions));
 // Los tres guards van ANTES de express.json(): no hay razón para parsear el cuerpo de una
 // petición que vamos a rechazar. Cubren TODO /api, incluidos sus OPTIONS.
@@ -235,11 +281,14 @@ const mcpSessions = options.mcpSessions ?? createSessionPort({
   deliver: (paneId, text, submit) => deliverText(paneId, text, submit),
   capture: (paneIds) => capturePanesTail(paneIds),
   now: () => Date.now(),
+  recordReply: recordSessionReply,
 });
+const mcpMemory = options.mcpMemory ?? createMemoryPort(memoryApi.store());
+const mcpSkills = options.mcpSkills ?? createSkillPort(skillsApi.store());
 app.post("/mcp", async (req, res) => {
   // Los agentes que lanza Ronin usan /mcp?scope=agent (agent-mcp.ts): sin puerto de sesiones, así
   // un worker no puede crear sesiones ni escribir en otras. Los clientes externos no cambian.
-  const deps = req.query.scope === "agent" ? { harness, scope: "agent" as const } : { harness, sessions: mcpSessions };
+  const deps = req.query.scope === "agent" ? { harness, scope: "agent" as const } : { harness, sessions: mcpSessions, memory: mcpMemory, skills: mcpSkills };
   const response = await handleMcp(req.body, deps);
   if (response === null) return void res.status(202).end();
   res.json(response);
@@ -344,6 +393,62 @@ app.post("/api/repos/:repo/kb/zip", requireKbCapability, async (req, res) => {
   }
 });
 
+// ---- Memoria por repo (spec §7). Misma seguridad que la KB: capability también en GET. ----
+function respondMemoryError(res: express.Response, error: unknown): void {
+  if (error instanceof MemoryError) {
+    res.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  res.status(500).json({ error: "no se pudo guardar la memoria del repo", code: "MEMORY_FAILED" });
+}
+
+function memoryRoute(handler: (req: express.Request) => RepoMemory) {
+  return (req: express.Request, res: express.Response): void => {
+    try {
+      res.json(memoryView(handler(req), memoryApi.globalEnabled));
+    } catch (error) {
+      respondMemoryError(res, error);
+    }
+  };
+}
+
+app.get("/api/repos/:repo/memory", requireKbCapability, memoryRoute((req) => memoryApi.store().read(req.params.repo)));
+app.put("/api/repos/:repo/memory/enabled", requireKbCapability, memoryRoute((req) => memoryApi.store().setEnabled(req.params.repo, req.body?.enabled)));
+app.post("/api/repos/:repo/memory", requireKbCapability, memoryRoute((req) => memoryApi.store().add(req.params.repo, req.body)));
+app.patch("/api/repos/:repo/memory/:id", requireKbCapability, memoryRoute((req) => memoryApi.store().resolve(req.params.repo, req.params.id, req.body?.action, req.body?.text)));
+app.delete("/api/repos/:repo/memory/:id", requireKbCapability, memoryRoute((req) => memoryApi.store().remove(req.params.repo, req.params.id)));
+
+// ---- Skills aprendidas (spec skills aprendidas §7). Capability también en GET: el texto sale de la evidencia. ----
+function respondLearnedError(res: express.Response, error: unknown): void {
+  if (error instanceof LearnedSkillError) {
+    res.status(error.status).json({ error: error.message, code: error.code, ...(error.reasons.length ? { reasons: error.reasons } : {}) });
+    return;
+  }
+  res.status(500).json({ error: "no se pudo operar la skill aprendida", code: "SKILL_FAILED" });
+}
+
+function learnedRoute(handler: (req: express.Request) => unknown) {
+  return (req: express.Request, res: express.Response): void => {
+    try {
+      res.json(handler(req));
+    } catch (error) {
+      respondLearnedError(res, error);
+    }
+  };
+}
+
+app.get("/api/repos/:repo/skills/learning", requireKbCapability, learnedRoute((req) => ({ ...skillsApi.store().learning(req.params.repo), globalEnabled: skillsApi.globalEnabled })));
+app.put("/api/repos/:repo/skills/learning", requireKbCapability, learnedRoute((req) => ({ ...skillsApi.store().setLearning(req.params.repo, req.body?.enabled), globalEnabled: skillsApi.globalEnabled })));
+app.get("/api/skills/proposals", requireKbCapability, learnedRoute((req) => {
+  const repo = typeof req.query.repo === "string" && req.query.repo ? req.query.repo : undefined;
+  return { proposals: skillsApi.store().pending(repo) };
+}));
+app.get("/api/skills/proposals/:id", requireKbCapability, learnedRoute((req) => skillsApi.store().detail(req.params.id)));
+app.patch("/api/skills/proposals/:id", requireKbCapability, learnedRoute((req) => skillsApi.store().resolve(req.params.id, req.body?.action, {
+  contentHash: req.body?.contentHash,
+  content: req.body?.content,
+})));
+
 // Read / edit the repo→folder map (data/repos.json) from the settings UI
 app.get("/api/repos-config", (_req, res) => {
   res.json(readRepoConfig());
@@ -398,7 +503,7 @@ app.post("/api/repo-config/:repo/validate", (req, res) => {
 
 function skillRefFromRequest(source: Record<string, unknown>) {
   return {
-    root: source.root as "global" | "repo-claude" | "repo-skills" | undefined,
+    root: source.root as "global" | "learned" | "repo-claude" | "repo-skills" | undefined,
     name: typeof source.name === "string" ? source.name : undefined,
     sourceRepo: typeof source.sourceRepo === "string" ? source.sourceRepo : undefined,
   };
@@ -411,7 +516,7 @@ function respondSkillError(res: express.Response, error: unknown): void {
 // Local SKILL.md discovery/editor. Each reference includes its root (and sourceRepo for
 // repository roots), so identical skill names never resolve ambiguously.
 app.get("/api/skills", (_req, res) => {
-  res.json({ skills: listSkills(listRepos()) });
+  res.json({ skills: decorateSkillSummaries(listSkills(listRepos()), skillsApi.store()) });
 });
 app.get("/api/skills/read", (req, res) => {
   try { res.json(readSkill(skillRefFromRequest(req.query))); }
@@ -422,7 +527,19 @@ app.post("/api/skills", (req, res) => {
   catch (e) { respondSkillError(res, e); }
 });
 app.put("/api/skills", (req, res) => {
-  try { res.json(updateSkill(skillRefFromRequest(req.body ?? {}), String(req.body?.content ?? ""))); }
+  const ref = skillRefFromRequest(req.body ?? {});
+  if (ref.root === "learned") {
+    // Una learned pasa por los mismos validadores que una propuesta y queda con versión y hash nuevos.
+    try {
+      skillsApi.store().saveEdited(String(ref.name ?? ""), req.body?.content);
+      res.json(readSkill(ref));
+    } catch (e) {
+      if (e instanceof LearnedSkillError) respondLearnedError(res, e);
+      else respondSkillError(res, e);
+    }
+    return;
+  }
+  try { res.json(updateSkill(ref, String(req.body?.content ?? ""))); }
   catch (e) { respondSkillError(res, e); }
 });
 app.get("/api/skills/archive", async (req, res) => {
@@ -612,11 +729,15 @@ app.post("/api/prompts/:key/reset", (req, res) => {
 app.get("/api/sessions", async (_req, res) => {
   const inventory = await readInventory();
   const presentations = sessionPresentations.list(inventory.sessions.map((session) => session.name));
+  const sessions = inventory.sessions.map((session) => presentations[session.name]
+    ? { ...session, presentation: presentations[session.name] }
+    : session);
+  // Una vista por petición: state.json se lee una vez para memoria y skill, y los pendientes, una vez por repo.
+  const info = createSessionInfoReader({ store: memoryApi.store(), distiller: memoryApi.distiller(), repoOf: memoryApi.repoOf });
+  const withMemory = attachSessionMemory(sessions, info.memory);
   res.json({
     ...inventory,
-    sessions: inventory.sessions.map((session) => presentations[session.name]
-      ? { ...session, presentation: presentations[session.name] }
-      : session),
+    sessions: attachSessionSkills(withMemory, info.skill),
   });
 });
 
@@ -701,6 +822,32 @@ app.post("/api/sessions/:name/attach", async (req, res) => {
   if (!(await terminal.hasSession(name))) return res.status(404).json({ error: "sesión no encontrada", code: "SESSION_NOT_FOUND" });
   await terminal.openTerminal(name);
   res.json({ ok: true });
+});
+
+// Destilar (o reintentar) a mano. Corre en segundo plano: 202 con el estado; el inspector lo sondea
+// por GET /api/sessions.
+app.post("/api/sessions/:name/distill", (req, res) => {
+  const { name } = req.params;
+  if (!isSafeSessionName(name)) return res.status(400).json({ error: "nombre de sesión inválido", code: "INVALID_SESSION" });
+  const distiller = memoryApi.distiller();
+  const outcome = distiller.request(name, "manual");
+  if (outcome === "unknown") return res.status(404).json({ error: "la sesión no tiene un ciclo con un repo configurado", code: "SESSION_NOT_FOUND" });
+  if (outcome === "busy") return res.status(409).json({ error: "ya hay una destilación en curso para esta sesión", code: "DISTILL_RUNNING" });
+  res.status(202).json(distiller.stateOf(name));
+});
+
+// Proponer (o reintentar) una skill a mano: salta el triaje y el requisito de verifyCmd, pero exige el
+// flujo completo. Corre en segundo plano en la misma cola por repo; el inspector sondea /api/sessions.
+app.post("/api/sessions/:name/skill", (req, res) => {
+  const { name } = req.params;
+  if (!isSafeSessionName(name)) return res.status(400).json({ error: "nombre de sesión inválido", code: "INVALID_SESSION" });
+  const distiller = memoryApi.distiller();
+  const outcome = distiller.requestSkill(name);
+  if (outcome === "unknown") return res.status(404).json({ error: "la sesión no tiene un ciclo con un repo configurado", code: "SESSION_NOT_FOUND" });
+  if (outcome === "busy") return res.status(409).json({ error: "ya hay una destilación o una propuesta en curso para esta sesión", code: "SKILL_RUNNING" });
+  if (outcome === "incomplete") return res.status(409).json({ error: "el flujo de la sesión todavía no termina", code: "SKILL_FLOW_INCOMPLETE" });
+  if (outcome === "disabled") return res.status(409).json({ error: "el aprendizaje de skills está apagado en este equipo (COWORK_LEARNED_SKILLS=0)", code: "SKILL_LEARNING_DISABLED" });
+  res.status(202).json(distiller.skillStateOf(name));
 });
 
 // La etiqueta es metadata local: título y repo para operar la lista, sin `rename-session`.
@@ -829,6 +976,7 @@ app.post("/api/sessions/:name/panes/:paneId/keys", async (req, res) => {
   if (membership === "gone") return res.status(409).json({ error: "el pane ya no existe", code: "PANE_GONE" });
   const submit = req.body?.submit === true;
   await deliverText(paneId, text, submit);
+  if (isReplyText(text, submit)) recordSessionReply(name, text);
   res.json({ ok: true });
 });
 
@@ -1070,6 +1218,11 @@ async function startDefaultBackground(): Promise<Cleanup> {
     if (VERIFY_GATE) {
       const verifyDriver = startVerifyDriver(realVerifyDriverDeps);
       cleanups.push(() => verifyDriver.stop());
+    }
+    // El barrido sirve a la memoria y al triaje de skills: corre si cualquiera de los dos está activo.
+    if (MEMORY || LEARNED_SKILLS) {
+      const memoryDistiller = startMemoryDistiller(getDefaultDistiller());
+      cleanups.push(() => memoryDistiller.stop());
     }
   } catch (error) {
     await Promise.allSettled(cleanups.reverse().map((cleanup) => cleanup()));

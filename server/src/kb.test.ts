@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { KB_CANDIDATES, generateKb, readKbGenerationState, resolveKbDir, scanKb, zipKb } from "./kb.js";
+import { KB_CANDIDATES, generateKb, kbSuggestionsBlock, readKbGenerationState, resolveKbDir, scanKb, zipKb } from "./kb.js";
+import { createMemoryStore } from "./memory.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "ronin-kb-"));
@@ -150,6 +151,113 @@ test("generateKb marca failed con la cola de salida y nunca propaga un fallo del
     assert.match(result?.output ?? "", /cola de salida relevante/);
     assert.equal(readKbGenerationState("api", { statePath })?.status, "failed");
   } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+const SUGGESTIONS = [{ id: "k_1", text: "El importador CSV vive en src/csv", source: "cowork-csv", createdAt: 1 }];
+const SUGGESTIONS_TEXT = "\n\nSugerencias de sesiones recientes: verifícalas contra el código y, si son ciertas, incorpóralas con su cita:\n- El importador CSV vive en src/csv";
+
+function kbDeps(root: string, stateDirectory: string) {
+  return {
+    resolveCwd: () => ({ cwd: root, real: true }),
+    readRepoConfigFull: () => ({ kbPath: "" }),
+    statePath: (repo: string) => join(stateDirectory, `${repo}.json`),
+  };
+}
+
+test("kbSuggestionsBlock arma el texto del spec y queda vacío sin sugerencias", () => {
+  assert.equal(kbSuggestionsBlock([]), "");
+  assert.equal(kbSuggestionsBlock(SUGGESTIONS), SUGGESTIONS_TEXT);
+});
+
+test("generateKb incluye las sugerencias en {kbSuggestions} y las borra sólo si termina ok", async () => {
+  const { root, cleanup } = fixture();
+  const stateDirectory = mkdtempSync(join(tmpdir(), "ronin-kb-state-"));
+  const dropped: Array<[string, string[]]> = [];
+  const base = {
+    ...kbDeps(root, stateDirectory),
+    getPromptTemplate: () => "KB de {repo}.{kbSuggestions}",
+    readKbSuggestions: () => SUGGESTIONS,
+    dropKbSuggestions: (repo: string, ids: string[]) => { dropped.push([repo, ids]); },
+  };
+  try {
+    let prompt = "";
+    const failed = await generateKb("acme-api", { ...base, runClaudeP: async (input) => { prompt = input; throw new Error("falló el motor"); } });
+    assert.equal(failed.status, "failed");
+    assert.equal(prompt, `KB de acme-api.${SUGGESTIONS_TEXT}`);
+    assert.deepEqual(dropped, []);
+    const ok = await generateKb("acme-api", { ...base, runClaudeP: async () => "listo" });
+    assert.equal(ok.status, "ok");
+    assert.deepEqual(dropped, [["acme-api", ["k_1"]]]);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("generateKb sin sugerencias deja {kbSuggestions} vacío y no borra nada", async () => {
+  const { root, cleanup } = fixture();
+  const stateDirectory = mkdtempSync(join(tmpdir(), "ronin-kb-state-"));
+  let dropCalls = 0;
+  let prompt = "";
+  try {
+    await generateKb("acme-api", {
+      ...kbDeps(root, stateDirectory),
+      getPromptTemplate: () => "KB de {repo}.{kbSuggestions}",
+      readKbSuggestions: () => [],
+      dropKbSuggestions: () => { dropCalls++; },
+      runClaudeP: async (input) => { prompt = input; return "listo"; },
+    });
+    assert.equal(prompt, "KB de acme-api.");
+    assert.equal(dropCalls, 0);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("un override de kb sin {kbSuggestions} igual recibe las sugerencias al final", async () => {
+  const { root, cleanup } = fixture();
+  const stateDirectory = mkdtempSync(join(tmpdir(), "ronin-kb-state-"));
+  let prompt = "";
+  try {
+    await generateKb("acme-api", {
+      ...kbDeps(root, stateDirectory),
+      getPromptTemplate: () => "KB personalizada de {repo}",
+      readKbSuggestions: () => SUGGESTIONS,
+      dropKbSuggestions: () => {},
+      runClaudeP: async (input) => { prompt = input; return "listo"; },
+    });
+    assert.equal(prompt, `KB personalizada de acme-api${SUGGESTIONS_TEXT}`);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("las sugerencias que llegan durante la generación sobreviven: sólo se borran las usadas", async () => {
+  const { root, cleanup } = fixture();
+  const stateDirectory = mkdtempSync(join(tmpdir(), "ronin-kb-state-"));
+  const memoryDirectory = mkdtempSync(join(tmpdir(), "ronin-kb-memory-"));
+  const store = createMemoryStore({ directory: memoryDirectory, listRepos: () => ["acme-api"] });
+  try {
+    store.add("acme-api", { text: "El importador CSV vive en src/csv", kind: "arquitectura" });
+    const result = await generateKb("acme-api", {
+      ...kbDeps(root, stateDirectory),
+      getPromptTemplate: () => "KB de {repo}.{kbSuggestions}",
+      readKbSuggestions: (repo) => store.read(repo).kbSuggestions,
+      dropKbSuggestions: (repo, ids) => store.dropKbSuggestions(repo, ids),
+      runClaudeP: async () => {
+        store.add("acme-api", { text: "La cola de reintentos usa Redis", kind: "arquitectura" });
+        return "listo";
+      },
+    });
+    assert.equal(result.status, "ok");
+    assert.deepEqual(store.read("acme-api").kbSuggestions.map((s) => s.text), ["La cola de reintentos usa Redis"]);
+  } finally {
+    rmSync(memoryDirectory, { recursive: true, force: true });
     rmSync(stateDirectory, { recursive: true, force: true });
     cleanup();
   }

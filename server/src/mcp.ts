@@ -1,6 +1,8 @@
 import { HarnessError, type TestHarnessService } from "./test-harness/service.js";
 import { isSuite, type Coverage, type Run, type TestSuite } from "./test-harness/model.js";
 import { callSessionTool, isSessionTool, McpToolError, SESSION_TOOLS, type McpSessionPort } from "./mcp-sessions.js";
+import { callMemoryTool, isMemoryTool, MEMORY_TOOLS, type McpMemoryPort } from "./mcp-memory.js";
+import { callSkillTool, isSkillTool, SKILL_TOOLS, type McpSkillPort } from "./mcp-skills.js";
 
 export const MCP_SERVER_VERSION = "0.1.0";
 
@@ -10,7 +12,11 @@ type JsonRpcId = string | number | null;
 export interface McpDependencies {
   harness: TestHarnessService;
   sessions?: McpSessionPort;
-  /** "agent": cliente lanzado por Ronin; sólo ve las herramientas de pruebas, nunca las de sesión. */
+  /** Aprobación de memoria desde clientes externos; nunca se entrega con scope "agent". */
+  memory?: McpMemoryPort;
+  /** Aprobación de skills aprendidas desde clientes externos; nunca se entrega con scope "agent". */
+  skills?: McpSkillPort;
+  /** "agent": cliente lanzado por Ronin; sólo ve las herramientas de pruebas, nunca las de sesión, memoria ni skills. */
   scope?: "agent";
   version?: string;
 }
@@ -68,7 +74,7 @@ const TEST_TOOLS = [
     inputSchema: STATUS_SCHEMA,
   },
 ] as const;
-export const MCP_TOOLS = [...TEST_TOOLS, ...SESSION_TOOLS];
+export const MCP_TOOLS = [...TEST_TOOLS, ...SESSION_TOOLS, ...MEMORY_TOOLS, ...SKILL_TOOLS];
 
 function requiredString(args: JsonRecord, key: string): string {
   const value = args[key];
@@ -180,6 +186,14 @@ export async function handleMcp(message: unknown, deps: McpDependencies): Promis
     if (isSessionTool(name)) {
       if (!deps.sessions || agentScope) return { jsonrpc: "2.0", id, result: toolResult("Ronin no tiene habilitadas las herramientas de sesión", true) };
       return { jsonrpc: "2.0", id, result: toolResult(await callSessionTool(name, args, deps.sessions)) };
+    }
+    if (isMemoryTool(name)) {
+      if (!deps.memory || agentScope) return { jsonrpc: "2.0", id, result: toolResult("Ronin no tiene habilitadas las herramientas de memoria", true) };
+      return { jsonrpc: "2.0", id, result: toolResult(await callMemoryTool(name, args, deps.memory)) };
+    }
+    if (isSkillTool(name)) {
+      if (!deps.skills || agentScope) return { jsonrpc: "2.0", id, result: toolResult("Ronin no tiene habilitadas las herramientas de skills", true) };
+      return { jsonrpc: "2.0", id, result: toolResult(await callSkillTool(name, args, deps.skills)) };
     }
     return { jsonrpc: "2.0", id, result: toolResult(`Herramienta desconocida: ${name}. Usa tools/list para ver las disponibles.`, true) };
   } catch (error) {

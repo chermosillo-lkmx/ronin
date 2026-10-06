@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { generateRepoKnowledgeBase, getEngine, getPreflight, getRepoConfig, getRepoKnowledgeBase, getRepoKnowledgeBaseGeneration, getReposConfig, saveEngine, saveRepoKnowledgeBasePath, saveReposConfig, zipRepoKnowledgeBase } from "../api";
-import type { EngineChoice, EngineTool, KnowledgeBaseGeneration, KnowledgeBaseInfo, PreflightCheck, RepoOverrideConfig, ReposConfig } from "../types";
+import { generateRepoKnowledgeBase, getEngine, getPreflight, getRepoConfig, getRepoKnowledgeBase, getRepoKnowledgeBaseGeneration, getRepoMemory, getReposConfig, saveEngine, saveRepoKnowledgeBasePath, saveReposConfig, zipRepoKnowledgeBase } from "../api";
+import { RepoMemoryDetails } from "../components/RepoMemory";
+import { RepoSkillLearningToggle } from "../components/RepoSkillLearning";
+import type { EngineChoice, EngineTool, KnowledgeBaseGeneration, KnowledgeBaseInfo, PreflightCheck, RepoMemoryView, RepoOverrideConfig, ReposConfig, SkillLearningView } from "../types";
 
 const TOOLS: Array<{ tool: EngineTool; letter: string }> = [
   { tool: "claude", letter: "C" }, { tool: "codex", letter: "X" }, { tool: "agy", letter: "A" },
@@ -11,6 +13,9 @@ export interface SettingsScreenData {
   engine: EngineChoice;
   checks: PreflightCheck[];
   knowledgeBases: Record<string, KnowledgeBaseInfo>;
+  memories?: Record<string, RepoMemoryView>;
+  /** Sólo para pruebas SSR; sin esto cada interruptor se carga solo. */
+  skillLearning?: Record<string, SkillLearningView>;
 }
 
 type Editor = { mode: "new" | "edit"; key: string; path: string; kbPath: string; scan: KnowledgeBaseInfo | null; creating: boolean };
@@ -39,13 +44,15 @@ export function SettingsScreen({ initial }: { initial?: SettingsScreenData }) {
   const [checks, setChecks] = useState(initial?.checks ?? []);
   const [knowledgeBases, setKnowledgeBases] = useState(initial?.knowledgeBases ?? {});
   const [generations, setGenerations] = useState<Record<string, KnowledgeBaseGeneration | null>>({});
+  const [memories, setMemories] = useState<Record<string, RepoMemoryView | null>>(initial?.memories ?? {});
   const [note, setNote] = useState("");
   const [editor, setEditor] = useState<Editor | null>(null);
 
   const loadKb = async (repo: string) => {
-    const [kb, generation] = await Promise.all([getRepoKnowledgeBase(repo), getRepoKnowledgeBaseGeneration(repo)]);
+    const [kb, generation, memory] = await Promise.all([getRepoKnowledgeBase(repo), getRepoKnowledgeBaseGeneration(repo), getRepoMemory(repo).catch(() => null)]);
     if (kb) setKnowledgeBases((current) => ({ ...current, [repo]: kb }));
     setGenerations((current) => ({ ...current, [repo]: generation }));
+    setMemories((current) => ({ ...current, [repo]: memory }));
     return kb;
   };
   const load = async () => {
@@ -132,7 +139,7 @@ export function SettingsScreen({ initial }: { initial?: SettingsScreenData }) {
   const currentToolInstalled = toolStates.find((candidate) => candidate.tool === engine.tool)?.installed ?? false;
   return <section className="ron-cfg"><header className="ronin-view-header"><div><h1>Configuración</h1><p>Los cambios se guardan al salir de cada campo.</p></div></header><div className="ron-cfg-body">
     <section className="ron-cfg-section"><div className="ron-cfg-heading"><h2>Motor de Ronin</h2><span>Quién redacta los reportes y analiza tus flujos. No es lo que corre en tus sesiones.</span></div><div className="ron-cfg-engines">{toolStates.map(({ tool, letter, check, installed }) => <button key={tool} type="button" aria-label={`Elegir ${tool}`} className={`ron-cfg-engine ${engine.tool === tool ? "selected" : ""} ${!installed ? "unavailable" : ""}`} disabled={!installed} onClick={() => void chooseTool(tool)}><span><b className={`ron-cfg-tool ${tool}`}>{letter}</b><strong>{tool}</strong><em>{!installed ? "no instalado" : engine.tool === tool ? "en uso" : "instalado"}</em></span><code>{checkPath(check)}</code></button>)}</div><label className="ron-cfg-model">Modelo<input disabled={!currentToolInstalled} value={engine.model ?? ""} placeholder="predeterminado" onChange={(event) => setEngine({ ...engine, model: event.target.value })} onBlur={() => void saveModel()} /><small>Vacío = el modelo por defecto de la herramienta.</small></label></section>
-    <section className="ron-cfg-section ron-cfg-repos"><div className="ron-cfg-heading"><h2>Repositorios</h2><span>Dónde arranca cada sesión y dónde vive su knowledge base.</span><button className="n-btn n-btn-primary" onClick={() => void openEditor("new")}>＋ Agregar repositorio</button></div><div className="ron-cfg-repo-list">{repos.repos.map((repo) => { const kb = knowledgeBases[repo.key]; const generation = generations[repo.key]; const running = generation?.status === "running"; return <article className="ron-cfg-repo" key={repo.key}><div><code>{repo.key}</code><small>{repo.path}</small></div><div className={`ron-cfg-kb ${kb?.exists ? "ok" : "missing"}`}><i /><span><code>{kb?.exists ? `${kb.relativePath}/` : "Sin knowledge base"}</code><small>{kb?.exists ? `${kb.files} archivos · ${bytes(kb.bytes)}` : generation?.status === "failed" ? generation.error || generation.output || "La creación falló" : kb?.candidates?.length ? `Encontré posibles carpetas: ${kb.candidates.join(", ")}` : "No se encontró ninguna carpeta conocida"}</small></span></div><div className="ron-cfg-actions">{kb?.exists ? <button className="n-btn n-btn-primary" onClick={() => void share(repo.key)}>Compartir zip</button> : <button className="n-btn n-btn-secondary ron-cfg-create" disabled={running} onClick={() => void create(repo.key)}>{running ? "Creando…" : "Crear"}</button>}<button className="n-btn n-btn-secondary" onClick={() => void openEditor("edit", repo)}>Editar</button></div></article>; })}</div><p className="ron-cfg-info">Varios repositorios pueden apuntar a la misma carpeta: es normal en un monorepo y cada uno conserva su propia knowledge base.</p></section>{note && <p className="ron-cfg-note" role="status">{note}</p>}</div>
+    <section className="ron-cfg-section ron-cfg-repos"><div className="ron-cfg-heading"><h2>Repositorios</h2><span>Dónde arranca cada sesión y dónde vive su knowledge base.</span><button className="n-btn n-btn-primary" onClick={() => void openEditor("new")}>＋ Agregar repositorio</button></div><div className="ron-cfg-repo-list">{repos.repos.map((repo) => { const kb = knowledgeBases[repo.key]; const generation = generations[repo.key]; const running = generation?.status === "running"; return <article className="ron-cfg-repo" key={repo.key}><div><code>{repo.key}</code><small>{repo.path}</small></div><div className={`ron-cfg-kb ${kb?.exists ? "ok" : "missing"}`}><i /><span><code>{kb?.exists ? `${kb.relativePath}/` : "Sin knowledge base"}</code><small>{kb?.exists ? `${kb.files} archivos · ${bytes(kb.bytes)}` : generation?.status === "failed" ? generation.error || generation.output || "La creación falló" : kb?.candidates?.length ? `Encontré posibles carpetas: ${kb.candidates.join(", ")}` : "No se encontró ninguna carpeta conocida"}</small></span></div><div className="ron-cfg-actions">{kb?.exists ? <button className="n-btn n-btn-primary" onClick={() => void share(repo.key)}>Compartir zip</button> : <button className="n-btn n-btn-secondary ron-cfg-create" disabled={running} onClick={() => void create(repo.key)}>{running ? "Creando…" : "Crear"}</button>}<button className="n-btn n-btn-secondary" onClick={() => void openEditor("edit", repo)}>Editar</button></div><RepoMemoryDetails repo={repo.key} view={memories[repo.key]} onChange={(view) => setMemories((current) => ({ ...current, [repo.key]: view }))} /><RepoSkillLearningToggle repo={repo.key} initial={initial?.skillLearning?.[repo.key]} /></article>; })}</div><p className="ron-cfg-info">Varios repositorios pueden apuntar a la misma carpeta: es normal en un monorepo y cada uno conserva su propia knowledge base.</p></section>{note && <p className="ron-cfg-note" role="status">{note}</p>}</div>
     {editor && <RepoEditor editor={editor} onChange={setEditor} onScan={scanEditor} onClose={() => setEditor(null)} onSave={saveEditor} />}
   </section>;
 }
