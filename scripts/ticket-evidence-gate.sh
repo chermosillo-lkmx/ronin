@@ -10,8 +10,10 @@
 # el ciclo (launch.json.createdAt) cuyo texto contenga "Evidencia" y tenga al menos
 # MIN_CHARS caracteres (un "listo" no es evidencia).
 #
-# Tickets del ciclo: launch.json inputs.ticket / inputs.tickets, y todo id de ClickUp
-# (86xxxxxxx, con o sin prefijo CU-) que aparezca en launch.json.request o en el nombre.
+# Tickets del ciclo: launch.json inputs.ticket / inputs.tickets (id de cualquier forma, con o sin
+# CU-, o la URL de la tarea). Si no hay inputs, todo id de ClickUp de launch.json.request o del
+# nombre: URLs app.clickup.com/t/[<workspace>/]<id> e ids 86xxxxxxx sueltos (con o sin CU-).
+# Con inputs, el request no suma tickets: suele mencionar tickets relacionados.
 # Ciclo sin ticket → PASS explícito (no hay a quién comentar).
 # Cualquier otra duda (sin token, sin launch.json, API caída) es FAIL: un gate nunca da
 # verde por defecto.
@@ -71,11 +73,32 @@ raw = []
 for key in ("ticket", "tickets"):
     value = inputs.get(key)
     if isinstance(value, list):
-        raw.extend(map(str, value))
-    elif value:
-        raw.append(str(value))
-text = " ".join([launch.get("request") or "", launch.get("name") or "", " ".join(raw)])
-tickets = list(dict.fromkeys(m.lower() for m in re.findall(r"(?<![0-9a-z])(?:CU-)?(86[0-9a-z]{7})(?![0-9a-z])", text, re.I)))
+        raw.extend(str(v).strip() for v in value if str(v).strip())
+    elif value and str(value).strip():
+        raw.append(str(value).strip())
+
+# Ids de ClickUp: la URL de la tarea (con o sin workspace) o el id 86xxxxxxx suelto. Los ids no
+# siempre empiezan con 86 (p. ej. 1dfkggwe07k), así que un id sin URL sólo se reconoce suelto en
+# inputs, donde el usuario lo declaró; en el texto libre un token arbitrario sería un falso positivo.
+URL_ID = re.compile(r"app\.clickup\.com/t/(?:\d+/)?([0-9a-z]+)", re.I)
+LEGACY_ID = re.compile(r"(?<![0-9a-z])(?:CU-)?(86[0-9a-z]{7})(?![0-9a-z])", re.I)
+BARE_ID = re.compile(r"^(?:CU-)?([0-9a-z]{6,15})$", re.I)
+
+def ids_in_text(text):
+    return [m.group(1) for m in sorted([*URL_ID.finditer(text), *LEGACY_ID.finditer(text)], key=lambda m: m.start())]
+
+if raw:
+    # Los inputs mandan: el request puede mencionar tickets relacionados (el original, el del
+    # front) a los que este ciclo no les debe un comentario de evidencia.
+    found = []
+    for value in raw:
+        match = URL_ID.search(value) or BARE_ID.match(value)
+        if not match:
+            fail(f"inputs.ticket «{value}» no parece un id de ClickUp (ni URL app.clickup.com/t/…): corrígelo en launch.json")
+        found.append(match.group(1))
+else:
+    found = ids_in_text(" ".join([launch.get("request") or "", launch.get("name") or ""]))
+tickets = list(dict.fromkeys(t.lower() for t in found))
 
 if not tickets:
     print(f"ℹ️  el ciclo {os.path.basename(cycle)} no declara ningún ticket de ClickUp: nada que comentar")
