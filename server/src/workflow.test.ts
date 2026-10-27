@@ -478,3 +478,48 @@ test("shouldSwitchModel: con switchEnabled=true dispararía desde 'implementing'
   assert.equal(shouldSwitchModel(true, false, DRIVER_STAGES, "implementing"), true);
   assert.equal(shouldSwitchModel(true, false, DRIVER_STAGES, "done"), true);
 });
+
+// ---- mergeGate: bandera de etapa (sólo en fuentes gitignored, junto a verifyCmd) ----
+
+const MG_STAGE = { key: "unit", label: "Unit", icon: "🧪", verifyCmd: "npm test", mergeGate: true } as WfStage;
+
+test("mergeGate se conserva con allowVerifyCmd y verifyCmd", () => {
+  const out = validateStages({ stages: [MG_STAGE], verifyAfter: null }, { allowVerifyCmd: true });
+  assert.equal(out.stages[0].mergeGate, true);
+  assert.equal(out.stages[0].verifyCmd, "npm test");
+});
+
+test("mergeGate sin verifyCmd se descarta (tolerante)", () => {
+  const out = validateStages(
+    { stages: [{ key: "unit", label: "Unit", icon: "🧪", mergeGate: true } as WfStage], verifyAfter: null },
+    { allowVerifyCmd: true }
+  );
+  assert.equal("mergeGate" in out.stages[0], false);
+  // y sin allowVerifyCmd (fuente git-tracked, tolerante) también se descarta
+  const tracked = validateStages({ stages: [MG_STAGE], verifyAfter: null }, { strict: false });
+  assert.equal("mergeGate" in tracked.stages[0], false);
+});
+
+test("mergeGate en fuente git-tracked: strict lanza WorkflowValidationError en <path>.mergeGate", () => {
+  assert.throws(
+    () => validateStages({ stages: [{ key: "unit", label: "Unit", icon: "🧪", mergeGate: true } as WfStage], verifyAfter: null }, { strict: true }),
+    (e: unknown) => {
+      assert.ok(e instanceof WorkflowValidationError);
+      assert.equal(e.path, "stages[0].mergeGate");
+      assert.equal(e.code, "VERIFY_CMD_NOT_ALLOWED");
+      return true;
+    }
+  );
+});
+
+test("stripVerifyFields quita mergeGate", () => {
+  const clean = stripVerifyFields({ key: "unit", label: "U", icon: "x", verifyCmd: "npm test", mergeGate: true });
+  assert.equal("mergeGate" in clean, false);
+});
+
+test("mergeGate no booleano true se descarta", () => {
+  for (const bad of ["yes", 1, false, null, {}]) {
+    const out = validateStages({ stages: [{ ...MG_STAGE, mergeGate: bad } as any], verifyAfter: null }, { allowVerifyCmd: true, strict: true });
+    assert.equal("mergeGate" in out.stages[0], false, `valor ${JSON.stringify(bad)}`);
+  }
+});

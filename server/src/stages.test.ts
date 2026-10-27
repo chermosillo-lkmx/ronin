@@ -280,3 +280,12 @@ test("readCycleRepo lee el repo de launch.json y, si falta o está roto, de adop
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("mergeGate sobrevive al congelado de flow.json", () => {
+  const cycle = freshCycle();
+  const flow = { stages: [{ key: "unit", label: "U", icon: "x", verifyCmd: "npm test", maxRetries: 2, mergeGate: true as const }], verifyAfter: [] };
+  writeFlow(cycle, flow);
+  const back = readFlow(cycle);
+  assert.equal(back?.stages[0].mergeGate, true);
+  assert.deepEqual(back, flow);
+});
