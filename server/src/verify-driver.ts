@@ -39,7 +39,10 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  *   `running` y llama a `onReport` una vez. El desenlace sale de la foto del lanzamiento (intentos,
  *   HEADs previos del gate de merge), nunca de releer un estado más nuevo.
  * - `running: true` en disco sin corrida en vuelo es una huérfana (Ronin se reinició a media
- *   suite): se trata como lista para correr, sin esperar al armado y sin gastar intento.
+ *   suite): se trata como lista para correr, sin esperar al armado y sin gastar intento. Un gate
+ *   `queued` también conserva su autorización: sale de la cola en el primer tick con cupo.
+ * - Una corrida por sesión: mientras un gate de la sesión corre, los demás de esa sesión esperan
+ *   (mismo worktree).
  *
  * Lo que este driver NO hace, a propósito: no le escribe al worker. Ronin observa el flujo, no lo
  * ejecuta — quien toca los sentinelas y avanza es el propio worker dentro de tmux. El gate deja el
@@ -216,11 +219,19 @@ export async function tickOnce(
 ): Promise<void> {
   const marcados = (slots.marked ??= new Map());
   const vigentes = new Set<string>(); // lanzadas o encoladas en este tick: su marca es actual
+  // Registrar un error nunca puede lanzar: dentro de una corrida en vuelo eso sería un rechazo sin dueño.
+  const registrar = (error: unknown): void => {
+    try {
+      deps.logError?.(error);
+    } catch {
+      /* el propio log falló: nada más que hacer */
+    }
+  };
   const informar = (informe: GateReport): void => {
     try {
       onReport?.(informe);
     } catch (error) {
-      deps.logError?.(error);
+      registrar(error);
     }
   };
 
@@ -233,6 +244,13 @@ export async function tickOnce(
   }
 
   for (const sesion of sesiones) {
+    // Una corrida por sesión: dos gates en el mismo worktree a la vez se pisarían (venv, reportes,
+    // HEADs). Mientras uno corre, la sesión entera espera y sus marcas de cola se conservan.
+    const prefijo = `${sesion.name}:`;
+    if ([...slots.inFlight.keys()].some((clave) => clave.startsWith(prefijo))) {
+      for (const clave of marcados.keys()) if (clave.startsWith(prefijo)) vigentes.add(clave);
+      continue;
+    }
     try {
       const launch = deps.launchOf(sesion.name);
       if (!launch || launch.mode !== "workflow" || !launch.worktree) continue;
@@ -269,13 +287,16 @@ export async function tickOnce(
       const previo = deps.readState(cycle, gate.key);
       // Huérfana: `running` en disco sin corrida en vuelo (Ronin se reinició a media suite). Esa
       // corrida ya estaba autorizada, así que cuenta como armada y no gasta intento: el desenlace
-      // sale de los intentos guardados, que el lanzamiento no tocó.
+      // sale de los intentos guardados, que el lanzamiento no tocó. Lo mismo un gate encolado:
+      // `queued` sólo se escribe cuando el gate ya iba a correr, así que esperar en la cola (aun a
+      // través de un reinicio) no le quita la autorización.
       const huerfana = previo?.running === true;
-      if (previo?.queued === true || huerfana) marcados.set(clave, { cycle, stageKey: gate.key });
+      const encolado = previo?.queued === true;
+      if (encolado || huerfana) marcados.set(clave, { cycle, stageKey: gate.key });
 
       const corrida = gate.mergeGate
         ? await planMergeGate(deps, sesion, launch.repo, worktree, cycle, gate, heads, informar)
-        : planGate(deps, sesion, launch.repo, worktree, cycle, gate, armed.get(clave) === true || huerfana, () => armed.set(clave, true));
+        : planGate(deps, sesion, launch.repo, worktree, cycle, gate, armed.get(clave) === true || huerfana || encolado, () => armed.set(clave, true));
       if (!corrida) continue;
 
       vigentes.add(clave);
@@ -298,13 +319,14 @@ export async function tickOnce(
         .then(informar, (error: unknown) => {
           // La corrida misma reventó (no un rojo): sin veredicto, se quita `running` y el gate
           // queda como estaba al lanzarse para que el siguiente tick lo reconsidere.
-          deps.logError?.(error);
+          registrar(error);
           try {
             deps.writeState(cycle, gate.key, { attempts: gate.attempts, status: "pending" });
           } catch (otro) {
-            deps.logError?.(otro);
+            registrar(otro);
           }
         })
+        .catch(registrar)
         .finally(() => slots.inFlight.delete(clave));
       slots.inFlight.set(clave, enVuelo);
     } catch (error) {

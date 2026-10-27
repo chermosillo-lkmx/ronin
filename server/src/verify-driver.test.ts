@@ -962,13 +962,18 @@ test("startVerifyDriver: el cupo se lee en cada tick (maxConcurrent sin reinicia
     let max = 1;
     const f = flota({ sesiones: ["s1", "s2", "s3"], maxConcurrent: () => max });
     const handle = startVerifyDriver(f.d, 1000);
-    const pasos = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+    // Drena hasta que el tick termine (las tres sesiones decididas), con tope: no depende de
+    // cuántos `await` tenga el tick.
+    const hasta = async (listo: () => boolean) => {
+      for (let i = 0; i < 1000 && !listo(); i++) await new Promise((r) => setImmediate(r));
+      assert.ok(listo(), "el tick no terminó");
+    };
     mock.timers.tick(1000);
-    await pasos();
+    await hasta(() => f.estado("s3")?.queued === true);
     assert.deepEqual(f.lanzadas, ["s1"]);
     max = 3;
     mock.timers.tick(1000);
-    await pasos();
+    await hasta(() => f.lanzadas.length === 3);
     assert.deepEqual(f.lanzadas, ["s1", "s2", "s3"]);
     handle.stop();
   } finally {
@@ -993,4 +998,64 @@ test("concurrencia: un gate de merge passed que sale de la cola sin correr queda
   ocupado = true;
   await f.tick();
   assert.deepEqual(f.estado("m1", "pre-merge"), passedA);
+});
+
+test("concurrencia: una huérfana encolada conserva su autorización y corre en cuanto hay cupo", async () => {
+  const f = flota({ sesiones: ["s1", "s2"] });
+  f.estados.set("s1:tests", { attempts: 1, status: "pending", running: true });
+  f.estados.set("s2:tests", { attempts: 1, status: "pending", running: true });
+  f.slots.max = 1;
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.equal(f.estado("s2")?.queued, true);
+  await f.terminar("s1");
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1", "s2"]);
+});
+
+test("concurrencia: un reintento armado que espera en la cola corre en cuanto hay cupo, también tras un reinicio", async () => {
+  const f = flota({ sesiones: ["s1", "s2"] });
+  f.estados.set("s2:tests", { attempts: 1, status: "pending" });
+  f.slots.max = 1;
+  await f.tick(new Map([["s2:tests", true]]));
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.equal(f.estado("s2")?.queued, true);
+  await f.terminar("s1");
+  // Armado en memoria vacío (como tras un reinicio): `queued` en disco basta.
+  await f.tick(new Map());
+  assert.deepEqual(f.lanzadas, ["s1", "s2"]);
+});
+
+test("concurrencia: dos gates de la misma sesión nunca corren a la vez en el mismo worktree", async () => {
+  // B (normal) corre; mientras, el gate de merge A, más temprano en el flujo, se re-arma por un
+  // commit nuevo. A no se lanza hasta que B termine.
+  const FLUJO: GateStage[] = [
+    { key: "pre-merge", label: "Gate", verifyCmd: "unit-gate", mergeGate: true },
+    { key: "tests", label: "Pruebas", verifyCmd: "correr-pruebas" },
+  ];
+  let heads = limpio(SHA_A);
+  const f = flota({ sesiones: ["s1"], flowFor: () => FLUJO, detect: () => "tests", heads: async () => heads });
+  f.estados.set("s1:pre-merge", { attempts: 0, status: "passed", shas: { api: SHA_A } });
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.ok(f.slots.inFlight.has("s1:tests"));
+
+  heads = limpio(SHA_B);
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.equal(f.estado("s1", "pre-merge")?.running, undefined);
+
+  await f.terminar("s1");
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1", "s1"]);
+  assert.ok(f.slots.inFlight.has("s1:pre-merge"));
+});
+
+test("concurrencia: un logError que lanza en el rechazo de una corrida no deja una promesa rechazada", async () => {
+  const f = flota({ sesiones: ["s1"], run: async () => { throw new Error("spawn falló"); }, logError: () => { throw new Error("log roto"); } });
+  await f.tick();
+  const enVuelo = [...f.slots.inFlight.values()];
+  assert.equal(enVuelo.length, 1);
+  await enVuelo[0]; // rechazaría si el error del log se escapara
+  assert.equal(f.slots.inFlight.size, 0);
 });
