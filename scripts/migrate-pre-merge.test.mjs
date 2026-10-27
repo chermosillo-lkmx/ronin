@@ -220,6 +220,8 @@ test("textos de la revisión final: SIN-GATE, salida en .log, pr/merge exigen st
       assert.match(merge, /`status` sea `passed`/, name);
       assert.match(merge, /`shas`/, name);
       assert.match(merge, /UNIT-GATE: SIN-GATE/, name);
+      // SIN-GATE no basta de palabra: el JSON del ciclo tiene que decirlo (status "sin-gate").
+      assert.match(merge, /SIN-GATE` y \{cycle\}\/verify-pre-merge\.json dice `status: "sin-gate"`/, name);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

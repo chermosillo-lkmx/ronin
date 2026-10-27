@@ -127,6 +127,7 @@ test("el catálogo empaquetado no contiene frases de re-corrida y tiene pre-merg
     assert.ok(!stages[i]!.instruction.includes("informe completo en {cycle}/verify-pre-merge.json"), name);
     assert.match(stages[i + 1]!.instruction, /`status` sea `passed`/, name);
     assert.match(stages[i + 1]!.instruction, /UNIT-GATE: SIN-GATE/, name);
+    assert.match(stages[i + 1]!.instruction, /SIN-GATE` y \{cycle\}\/verify-pre-merge\.json dice `status: "sin-gate"`/, name);
   }
   assert.ok(!raw.includes("y las que declare el repo"), "las rutas e2e son sólo e2e_dev/ (lo que usa el driver)");
   for (const w of catalog.items) for (const s of w.config.stages) {
