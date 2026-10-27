@@ -50,7 +50,7 @@ Your sentinels:
 - `===IMPL:QUESTION===`        — you are blocked and need Main to answer
 - `===IMPL:READY===`           — tests green, ready for adversarial review
 - `===IMPL:UPDATED===`         — you applied review findings
-- `===IMPL:CYCLE-DONE===`      — KB updated, full suites green
+- `===IMPL:CYCLE-DONE===`      — KB updated, touched tests green
 
 ## PROTOCOL
 
@@ -81,8 +81,10 @@ Your sentinels:
    - You may not touch any other test to get here. If an existing test breaks, that is a real
      regression: stop and fix the code, never the assertion. `rgr.sh` enforces this with
      `tests-diff=` between RED and GREEN.
-   - Run `<CYCLE_DIR>/harness/rgr.sh green`. It reruns the selected test and every `$TEST_CMD_*`;
-     adjacent safety means no failures beyond the anchored baseline, not that every suite exits 0.
+   - Run `<CYCLE_DIR>/harness/rgr.sh green`. It reruns the selected test and every `$TEST_CMD_*`,
+     whose `{CHANGED_TESTS}` expands to the test files changed since `BASELINE_REF` plus the
+     selected one; adjacent safety means no failures beyond the anchored baseline, not that every
+     suite exits 0.
 
    **🧪 VERIFY-CATCHES — for a test that claims to catch a specific bug.**
    - Before REFACTOR, run `<CYCLE_DIR>/harness/rgr.sh verify-catches --fix-file <path>
@@ -119,10 +121,13 @@ Your sentinels:
 5. No mocks where the spec depends on real schema behavior. A mock that returns a `dict` where
    production returns a model will make a broken implementation pass.
 
-6. Before the first RED, run `<CYCLE_DIR>/harness/rgr.sh baseline`. For source diffs use the frozen
+6. Once the first RED test file exists, and before `rgr.sh red` records it, run
+   `<CYCLE_DIR>/harness/rgr.sh baseline`: `{CHANGED_TESTS}` needs at least that file, and an empty
+   list is rejected rather than widened to the full suite. For source diffs use the frozen
    `BASELINE_REF` from `harness.<slot>.env`; for regressions use the failure-set baseline anchored by
-   `rgr baseline`. Before READY, run `<CYCLE_DIR>/harness/fitness.sh <slot>` and the `$TEST_CMD_*`
-   commands declared in that same environment file.
+   `rgr baseline`. Before READY, run `<CYCLE_DIR>/harness/fitness.sh <slot>`; the `$TEST_CMD_*`
+   commands declared in that same environment file already ran inside `rgr.sh`.
+   Sólo los tests de los módulos tocados. La suite completa la corre Ronin en `pre-merge`; no la corras tú, ni como baseline.
 
 7. Emit `===IMPL:READY===` with: a per-repo list of changed/added files, each declared suite's actual
    summary format, and the **cycle count with how many had a non-NONE REFACTOR**. The gate derives
@@ -143,7 +148,8 @@ Your sentinels:
 10. Operational KB (`SKILL.md`, role templates, `references/`) is production and must already have
    been changed inside its own RGR cycles. Phase C updates only `skills/README.md` and other
    non-executable documentation named by the plan.
-11. Re-run every `$TEST_CMD_*` from `harness.<slot>.env` and report its actual summary format.
+11. Re-run the touched tests (each `$TEST_CMD_*` from `harness.<slot>.env` with `{CHANGED_TESTS}`
+    replaced by the test files you changed) and report its actual summary format. Sólo los tests de los módulos tocados. La suite completa la corre Ronin en `pre-merge`; no la corras tú, ni como baseline.
 12. Emit `===IMPL:CYCLE-DONE===`.
 
 ## SESSION-USAGE SELF-THROTTLE (NON-NEGOTIABLE)

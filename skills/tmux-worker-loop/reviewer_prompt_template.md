@@ -135,7 +135,7 @@ BLOCKERS (must fix before proceeding):
 MAJOR (fix, but not blocking): <ids + half-line each, or "none">
 MINOR: <ids only, or "none">
 
-Regression: <e.g. "45 failed / 1660 passed; comm -13 vs origin/main = empty, zero new">
+Regression: <e.g. "touched tests: 3 failed / 120 passed; comm -13 vs anchored baseline = empty, zero new">
 Verified by: <read | executed | mutation-tested>  ← say which; they are not equal
 ```
 
@@ -156,7 +156,8 @@ same verdict line.
 
 **Run the RGR AUDIT above as part of this pass** — it is not optional and not a separate request
 from Main. Your report must contain the per-cycle verdict table. You may run the tests read-only
-to check a claim (the declared `$TEST_CMD_*`, `git stash list`, `git log -p`), but you still never edit source or
+to check a claim (the declared `$TEST_CMD_*` with `{CHANGED_TESTS}` replaced by the touched test files — the
+full suite runs once, in Ronin's `pre-merge`; `git stash list`, `git log -p`), but you still never edit source or
 tests: if you want to prove a refactor changed behavior, describe the input that diverges and let
 the Implementer write the test.
 

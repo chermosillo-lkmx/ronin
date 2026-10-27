@@ -3721,3 +3721,134 @@ test("plan case 81: GREEN excludes fixture plumbing but protects test assertions
   assert.equal(rejected.status, 2);
   assert.match(rejected.stderr, /tests changed between RED and GREEN: harness\.test\.mjs/);
 });
+
+// TARGETED SUITE CONTRACT
+// A full pytest run takes ~20 minutes on the API repo and rgr.sh re-ran it on
+// every baseline, GREEN, and REFACTOR. {CHANGED_TESTS} narrows each TEST_CMD to
+// the test files changed since BASELINE_REF plus the cycle's selected test. The
+// fake runner records its argv so the expansion is observed, not inferred.
+const fullSuitePhrase = "Sólo los tests de los módulos tocados. La suite completa la corre Ronin en `pre-merge`; no la corras tú, ni como baseline";
+
+async function createTargetedFixture() {
+  const fixture = await createRgrFixture(
+    'import assert from "node:assert/strict";\nimport test from "node:test";\nimport { value } from "./feature.mjs";\ntest("targeted behavior", () => assert.equal(value, 1));\n',
+    { captureBaseline: false },
+  );
+  const fakeDir = await mkdtemp(`${tmpdir()}/rgr-fake-pytest-`);
+  const argvFile = `${fakeDir}/argv.txt`;
+  const fakePytest = `${fakeDir}/pytest`;
+  await writeFile(fakePytest, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvFile}'\nexec node --test "$@"\n`);
+  await chmod(fakePytest, 0o755);
+  const passing = (name) => `import test from "node:test";\ntest(${JSON.stringify(name)}, () => {});\n`;
+  await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 0;\n");
+  await writeFile(`${fixture.worktree}/stable.test.mjs`, passing("stable"));
+  await writeFile(`${fixture.worktree}/other.test.mjs`, passing("other"));
+  await writeFile(`${fixture.worktree}/gone.test.mjs`, passing("gone"));
+  git(fixture.worktree, "add", "-A");
+  git(fixture.worktree, "commit", "-qm", "targeted baseline");
+  const baseline = git(fixture.worktree, "rev-parse", "HEAD");
+  const envPath = `${fixture.cycleDir}/harness.fixture.env`;
+  const envText = (await readFile(envPath, "utf8"))
+    .replace(/^BASELINE_REF=.*$/m, `BASELINE_REF=${baseline}`)
+    .replace(/^TEST_CMD_1=.*$/m, `TEST_CMD_1=${fakePytest} {CHANGED_TESTS}`);
+  await writeFile(envPath, envText);
+  const recordedArgv = async () => (await readFile(argvFile, "utf8")).split("\n").filter(Boolean).sort();
+  return { ...fixture, argvFile, passing, recordedArgv };
+}
+
+test("probe-repo python emite TEST_CMD_1 con {CHANGED_TESTS}", async () => {
+  const cycleDir = await mkdtemp(`${tmpdir()}/rgr-probe-targeted-`);
+  const python = await initGitRepo("rgr-probe-targeted-python");
+  await writeFile(`${python}/pyproject.toml`, "[tool.pytest.ini_options]\n");
+  const node = await initGitRepo("rgr-probe-targeted-node");
+  await writeFile(`${node}/package.json`, '{"scripts":{"test":"node --test"}}\n');
+  for (const worktree of [python, node]) {
+    git(worktree, "add", "-A");
+    git(worktree, "commit", "-qm", "fixture");
+  }
+  await writeFile(`${cycleDir}/worktrees.env`, `api=${await realpath(python)}\nweb=${await realpath(node)}\n`);
+  const probe = (slot) => spawnSync(
+    fileURLToPath(new URL("harness/probe-repo.sh", skillRoot)),
+    [slot],
+    { env: { ...process.env, CYCLE_DIR: cycleDir }, encoding: "utf8" },
+  );
+
+  assert.equal(probe("api").status, 0);
+  assert.match(await readFile(`${cycleDir}/harness.api.env`, "utf8"), /^TEST_CMD_1=pytest \{CHANGED_TESTS\}$/m);
+  assert.equal(probe("web").status, 0);
+  assert.match(await readFile(`${cycleDir}/harness.web.env`, "utf8"), /^TEST_CMD_1=npm test -- \{CHANGED_TESTS\}$/m);
+});
+
+test("rgr green expande {CHANGED_TESTS} con los tests cambiados y el seleccionado", async () => {
+  const fixture = await createTargetedFixture();
+  await writeFile(`${fixture.worktree}/committed.test.mjs`, fixture.passing("committed"));
+  git(fixture.worktree, "add", "committed.test.mjs");
+  git(fixture.worktree, "commit", "-qm", "committed after baseline");
+  await writeFile(`${fixture.worktree}/other.test.mjs`, fixture.passing("other changed"));
+  await writeFile(`${fixture.worktree}/spaced name.test.mjs`, fixture.passing("untracked"));
+  await rm(`${fixture.worktree}/gone.test.mjs`);
+
+  const baseline = runRgr(fixture, "baseline");
+  assert.equal(baseline.status, 0, baseline.stderr);
+  assert.deepEqual(await fixture.recordedArgv(), ["committed.test.mjs", "other.test.mjs", "spaced name.test.mjs"]);
+  const red = runRgr(fixture, "red", "targeted", "--test-file", "behavior.test.mjs", "--name", "targeted behavior");
+  assert.equal(red.status, 0, red.stderr);
+  await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 1;\n");
+  const green = runRgr(fixture, "green");
+
+  assert.equal(green.status, 0, green.stderr);
+  assert.deepEqual(
+    await fixture.recordedArgv(),
+    ["behavior.test.mjs", "committed.test.mjs", "other.test.mjs", "spaced name.test.mjs"],
+  );
+});
+
+test("{CHANGED_TESTS} sin cambios usa sólo el test seleccionado", async () => {
+  const fixture = await createTargetedFixture();
+  const empty = runRgr(fixture, "baseline");
+  assert.notEqual(empty.status, 0);
+  assert.match(empty.stderr, /\{CHANGED_TESTS\} has no changed or selected test file/);
+  await assert.rejects(readFile(fixture.argvFile, "utf8"));
+
+  const red = runRgr(fixture, "red", "targeted", "--test-file", "behavior.test.mjs", "--name", "targeted behavior");
+  assert.equal(red.status, 0, red.stderr);
+  const baseline = runRgr(fixture, "baseline");
+  assert.equal(baseline.status, 0, baseline.stderr);
+  assert.deepEqual(await fixture.recordedArgv(), ["behavior.test.mjs"]);
+  await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 1;\n");
+  const green = runRgr(fixture, "green");
+  assert.equal(green.status, 0, green.stderr);
+  assert.deepEqual(await fixture.recordedArgv(), ["behavior.test.mjs"]);
+  assert.equal(runRgr(fixture, "verify-catches", "--fix-file", "feature.mjs").status, 0);
+  const refactor = runRgr(fixture, "refactor", "NONE: fixture export is already minimal");
+  assert.equal(refactor.status, 0, refactor.stderr);
+  assert.deepEqual(await fixture.recordedArgv(), ["behavior.test.mjs"]);
+
+  const verify = runVerify(fixture.cycleDir);
+  assert.equal(verify.status, 0, verify.stdout);
+  assert.doesNotMatch(await readFile(`${fixture.cycleDir}/verify-rgr.md`, "utf8"), /suite-completa/);
+});
+
+test("verify-rgr advierte un TEST_CMD sin {CHANGED_TESTS}", async () => {
+  const fixture = await createClosedRgrFixture();
+  const result = runVerify(fixture.cycleDir);
+
+  assert.equal(result.status, 0, result.stdout);
+  const report = await readFile(`${fixture.cycleDir}/verify-rgr.md`, "utf8");
+  assert.match(report, /^RESULT: PASS$/m);
+  assert.match(report, /^WARN suite-completa: TEST_CMD_1 no está dirigido$/m);
+});
+
+test("el prompt del Implementer prohíbe la suite completa antes de pre-merge", async () => {
+  const implementer = await readFile(new URL("implementer_prompt_template.md", skillRoot), "utf8");
+  const skill = await readFile(new URL("SKILL.md", skillRoot), "utf8");
+
+  assert.ok(implementer.includes(fullSuitePhrase));
+  assert.ok(skill.includes(fullSuitePhrase));
+  for (const text of [implementer, skill]) {
+    assert.ok(!text.includes("Re-run every `$TEST_CMD_*`"));
+  }
+  assert.ok(!skill.includes("Run the declared `$TEST_CMD_*` suites yourself"));
+  assert.match(skill, /Main never merges/);
+  assert.match(skill, /`pre-merge` → `pr`/);
+});
