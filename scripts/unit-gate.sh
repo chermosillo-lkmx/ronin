@@ -559,6 +559,10 @@ for repo in "${candidates[@]}"; do
       fi
     fi
     say "   → $PY -m pytest tests -q -o addopts='' ${extra[*]+"${extra[*]}"} ${par[*]+"${par[*]}"} -p no:cacheprovider ${cov[*]} --cov-report=xml:$coverage_xml --junitxml=$junit"
+    # pytest --cov escribe `.coverage` en el cwd (raíz del sub-repo): en repos que no lo ignoran
+    # dejaba el árbol sucio y el gate de merge lo rechazaba. Va a la carpeta de reportes del gate,
+    # absoluto por si algún test cambia de directorio.
+    COVERAGE_FILE="$(cd "$REPORTS" && pwd)/.coverage" \
     "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1
     rc=$?
   elif [ "$runner" = "node" ]; then

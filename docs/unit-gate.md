@@ -147,7 +147,10 @@ Salida: una línea `✅/❌` por regla y repo, cola de `reports/unit-gate.log` c
 y al final `UNIT-GATE: PASS` o `UNIT-GATE: FAIL` (exit 0 / 1). El log completo de la suite queda
 en `<repo>/reports/unit-gate.log`, el junit en `<repo>/reports/junit-gate.xml` y Cobertura en
 `<repo>/reports/coverage-gate.xml` (Python) o
-`<repo>/reports/coverage-gate/cobertura-coverage.xml` (Node).
+`<repo>/reports/coverage-gate/cobertura-coverage.xml` (Node). En Python el `.coverage` de
+`pytest --cov` también va ahí (`COVERAGE_FILE=<repo>/reports/.coverage`), no a la raíz del sub-repo:
+en repos que no lo ignoran dejaba el árbol sucio. Con `UNIT_GATE_REPORTS_DIR` todo esto cambia de
+`reports/` a esa carpeta.
 
 ## Qué NO es
 

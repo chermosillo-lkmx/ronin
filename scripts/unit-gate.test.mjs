@@ -97,6 +97,7 @@ function fixture(t) {
     `if [ "$1" = "-c" ] && [ "$2" = "import xdist" ]; then [ "\${FAKE_XDIST:-}" = "1" ]; exit $?; fi\n` +
     `[ -n "\${FAKE_MARKER:-}" ] && : > "$FAKE_MARKER"\n` +
     `[ -n "\${FAKE_ARGV:-}" ] && printf '%s\\n' "$@" > "$FAKE_ARGV"\n` +
+    `[ -n "\${FAKE_COVFILE:-}" ] && printf '%s' "\${COVERAGE_FILE:-}" > "$FAKE_COVFILE"\n` +
     `for a in "$@"; do case "$a" in\n` +
     `  --junitxml=*) cp "$FAKE_SUITE_JUNIT" "\${a#--junitxml=}";;\n` +
     `  --cov-report=xml:*) [ -f "$FAKE_SUITE_COVERAGE" ] && cp "$FAKE_SUITE_COVERAGE" "\${a#--cov-report=xml:}";;\n` +
@@ -904,4 +905,21 @@ test("51. merge-base ok pero el git diff contra la base falla: no aplica el ataj
   const r = fx.run({ ...withoutExtra, ...extra, PATH: `${bin}:${process.env.PATH}` });
   assert.doesNotMatch(r.out, /sólo e2e/);
   assert.ok(existsAt(extra.FAKE_MARKER), r.out);
+});
+
+test("52. pytest --cov deja .coverage dentro de la carpeta de reportes del gate, no en la raíz del sub-repo", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const covfile = join(fx.tmp, "covfile");
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", FAKE_COVFILE: covfile });
+  assert.equal(r.code, 0, r.out);
+  const visto = readFileSync(covfile, "utf8");
+  assert.ok(visto.startsWith("/"), `COVERAGE_FILE no es absoluto: «${visto}»`);
+  assert.ok(visto.endsWith("/reports/ronin-gate/.coverage"), visto);
+
+  const porDefecto = fixture(t);
+  porDefecto.setSuite([OTHER_PASS, APP("passed")]);
+  const covfile2 = join(porDefecto.tmp, "covfile");
+  porDefecto.run({ ...withoutExtra, FAKE_COVFILE: covfile2 });
+  assert.ok(readFileSync(covfile2, "utf8").endsWith("/reports/.coverage"));
 });
