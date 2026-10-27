@@ -564,7 +564,10 @@ expected_suite_exit() {
 # the current worktree (committed, uncommitted, or untracked) plus each open
 # cycle's selected test. A full pytest run took ~20 minutes on every phase; the
 # full suite now runs once, in Ronin's pre-merge gate. An empty list must never
-# expand to "", because a bare runner would silently run the full suite again.
+# expand to "", because a bare runner would silently run the full suite again:
+# GREEN and REFACTOR die, and only a baseline taken before any test is touched
+# skips the suite and anchors an empty targeted failure set.
+# Globs become :(glob)**/<glob> pathspecs so test_*.py also matches tests/test_x.py.
 changed_tests_placeholder='{CHANGED_TESTS}'
 
 open_cycle_test_files() {
@@ -584,7 +587,10 @@ expand_changed_tests() {
   changed_tree=$(build_tree) || exit $?
   changed_list=$(mktemp "$CYCLE_DIR/.rgr-changed-tests.XXXXXX") || die "cannot create changed-tests scratch file"
   set -f
-  set -- $(env_get TEST_GLOBS)
+  set --
+  for changed_glob in $(env_get TEST_GLOBS); do
+    set -- "$@" ":(glob)**/$changed_glob"
+  done
   set +f
   [ "$#" -gt 0 ] || die "TEST_GLOBS is empty; {CHANGED_TESTS} cannot tell test files apart, rerun probe-repo.sh $slot"
   git -C "$worktree" diff-tree -r --name-only --no-renames "$changed_base^{tree}" "$changed_tree" -- "$@" > "$changed_list" \
@@ -599,14 +605,14 @@ expand_changed_tests() {
 $(LC_ALL=C sort -u "$changed_list")
 EOF
   rm -f "$changed_list"
-  [ -n "$changed_tests" ] \
-    || die "{CHANGED_TESTS} has no changed or selected test file; write the cycle's test before running the suites (the full suite runs only in Ronin's pre-merge)"
 }
 
 capture_failure_set() {
   capture_target=$1
+  capture_allow_empty=${2:-no}
   changed_tests=''
   changed_tests_expanded=no
+  targeted_empty=no
   suite_output_files=()
   suite_status_files=()
   suite_exit_args=()
@@ -626,6 +632,13 @@ capture_failure_set() {
         if [ "$changed_tests_expanded" = no ]; then
           expand_changed_tests
           changed_tests_expanded=yes
+        fi
+        if [ -z "$changed_tests" ]; then
+          [ "$capture_allow_empty" = yes ] \
+            || die "{CHANGED_TESTS} has no changed or selected test file; run rgr red before this phase (the full suite runs only in Ronin's pre-merge)"
+          targeted_empty=yes
+          suite_index=$((suite_index + 1))
+          continue
         fi
         suite_cmd=${suite_cmd//"$changed_tests_placeholder"/"$changed_tests"}
         ;;
@@ -664,6 +677,23 @@ capture_failure_set() {
     suite_index=$((suite_index + 1))
   done
   LC_ALL=C sort -u "$capture_unsorted" > "$capture_target"
+}
+
+# A failure in a test file that did not exist at BASELINE_REF is not
+# pre-existing: it is this change's own RED (or a test it added). Anchoring it
+# would let GREEN tolerate a later regression of that test, so the baseline
+# keeps only failures from files present at BASELINE_REF.
+drop_new_test_failures() {
+  drop_base=$(env_get BASELINE_REF)
+  git -C "$worktree" cat-file -e "$drop_base^{commit}" 2>/dev/null \
+    || die "BASELINE_REF '${drop_base}' is not a commit; rerun probe-repo.sh $slot"
+  drop_kept=$(mktemp "$CYCLE_DIR/.rgr-baseline-kept.XXXXXX") || die "cannot create baseline filter scratch file"
+  while IFS= read -r drop_entry; do
+    [ -n "$drop_entry" ] || continue
+    git -C "$worktree" cat-file -e "$drop_base:${drop_entry%%::*}" 2>/dev/null \
+      && printf '%s\n' "$drop_entry"
+  done < "$1" > "$drop_kept"
+  mv "$drop_kept" "$1" || die "cannot replace the filtered baseline failure set"
 }
 
 update_baseline_env() {
@@ -745,14 +775,17 @@ case "$subcommand" in
     [ "$#" -eq 0 ] || die "baseline takes no arguments"
     baseline_capture_set=$(mktemp "$CYCLE_DIR/.rgr-baseline-capture.XXXXXX") \
       || die "cannot create baseline capture scratch file"
-    capture_failure_set "$baseline_capture_set"
+    capture_failure_set "$baseline_capture_set" yes
+    drop_new_test_failures "$baseline_capture_set"
     anchor_baseline "$baseline_capture_set"
     baseline_count=$(wc -l < "$baseline_capture_set" | tr -d ' ')
     baseline_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     update_baseline_env "$baseline_count" "$baseline_at" "$baseline_blob"
     ensure_log_header
-    rgr_log_build BASELINE at "$baseline_at" slot "$slot" seq "$baseline_number" \
-      failset "$baseline_blob" fails "$baseline_count" by impl >> "$CYCLE_DIR/rgr.log"
+    set -- BASELINE at "$baseline_at" slot "$slot" seq "$baseline_number" \
+      failset "$baseline_blob" fails "$baseline_count" by impl
+    [ "$targeted_empty" = no ] || set -- "$@" targeted empty
+    rgr_log_build "$@" >> "$CYCLE_DIR/rgr.log"
     echo "rgr: captured baseline slot=$slot fails=$baseline_count failset=$baseline_blob"
     ;;
   red)

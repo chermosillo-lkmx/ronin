@@ -70,7 +70,8 @@ PROTOCOL — at each phase boundary, append the SENTINEL to <CYCLE_DIR>/sentinel
 
 5. KB + FINAL TEST PHASE
    - Update <KB_PATH> with the new flow, decision points, and where persistence lives.
-   - Run unit + integration tests. Print exact pytest summary lines.
+   - Run only the tests of the modules you touched (never the full suite: Ronin runs it in
+     `pre-merge`). Print exact pytest summary lines.
    - When green, print:
        ===CYCLE-DONE===
 

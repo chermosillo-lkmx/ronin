@@ -350,6 +350,19 @@ async function createRgrFixture(testSource, { captureBaseline = true } = {}) {
   return fixture;
 }
 
+// BASELINE PRE-EXISTENCE CONTRACT
+// rgr baseline keeps only failures from test files that exist at BASELINE_REF;
+// a failure in a file the change added is that change's own RED, never an
+// environmental failure. Fixtures that model a pre-existing failure must
+// therefore commit its test file and move BASELINE_REF onto that commit.
+async function commitBaselineRef(fixture, ...paths) {
+  git(fixture.worktree, "add", ...(paths.length ? paths : ["-A"]));
+  git(fixture.worktree, "commit", "-qm", "pre-existing failures");
+  const envPath = `${fixture.cycleDir}/harness.fixture.env`;
+  const envText = await readFile(envPath, "utf8");
+  await writeFile(envPath, envText.replace(/^BASELINE_REF=.*$/m, `BASELINE_REF=${git(fixture.worktree, "rev-parse", "HEAD")}`));
+}
+
 function runVerify(cycleDir, ...args) {
   return spawnSync(fileURLToPath(new URL("harness/verify-rgr.sh", skillRoot)), args, {
     cwd: repoRoot,
@@ -383,13 +396,16 @@ function anchoredDynamicAllowOutside(cycleDir, path, slot, interval, reason) {
 // feature.mjs after BASELINE_REF, so it claimed a clean cycle with unjustified
 // production already present. Commit the failing production state first; the
 // only BASELINE→RED change is then the test that demonstrates the behavior.
-async function createClosedRgrFixture(testName = "verified cycle", { captureCatches = true } = {}) {
+async function createClosedRgrFixture(testName = "verified cycle", { captureCatches = true, baselineFiles = {} } = {}) {
   const fixture = await createRgrFixture(
     `import assert from "node:assert/strict";\nimport test from "node:test";\nimport { value } from "./feature.mjs";\ntest(${JSON.stringify(testName)}, () => assert.equal(value, 1));\n`,
     { captureBaseline: false },
   );
   await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 0;\n");
-  git(fixture.worktree, "add", "feature.mjs");
+  for (const [path, content] of Object.entries(baselineFiles)) {
+    await writeFile(`${fixture.worktree}/${path}`, content);
+  }
+  git(fixture.worktree, "add", "feature.mjs", ...Object.keys(baselineFiles));
   git(fixture.worktree, "commit", "-qm", "feature baseline");
   const baseline = git(fixture.worktree, "rev-parse", "HEAD");
   const envPath = `${fixture.cycleDir}/harness.fixture.env`;
@@ -1479,6 +1495,7 @@ test("rgr baseline captures and records the current Node failure set", async () 
     'import assert from "node:assert/strict";\nimport test from "node:test";\ntest("existing failure", () => assert.equal(1, 2));\n',
     { captureBaseline: false },
   );
+  await commitBaselineRef(fixture);
 
   const result = runRgr(fixture, "baseline");
   assert.equal(result.status, 0, result.stderr);
@@ -1510,6 +1527,7 @@ test("plan case 58: failsets distinguish identical test names by file", async ()
     `${fixture.worktree}/passing.test.mjs`,
     'import test from "node:test";\ntest("duplicate name", () => {});\n',
   );
+  await commitBaselineRef(fixture);
 
   assert.equal(runRgr(fixture, "baseline").status, 0);
   const baseline = findRgrRecord(await readFile(`${fixture.cycleDir}/rgr.log`, "utf8"), "BASELINE");
@@ -1557,6 +1575,7 @@ test("rgr baseline recapture preserves numbered refs and advances current", asyn
     'import assert from "node:assert/strict";\nimport test from "node:test";\ntest("first baseline", () => assert.equal(1, 2));\n',
     { captureBaseline: false },
   );
+  await commitBaselineRef(fixture);
   assert.equal(runRgr(fixture, "baseline").status, 0);
   const cycleId = fixture.cycleDir.split("/").at(-1).replace(/^tmux-worker-cycle-/, "");
   const first = git(fixture.worktree, "rev-parse", `refs/rgr/${cycleId}/baseline/001`);
@@ -1593,11 +1612,12 @@ test("plan case 68: numbered baseline refs cannot be overwritten", async () => {
 });
 
 test("plan case 57: baseline recapture reports its diff without rewriting a closed cycle", async () => {
-  const fixture = await createClosedRgrFixture("baseline recapture cycle");
-  await writeFile(
-    `${fixture.worktree}/ambient.test.mjs`,
-    'import assert from "node:assert/strict";\nimport test from "node:test";\ntest("recaptured environment", () => assert.fail("ambient"));\n',
-  );
+  const fixture = await createClosedRgrFixture("baseline recapture cycle", {
+    baselineFiles: {
+      "ambient.test.mjs": 'import assert from "node:assert/strict";\nimport test from "node:test";\ntest("recaptured environment", () => assert.equal(process.env.RGR_AMBIENT_FAIL, undefined));\n',
+    },
+  });
+  fixture.rgrEnvironment = { RGR_AMBIENT_FAIL: "1" };
   assert.equal(runRgr(fixture, "baseline").status, 0);
 
   const result = runVerify(fixture.cycleDir);
@@ -1606,16 +1626,20 @@ test("plan case 57: baseline recapture reports its diff without rewriting a clos
 
   assert.equal(result.status, 0, report);
   assert.equal(rgrRecords(log, "BASELINE").length, 2);
-  assert.match(report, /warning baseline-recaptured from=001 to=002 added=1 removed=1/);
+  assert.match(report, /warning baseline-recaptured from=001 to=002 added=1 removed=0/);
   assert.match(report, /baseline-added seq=002 value="ambient\.test\.mjs::recaptured environment"/);
-  assert.match(report, /baseline-removed seq=002 value="behavior\.test\.mjs::baseline recapture cycle"/);
+  assert.doesNotMatch(report, /baseline-removed seq=002/);
 });
 
 test("plan case 70: a closed cycle remains bound to its immutable baseline after recapture", async () => {
-  const fixture = await createClosedRgrFixture("immutable cycle baseline");
+  const fixture = await createClosedRgrFixture("immutable cycle baseline", {
+    baselineFiles: {
+      "later-environment.test.mjs": 'import assert from "node:assert/strict";\nimport test from "node:test";\ntest("later environment", () => assert.equal(process.env.RGR_AMBIENT_FAIL, undefined));\n',
+    },
+  });
   const before = await readFile(`${fixture.cycleDir}/rgr.log`, "utf8");
   const cycleBaseline = findRgrRecord(before, "GREEN", 1).baseline;
-  await writeFile(`${fixture.worktree}/later-environment.test.mjs`, 'import assert from "node:assert/strict";\nimport test from "node:test";\ntest("later environment", () => assert.fail("later"));\n');
+  fixture.rgrEnvironment = { RGR_AMBIENT_FAIL: "1" };
   assert.equal(runRgr(fixture, "baseline").status, 0);
   const cycleId = fixture.cycleDir.split("/").at(-1).replace(/^tmux-worker-cycle-/, "");
   const current = git(fixture.worktree, "rev-parse", `refs/rgr/${cycleId}/baseline/current`);
@@ -1632,6 +1656,7 @@ test("rgr green accepts suite failures already present in the baseline", async (
     'import assert from "node:assert/strict";\nimport test from "node:test";\ntest("environmental failure", () => assert.equal(1, 2));\n',
     { captureBaseline: false },
   );
+  await commitBaselineRef(fixture);
   assert.equal(runRgr(fixture, "baseline").status, 0);
   await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 0;\n");
   await writeFile(
@@ -1659,6 +1684,7 @@ test("rgr green rejects and names a suite failure absent from the baseline", asy
     'import assert from "node:assert/strict";\nimport test from "node:test";\ntest("environmental failure", () => assert.equal(1, 2));\n',
     { captureBaseline: false },
   );
+  await commitBaselineRef(fixture);
   assert.equal(runRgr(fixture, "baseline").status, 0);
   await writeFile(
     `${fixture.worktree}/unrelated.test.mjs`,
@@ -1765,6 +1791,7 @@ test("rgr refactor rejects a failure that disappears from the GREEN set", async 
     { captureBaseline: false },
   );
   await writeFile(`${fixture.worktree}/environment.mjs`, "export const environment = 0;\n");
+  await commitBaselineRef(fixture);
   assert.equal(runRgr(fixture, "baseline").status, 0);
   await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 0;\n");
   await writeFile(
@@ -2464,7 +2491,9 @@ test("verify-rgr rejects a pre-harness log without the RGRLOG v1 header", async 
 });
 
 test("verify-rgr accepts a complete cycle whose anchored evidence is internally consistent", async () => {
-  const expectedBaselineFailures = 1;
+  // The cycle's own RED test did not exist at BASELINE_REF, so it is not a
+  // pre-existing failure and the baseline is empty.
+  const expectedBaselineFailures = 0;
   const fixture = await createClosedRgrFixture("verified cycle");
 
   const result = runVerify(fixture.cycleDir);
@@ -2923,6 +2952,7 @@ test("verify-rgr derives phase failsets even when both forged blobs agree", asyn
     `${fixture.worktree}/persistent.test.mjs`,
     'import assert from "node:assert/strict";\nimport test from "node:test";\ntest("persistent baseline failure", () => assert.equal(1, 2));\n',
   );
+  await commitBaselineRef(fixture, "persistent.test.mjs");
   await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 0;\n");
   assert.equal(runRgr(fixture, "baseline").status, 0);
   assert.equal(
@@ -3805,16 +3835,21 @@ test("rgr green expande {CHANGED_TESTS} con los tests cambiados y el seleccionad
 
 test("{CHANGED_TESTS} sin cambios usa sólo el test seleccionado", async () => {
   const fixture = await createTargetedFixture();
+  // Fix round 1 (C1): a baseline before the first RED with nothing touched no
+  // longer dies; it anchors an empty targeted failure set without running.
   const empty = runRgr(fixture, "baseline");
-  assert.notEqual(empty.status, 0);
-  assert.match(empty.stderr, /\{CHANGED_TESTS\} has no changed or selected test file/);
+  assert.equal(empty.status, 0, empty.stderr);
   await assert.rejects(readFile(fixture.argvFile, "utf8"));
+  const envText = await readFile(`${fixture.cycleDir}/harness.fixture.env`, "utf8");
+  const emptyFailset = envText.match(/^BASELINE_FAILSET=([0-9a-f]{40})$/m)?.[1];
+  assert.ok(emptyFailset, "empty baseline must still anchor a failure set");
+  assert.equal(git(fixture.worktree, "cat-file", "-s", emptyFailset), "0");
+  assert.match(envText, /^BASELINE_FAILURES_N=0$/m);
+  const baselineRecord = findRgrRecord(await readFile(`${fixture.cycleDir}/rgr.log`, "utf8"), "BASELINE");
+  assert.equal(baselineRecord.targeted, "empty");
 
   const red = runRgr(fixture, "red", "targeted", "--test-file", "behavior.test.mjs", "--name", "targeted behavior");
   assert.equal(red.status, 0, red.stderr);
-  const baseline = runRgr(fixture, "baseline");
-  assert.equal(baseline.status, 0, baseline.stderr);
-  assert.deepEqual(await fixture.recordedArgv(), ["behavior.test.mjs"]);
   await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 1;\n");
   const green = runRgr(fixture, "green");
   assert.equal(green.status, 0, green.stderr);
@@ -3827,6 +3862,65 @@ test("{CHANGED_TESTS} sin cambios usa sólo el test seleccionado", async () => {
   const verify = runVerify(fixture.cycleDir);
   assert.equal(verify.status, 0, verify.stdout);
   assert.doesNotMatch(await readFile(`${fixture.cycleDir}/verify-rgr.md`, "utf8"), /suite-completa/);
+});
+
+test("rgr baseline excluye tests que no existían en BASELINE_REF y GREEN rechaza su regresión", async () => {
+  const fixture = await createTargetedFixture();
+  await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 0;\nexport const other = 0;\n");
+  git(fixture.worktree, "add", "feature.mjs");
+  git(fixture.worktree, "commit", "-qm", "feature with other");
+  const envPath = `${fixture.cycleDir}/harness.fixture.env`;
+  await writeFile(envPath, (await readFile(envPath, "utf8"))
+    .replace(/^BASELINE_REF=.*$/m, `BASELINE_REF=${git(fixture.worktree, "rev-parse", "HEAD")}`));
+  await writeFile(
+    `${fixture.worktree}/new.test.mjs`,
+    'import assert from "node:assert/strict";\nimport test from "node:test";\nimport { value } from "./feature.mjs";\ntest("new behavior", () => assert.equal(value, 1));\n',
+  );
+
+  const baseline = runRgr(fixture, "baseline");
+  assert.equal(baseline.status, 0, baseline.stderr);
+  assert.deepEqual(await fixture.recordedArgv(), ["new.test.mjs"]);
+  const failset = (await readFile(envPath, "utf8")).match(/^BASELINE_FAILSET=([0-9a-f]{40})$/m)?.[1];
+  assert.doesNotMatch(git(fixture.worktree, "cat-file", "blob", failset), /new\.test\.mjs/);
+
+  assert.equal(runRgr(fixture, "red", "new", "--test-file", "new.test.mjs", "--name", "new behavior").status, 0);
+  await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 1;\nexport const other = 0;\n");
+  assert.equal(runRgr(fixture, "green").status, 0);
+  assert.equal(runRgr(fixture, "refactor", "NONE: one-line export").status, 0);
+  await writeFile(
+    `${fixture.worktree}/second.test.mjs`,
+    'import assert from "node:assert/strict";\nimport test from "node:test";\nimport { other } from "./feature.mjs";\ntest("second behavior", () => assert.equal(other, 1));\n',
+  );
+  assert.equal(runRgr(fixture, "red", "second", "--test-file", "second.test.mjs", "--name", "second behavior").status, 0);
+  await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 0;\nexport const other = 1;\n");
+  const regressed = runRgr(fixture, "green");
+
+  assert.equal(regressed.status, 2, regressed.stderr);
+  assert.match(regressed.stderr, /^new\.test\.mjs::new behavior$/m);
+});
+
+test("{CHANGED_TESTS} encuentra tests anidados con globs de prefijo", async () => {
+  const fixture = await createTargetedFixture();
+  const envPath = `${fixture.cycleDir}/harness.fixture.env`;
+  await writeFile(envPath, (await readFile(envPath, "utf8")).replace(/^TEST_GLOBS=.*$/m, "TEST_GLOBS=test_*.mjs *.test.mjs"));
+  await mkdir(`${fixture.worktree}/tests`, { recursive: true });
+  await writeFile(`${fixture.worktree}/tests/test_nested.mjs`, fixture.passing("nested"));
+  await writeFile(`${fixture.worktree}/test_root.mjs`, fixture.passing("root"));
+
+  const baseline = runRgr(fixture, "baseline");
+  assert.equal(baseline.status, 0, baseline.stderr);
+  assert.deepEqual(await fixture.recordedArgv(), ["test_root.mjs", "tests/test_nested.mjs"]);
+});
+
+test("SKILL define y protege los tests tocados del Main", async () => {
+  const skill = await readFile(new URL("SKILL.md", skillRoot), "utf8");
+  const worker = await readFile(new URL("worker_prompt_template.md", skillRoot), "utf8");
+
+  assert.ok(skill.includes("touched=$("));
+  assert.ok(skill.includes('[ -n "$touched" ] || { echo "no hay tests tocados"; exit 1; }'));
+  assert.ok(skill.includes(":(glob)**/"));
+  assert.ok(!worker.includes("Run unit + integration tests. Print exact pytest summary lines."));
+  assert.ok(worker.includes("pre-merge"));
 });
 
 test("verify-rgr advierte un TEST_CMD sin {CHANGED_TESTS}", async () => {
