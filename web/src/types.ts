@@ -231,6 +231,8 @@ export interface FlowStageProgress {
   /** Cumplida: cuándo se cerró. En curso: cuándo empezó. */
   at?: number;
   attempts?: number;
+  /** El veredicto del gate de merge no se le pudo entregar al worker. Espejo de server/src/types.ts. */
+  attention?: "gate-sin-entregar";
 }
 
 export interface SessionFlow {

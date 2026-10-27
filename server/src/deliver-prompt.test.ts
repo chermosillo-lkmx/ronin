@@ -69,3 +69,8 @@ test("deliverPromptWhenReady: reintenta Enter de forma acotada mientras queda pa
   await deliverPromptWhenReady("cowork-a", "x".repeat(2_960), d);
   assert.deepEqual(d.calls, ["paste:2960", "enter", "enter"]);
 });
+
+test("deliverPromptWhenReady: devuelve true al entregar y false si la CLI nunca apareció", async () => {
+  assert.equal(await deliverPromptWhenReady("cowork-a", "corto", deps(["Claude Code\n❯ ", "Claude Code\n❯ "])), true);
+  assert.equal(await deliverPromptWhenReady("cowork-a", "corto", deps(["shell$ "])), false);
+});

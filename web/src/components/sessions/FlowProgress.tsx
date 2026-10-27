@@ -76,6 +76,11 @@ function Marker({ status }: { status: FlowStageProgress["status"] }) {
 
 /** Línea de meta de una etapa. Sin dato que dar, cadena vacía: la fila se queda sin segundo renglón. */
 export function stageMeta(stage: FlowStageProgress, now: number): string {
+  if (stage.attention === "gate-sin-entregar") return [stageMetaBase(stage, now), "veredicto sin entregar al worker"].filter(Boolean).join(" · ");
+  return stageMetaBase(stage, now);
+}
+
+function stageMetaBase(stage: FlowStageProgress, now: number): string {
   if (stage.status === "failed")
     return `falló la verificación${stage.attempts ? ` · intento ${stage.attempts}` : ""}`;
   if (stage.status === "current")

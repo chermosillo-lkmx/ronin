@@ -11,6 +11,7 @@ import type { SessionFlow, FlowStageProgress } from "./types.js";
  *  · las cumplidas               → el archivo centinela que el agente toca al cerrar cada etapa
  *  · el reloj                    → el mtime de ese centinela
  *  · la verificación fallida     → verify-<etapa>.json (P2)
+ *  · el veredicto sin entregar   → verify-<etapa>.json con notify "failed" (gate de merge)
  *
  * Se llama en el mismo barrido que ya arma el inventario, así que es de sólo lectura, síncrono y
  * nunca lanza: un ciclo a medio escribir devuelve null y el inspector se queda como estaba.
@@ -40,7 +41,10 @@ export function readFlowProgress(cycle: string): SessionFlow | null {
     const at = cumplidas[i] ? mtimeOf(cycle, stage.key) : i === enCurso ? previa : null;
     if (cumplidas[i] && at !== null) previa = at;
 
-    const verify = i === enCurso ? readVerifyState(cycle, stage.key) : null;
+    // El estado de verificación se lee en todas las etapas: el gate de merge corre cuando su
+    // centinela ya está tocado, así que su aviso fallido puede estar en una etapa `done`.
+    const estado = readVerifyState(cycle, stage.key);
+    const verify = i === enCurso ? estado : null;
     const status: FlowStageProgress["status"] = cumplidas[i]
       ? "done"
       : i !== enCurso ? "pending"
@@ -54,6 +58,7 @@ export function readFlowProgress(cycle: string): SessionFlow | null {
       status,
       ...(at !== null ? { at } : {}),
       ...(status === "failed" && verify ? { attempts: verify.attempts } : {}),
+      ...(estado?.notify === "failed" ? { attention: "gate-sin-entregar" as const } : {}),
     };
   });
 

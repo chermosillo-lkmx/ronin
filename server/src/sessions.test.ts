@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { attachAttention, attachFlow, attachPaneEngines, attachPaneRoles, attachUsageLimit, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
+import { attachAttention, attachFlow, attachGateAttention, attachPaneEngines, attachPaneRoles, attachUsageLimit, buildInventory, classifySession, inventoryFromRaw, isSafeSessionName, parsePaneList, parseSessionList, withLaunchRequests } from "./sessions.js";
 import { AttentionTracker } from "./attention-tracker.js";
 
 // Salidas de `tmux list-sessions -F` y `tmux list-panes -a -F` con los formatos de sessions.ts.
@@ -399,4 +399,22 @@ test("parsePaneList: window_active viaja como windowActive en ambos formatos y e
   // tabulado: octavo campo
   const tab = parsePaneList("10\\t0\\t%4\\tzsh\\tterminal\\t\\t1\\t0");
   assert.equal(tab.get("10")![0].windowActive, false);
+});
+
+test("attachGateAttention: un veredicto sin entregar pone en decisión a un worker ocioso, con la razón", () => {
+  const base = buildInventory("cowork-x\t1\t1753747200\t0", "cowork-x\t0\t%1\tzsh\t\t\t1", () => true)[0]!;
+  const flow = { done: 2, total: 3, stages: [
+    { key: "impl", label: "Impl", status: "done" as const },
+    { key: "pre-merge", label: "Gate", status: "done" as const, attention: "gate-sin-entregar" as const },
+    { key: "pr", label: "PR", status: "current" as const },
+  ] };
+  const [ocioso, trabajando, sinAviso] = attachGateAttention([
+    { ...base, flow, attention: { level: "idle", paneId: "%1", since: 5 } },
+    { ...base, flow, attention: { level: "working", paneId: "%1" } },
+    { ...base, flow: { ...flow, stages: flow.stages.map(({ attention: _a, ...s }) => s) }, attention: { level: "idle", paneId: "%1" } },
+  ]);
+  assert.deepEqual(ocioso!.attention, { level: "decision", paneId: "%1", since: 5, question: "Ronin no pudo entregarle al worker el veredicto del gate pre-merge" });
+  // Un worker trabajando sigue trabajando: el driver de gates lee `working` para no correr a media faena.
+  assert.equal(trabajando!.attention!.level, "working");
+  assert.equal(sinAviso!.attention!.level, "idle");
 });

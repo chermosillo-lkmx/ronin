@@ -12,6 +12,7 @@ function sources(overrides: Partial<VerifyDriverDepSources> = {}): VerifyDriverD
     detectStage: () => null,
     gateSettings: () => ({ timeoutMin: 45, maxConcurrent: 2 }),
     repoGate: () => ({}),
+    deliverPrompt: async () => true,
     ...overrides,
   };
 }
@@ -166,4 +167,17 @@ test("maxConcurrent sale de gate.maxConcurrent de settings, leído en cada llama
   assert.equal(deps.maxConcurrent?.(), 2);
   max = 4;
   assert.equal(deps.maxConcurrent?.(), 4);
+});
+
+test("notify: true si la entrega llegó; false si deliverPrompt dice que no o lanza", async () => {
+  const vistos: Array<[string, string]> = [];
+  const ok = createVerifyDriverDeps(sources({ deliverPrompt: async (s, t) => { vistos.push([s, t]); return true; } }));
+  assert.equal(await ok.notify!("cowork-x", "UNIT-GATE: PASS"), true);
+  assert.deepEqual(vistos, [["cowork-x", "UNIT-GATE: PASS"]]);
+
+  const sinCli = createVerifyDriverDeps(sources({ deliverPrompt: async () => false }));
+  assert.equal(await sinCli.notify!("cowork-x", "t"), false);
+
+  const lanza = createVerifyDriverDeps(sources({ deliverPrompt: async () => { throw new Error("tmux"); } }));
+  assert.equal(await lanza.notify!("cowork-x", "t"), false);
 });

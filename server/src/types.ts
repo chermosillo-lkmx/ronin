@@ -195,6 +195,8 @@ export interface FlowStageProgress {
   at?: number;
   /** Intentos gastados de verifyCmd; sólo viaja con `failed`. */
   attempts?: number;
+  /** El veredicto del gate de merge no se le pudo entregar al worker (verify notify "failed"). */
+  attention?: "gate-sin-entregar";
 }
 
 export interface SessionFlow {

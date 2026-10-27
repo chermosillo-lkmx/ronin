@@ -193,3 +193,31 @@ test("readCycleRecord: un ciclo inexistente no se anuncia como sin registrar", (
   const rec = readCycleRecord(join(tmpdir(), "no-existe-jamas-cycle-record"));
   assert.equal(rec.unrecorded, false);
 });
+
+test("readFlowProgress: gate-sin-entregar en la etapa cuyo veredicto no se le pudo entregar al worker", () => {
+  const dir = cicloTemporal();
+  try {
+    // El gate es de `tests` y el worker ya tocó su centinela: la etapa sale `done`, pero el aviso
+    // fallido tiene que verse igual.
+    centinela(dir, "planning", 1_700_000_000_000);
+    centinela(dir, "implementing", 1_700_000_100_000);
+    centinela(dir, "tests", 1_700_000_200_000);
+    writeFileSync(join(dir, "verify-tests.json"), JSON.stringify({ attempts: 0, status: "passed", notify: "failed" }));
+    const flujo = readFlowProgress(dir)!;
+    assert.equal(flujo.stages[2]!.attention, "gate-sin-entregar");
+    assert.equal(flujo.stages.filter((s) => s.attention).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readFlowProgress: un veredicto entregado (notify sent) no pide atención", () => {
+  const dir = cicloTemporal();
+  try {
+    centinela(dir, "tests", 1_700_000_200_000);
+    writeFileSync(join(dir, "verify-tests.json"), JSON.stringify({ attempts: 0, status: "passed", notify: "sent" }));
+    assert.equal(readFlowProgress(dir)!.stages.some((s) => "attention" in s), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

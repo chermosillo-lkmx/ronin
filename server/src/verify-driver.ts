@@ -44,9 +44,21 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  * - Una corrida por sesión: mientras un gate de la sesión corre, los demás de esa sesión esperan
  *   (mismo worktree).
  *
- * Lo que este driver NO hace, a propósito: no le escribe al worker. Ronin observa el flujo, no lo
- * ejecuta — quien toca los sentinelas y avanza es el propio worker dentro de tmux. El gate deja el
- * veredicto por escrito (estado persistido + informe); avisar al worker es una decisión aparte.
+ * Lo único que este driver le escribe al worker: el veredicto de un gate de merge. Ronin observa
+ * el flujo, no lo ejecuta — quien toca los sentinelas y avanza es el propio worker dentro de tmux —
+ * pero ante el gate de merge el worker se queda OCIOSO esperando un veredicto que sólo quedaba en
+ * disco: sin aviso, o sondeaba el JSON a ciegas o se quedaba parado. Por eso, y sólo para ese
+ * gate, cada desenlace nuevo (PASS de corrida o de caché, árbol sucio, HEADs ilegibles, árbol que
+ * cambió, FAIL) se le entrega como un prompt corto (`verdictMessage`) con `notify`:
+ * - Una vez por desenlace: escribir un desenlace deja el estado sin `notify`; al resolverse la
+ *   entrega se anota `sent` o `failed`. Un desenlace ya avisado no se vuelve a escribir, así que no
+ *   se repite; tras re-armar (SHA nuevo) el desenlace es otro y se avisa otra vez.
+ * - Fuera del tick: la entrega puede esperar ~30 s a la TUI y nunca retiene el tick ni el cupo.
+ *   Al resolverse sólo marca el estado si sigue siendo el mismo desenlace que se avisó.
+ * - Una entrega fallida queda `notify: "failed"` y NO se reintenta: escribir a ciegas en un pane
+ *   que no responde es peor que avisar al operador, y `flow-progress` la marca como
+ *   `gate-sin-entregar` para que el semáforo la muestre.
+ * Los gates normales no avisan: siguen dejando su veredicto sólo por escrito.
  */
 
 export const DEFAULT_GATE_RETRIES = 2;
@@ -170,7 +182,41 @@ export interface DriverDeps {
   gateConfig(repo: string): { timeoutMs: number; env: Record<string, string> };
   /** Cupo global de corridas simultáneas (`gate.maxConcurrent` de settings), leído en cada tick. */
   maxConcurrent?(): number;
+  /**
+   * Le entrega al worker de la sesión un prompt corto; false si no llegó (CLI ausente o error).
+   * Sólo lo usa el gate de merge. Sin él, el veredicto queda sólo por escrito, como antes.
+   */
+  notify?(session: string, text: string): Promise<boolean>;
   logError?(error: unknown): void;
+}
+
+/**
+ * El aviso del gate de merge al worker. Pura: sale del estado ya escrito.
+ * `next`: la etapa que sigue al gate en el flujo (null si es la última). `worktree`: dónde están
+ * los sub-repos; el log de cada uno vive en `<sub-repo>/reports/ronin-gate/`.
+ */
+export function verdictMessage(stageKey: string, state: VerifyState, cycle: string, next: string | null, worktree?: string): string {
+  if (state.status === "passed") {
+    const sha = Object.values(state.shas ?? {})[0]?.slice(0, 7);
+    const cuanto = state.reason === "caché" ? "caché" : `${Math.max(1, Math.round((state.durationMs ?? 0) / 60_000))} min`;
+    return `UNIT-GATE: PASS (${sha ? `${sha}, ` : ""}${cuanto}) — continúa con ${next ?? "la siguiente etapa"}`;
+  }
+  const razon = state.reason ? ` — ${state.reason}` : "";
+  return `UNIT-GATE: FAIL${razon} — lee ${cycle}/verify-${stageKey}.json y unit-gate.log en ${worktree ?? "el worktree"}/<sub-repo>/reports/ronin-gate/; arregla con tests dirigidos, commitea y vuelve a tocar el sentinela`;
+}
+
+/** JSON con las claves ordenadas: releer de disco (`parseVerifyState`) cambia el orden. */
+function canonico(valor: unknown): string {
+  if (!valor || typeof valor !== "object") return JSON.stringify(valor) ?? "undefined";
+  const obj = valor as Record<string, unknown>;
+  return `{${Object.keys(obj).filter((k) => obj[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canonico(obj[k])}`).join(",")}}`;
+}
+
+/** Mismo desenlace: igual salvo las marcas de cola y el propio `notify`, sin importar el orden. */
+function mismoDesenlace(a: VerifyState, b: VerifyState): boolean {
+  const { notify: _na, ...ra } = sinMarcas(a);
+  const { notify: _nb, ...rb } = sinMarcas(b);
+  return canonico(ra) === canonico(rb);
 }
 
 /** Clave de armado en memoria y de cupo: el estado persistido guarda intentos, no el rearme. */
@@ -191,6 +237,8 @@ export interface GateSlots {
    * del inventario no deja su marca para siempre.
    */
   marked?: Map<string, { cycle: string; stageKey: string }>;
+  /** Interno del driver (se crea solo): entregas de veredicto en curso. Se borran solas al resolverse. */
+  entregas?: Set<Promise<void>>;
 }
 
 /** Una corrida lista para lanzar: corre, escribe el desenlace y devuelve el informe. */
@@ -218,6 +266,7 @@ export async function tickOnce(
   onReport?: (r: GateReport) => void,
 ): Promise<void> {
   const marcados = (slots.marked ??= new Map());
+  const entregas = (slots.entregas ??= new Set());
   const vigentes = new Set<string>(); // lanzadas o encoladas en este tick: su marca es actual
   // Registrar un error nunca puede lanzar: dentro de una corrida en vuelo eso sería un rechazo sin dueño.
   const registrar = (error: unknown): void => {
@@ -233,6 +282,31 @@ export async function tickOnce(
     } catch (error) {
       registrar(error);
     }
+  };
+  /**
+   * Avisa al worker un desenlace recién escrito del gate de merge, sin esperar. Nunca lanza: una
+   * entrega que falla o revienta queda `notify: "failed"`. Sólo marca el estado si sigue siendo
+   * el desenlace avisado — una entrega lenta no puede sellar uno más nuevo.
+   */
+  const avisar = (session: string, cycle: string, stageKey: string, state: VerifyState, next: string | null, worktree: string): void => {
+    if (!deps.notify) return;
+    const entrega = (async () => {
+      let ok = false;
+      try {
+        ok = (await deps.notify!(session, verdictMessage(stageKey, state, cycle, next, worktree))) === true;
+      } catch (error) {
+        registrar(error);
+      }
+      try {
+        const actual = deps.readState(cycle, stageKey);
+        if (actual && actual.notify === undefined && mismoDesenlace(actual, state)) {
+          deps.writeState(cycle, stageKey, { ...actual, notify: ok ? "sent" : "failed" });
+        }
+      } catch (error) {
+        registrar(error);
+      }
+    })().finally(() => entregas.delete(entrega));
+    entregas.add(entrega);
   };
 
   let sesiones: SessionSnapshot[];
@@ -294,8 +368,10 @@ export async function tickOnce(
       const encolado = previo?.queued === true;
       if (encolado || huerfana) marcados.set(clave, { cycle, stageKey: gate.key });
 
+      const next = stages[stages.findIndex((s) => s.key === gate.key) + 1]?.key ?? null;
+      const avisarDesenlace = (state: VerifyState) => avisar(sesion.name, cycle, gate.key, state, next, worktree);
       const corrida = gate.mergeGate
-        ? await planMergeGate(deps, sesion, launch.repo, worktree, cycle, gate, heads, informar)
+        ? await planMergeGate(deps, sesion, launch.repo, worktree, cycle, gate, heads, informar, avisarDesenlace)
         : planGate(deps, sesion, launch.repo, worktree, cycle, gate, armed.get(clave) === true || huerfana || encolado, () => armed.set(clave, true));
       if (!corrida) continue;
 
@@ -389,10 +465,13 @@ async function planMergeGate(
   gate: Gate,
   heads: RepoHead[] | null | undefined,
   informar: (r: GateReport) => void,
+  avisar: (state: VerifyState) => void,
 ): Promise<Corrida | null> {
   if (sesion.busy) return null;
+  // Todo desenlace del gate de merge pasa por aquí: se escribe (sin `notify`) y se avisa al worker.
   const informe = (state: VerifyState, output: string): GateReport => {
     deps.writeState(cycle, gate.key, state);
+    avisar(state);
     return { session: sesion.name, stageKey: gate.key, status: state.status, attempts: state.attempts, output };
   };
 

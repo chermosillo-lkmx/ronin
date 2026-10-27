@@ -1,3 +1,4 @@
+import { deliverPromptWhenReady } from "./engine.js";
 import { getRepoGate, type RepoGate } from "./repo-config.js";
 import { readLaunchRecord, readTmuxInventory } from "./sessions.js";
 import { readGateSettings, type GateSettings } from "./settings.js";
@@ -20,6 +21,8 @@ export interface VerifyDriverDepSources {
   detectStage(cycle: string, order: string[]): string | null;
   gateSettings(): GateSettings;
   repoGate(repo: string): RepoGate;
+  /** Escribe un prompt en el worker cuando su CLI está lista; false/throw = no llegó. */
+  deliverPrompt(session: string, text: string): Promise<boolean>;
 }
 
 /** Carpeta propia de reportes del gate de Ronin, relativa al worktree (la lee unit-gate.sh). */
@@ -64,6 +67,15 @@ export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverD
     // Se lee en cada llamada: un cambio en settings.json o repo-config.json aplica sin reiniciar.
     gateConfig: (repo) => gateConfigFrom(sources.gateSettings(), sources.repoGate(repo)),
     maxConcurrent: () => sources.gateSettings().maxConcurrent,
+    // El veredicto del gate de merge al worker. Cualquier fallo es `false`: el driver lo anota como
+    // `notify: "failed"` y no reintenta.
+    notify: async (session, text) => {
+      try {
+        return (await sources.deliverPrompt(session, text)) === true;
+      } catch {
+        return false;
+      }
+    },
     logError: (error) => console.error("[claude-cowork]", error),
   };
 }
@@ -77,4 +89,5 @@ export const realVerifyDriverDeps = createVerifyDriverDeps({
   detectStage,
   gateSettings: () => readGateSettings(),
   repoGate: getRepoGate,
+  deliverPrompt: (session, text) => deliverPromptWhenReady(session, text),
 });

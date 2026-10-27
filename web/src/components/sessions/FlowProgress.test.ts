@@ -92,3 +92,8 @@ test("stageMeta: la etapa en curso muestra el tiempo que lleva", () => {
 test("stageMeta: una cumplida sin mtime no inventa un reloj", () => {
   assert.equal(stageMeta({ key: "x", label: "X", executor: "codex", status: "done" }, AHORA), "codex");
 });
+
+test("stageMeta: una etapa con el veredicto del gate sin entregar lo dice", () => {
+  const meta = stageMeta({ key: "pre-merge", label: "Gate", status: "done", attention: "gate-sin-entregar" }, AHORA);
+  assert.match(meta, /veredicto sin entregar al worker/);
+});
