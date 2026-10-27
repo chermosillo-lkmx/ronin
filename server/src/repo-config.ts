@@ -4,6 +4,7 @@ import { dataPath } from "./data-dir.js";
 import { sanitizeModel } from "./models.js";
 import { validateStages, type WorkflowConfig } from "./workflow.js";
 import { listRepos } from "./repos.js";
+import { boundedInt, GATE_TIMEOUT_RANGE } from "./settings.js";
 
 /** `learned`: skills que Ronin aprendió y el usuario aprobó (<dataDir>/skills/learned); nunca llevan sourceRepo. */
 export type SkillRoot = "global" | "learned" | "repo-claude" | "repo-skills";
@@ -36,6 +37,9 @@ const COMMENT =
   "(comando shell que ejecuta el gate por-stage) — sólo se honra aquí (gitignored, mismo trust boundary " +
   "que startCommand/vars); en el workflow global (git-tracked) se ignora. Editable desde ⚙ Configuración → Workflows o a mano.";
 
+/** Override por repo del gate de pruebas: timeout (min) y workers de pytest-xdist. */
+export interface RepoGate { timeoutMin?: number; xdist?: number; }
+
 interface RepoEntry {
   workflow?: WorkflowConfig; // validated on load; absent → inherit default
   vars?: Record<string, string>;
@@ -45,6 +49,7 @@ interface RepoEntry {
   plannerModel?: string; // sanitized model alias/id; absent → inherit PLANNER_MODEL
   workerModel?: string;  // sanitized model alias/id; absent → inherit WORKER_MODEL
   skills?: SkillRef[];
+  gate?: RepoGate; // absent → defaults globales (settings.json)
 }
 type Store = Record<string, RepoEntry>;
 
@@ -58,6 +63,15 @@ function sanitizeVars(v: unknown): Record<string, string> {
     for (const [k, val] of Object.entries(v as Record<string, unknown>))
       if (typeof val === "string" && VAR_KEY.test(k) && !/[\r\n]/.test(val)) out[k] = val;
   return out;
+}
+
+/** Conserva sólo los campos válidos del gate; sin ninguno → undefined (no hay override). */
+function sanitizeGate(raw: unknown): RepoGate | undefined {
+  const r = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const timeoutMin = boundedInt(r.timeoutMin, GATE_TIMEOUT_RANGE);
+  const xdist = boundedInt(r.xdist, { min: 1, max: 32 });
+  const gate: RepoGate = { ...(timeoutMin !== undefined ? { timeoutMin } : {}), ...(xdist !== undefined ? { xdist } : {}) };
+  return Object.keys(gate).length ? gate : undefined;
 }
 
 const SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -110,6 +124,8 @@ export function sanitizeEntry(raw: any): RepoEntry {
   if (pm) e.plannerModel = pm;
   if (wm) e.workerModel = wm;
   e.skills = sanitizeSkillRefs(raw?.skills);
+  const gate = sanitizeGate(raw?.gate);
+  if (gate) e.gate = gate;
   return e;
 }
 
@@ -159,6 +175,10 @@ export function getRepoSetupCommand(repo: string): string | null {
   const sc = S()[slugKey(repo)]?.setupCommand; // "" NO lo atrapa ?? — en blanco es "no declarado"
   return sc && sc.trim() ? sc : null;
 }
+/** Override del gate para un repo; {} = sin override. Barato y nunca lanza (se llama en cada tick del driver). */
+export function getRepoGate(repo: string): RepoGate {
+  return { ...(S()[slugKey(repo)]?.gate ?? {}) };
+}
 export function getRepoPlannerModel(repo: string): string {
   const m = S()[slugKey(repo)]?.plannerModel;
   return m && m.trim() ? m : PLANNER_MODEL;
@@ -179,6 +199,7 @@ export interface RepoConfigFull {
   workerModel: string;   // RAW stored value ("" = inherit WORKER_MODEL)
   usesDefaultWorkflow: boolean;
   skills: SkillRef[];
+  gate: RepoGate; // {} = sin override; se conserva al guardar aunque la UI no lo edite
 }
 export function readRepoConfigFull(repo: string): RepoConfigFull {
   const entry = S()[slugKey(repo)];
@@ -193,6 +214,7 @@ export function readRepoConfigFull(repo: string): RepoConfigFull {
     workerModel: entry?.workerModel ?? "",   // raw: empty means "inherit WORKER_MODEL"
     usesDefaultWorkflow: !wf,
     skills: (entry?.skills ?? []).map((ref) => ({ ...ref })),
+    gate: getRepoGate(repo),
   };
 }
 
@@ -214,6 +236,7 @@ export function saveRepoOverrides(
     workerModel?: unknown;
     inheritWorkflow?: boolean;
     skills?: unknown;
+    gate?: unknown;
   }
 ): RepoConfigFull {
   const key = slugKey(repo);
@@ -237,6 +260,9 @@ export function saveRepoOverrides(
   // Settings/workflow saves predate skills[] and don't send it; retain an existing association
   // in that case. An explicit [] is how the Skills UI clears it.
   entry.skills = input.skills === undefined ? (S()[key]?.skills ?? []).map((ref) => ({ ...ref })) : sanitizeSkillRefs(input.skills);
+  // Igual que skills: un guardado que no manda gate (Settings/workflow) conserva el escrito a mano.
+  const gate = input.gate === undefined ? S()[key]?.gate : sanitizeGate(input.gate);
+  if (gate) entry.gate = { ...gate };
 
   const next: Store = { ...S() };
   // Drop-empty predicate MUST include the model fields, else a repo overriding only a
@@ -250,6 +276,7 @@ export function saveRepoOverrides(
     !entry.plannerModel &&
     !entry.workerModel
     && entry.skills.length === 0
+    && !entry.gate
   )
     delete next[key];
   else next[key] = entry;
@@ -283,5 +310,6 @@ export function addRepoSkillAssociation(repo: string, ref: SkillRef, io: RepoSki
     plannerModel: current.plannerModel,
     workerModel: current.workerModel,
     skills: [...current.skills, ref],
+    gate: current.gate,
   });
 }

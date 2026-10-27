@@ -5,7 +5,7 @@ import { test } from "node:test";
 // data/repo-config.json, using a throwaway repo key so real overrides are never touched.
 // test.after() removes the scratch key so the file is left clean.
 
-const { getRepoPlannerModel, getRepoSetupCommand, getRepoWorkerModel, saveRepoOverrides, readRepoConfigFull, sanitizeEntry } =
+const { getRepoGate, getRepoPlannerModel, getRepoSetupCommand, getRepoWorkerModel, saveRepoOverrides, readRepoConfigFull, sanitizeEntry } =
   await import("./repo-config.js");
 const { PLANNER_MODEL, WORKER_MODEL } = await import("./config.js");
 
@@ -159,4 +159,39 @@ test("addRepoSkillAssociation agrega la referencia conservando el resto del over
   );
   addRepoSkillAssociation("acme-api", { root: "global", name: "api-review" }, io);
   assert.equal(saved.length, 1);
+});
+
+test("sanitizeEntry conserva gate.timeoutMin y gate.xdist válidos", () => {
+  assert.deepEqual(sanitizeEntry({ gate: { timeoutMin: 60, xdist: 4 } }).gate, { timeoutMin: 60, xdist: 4 });
+  assert.deepEqual(sanitizeEntry({ gate: { xdist: 8 } }).gate, { xdist: 8 });
+});
+
+test("sanitizeEntry descarta gate.xdist 0 y gate.timeoutMin 999", () => {
+  assert.equal(sanitizeEntry({ gate: { timeoutMin: 999, xdist: 0 } }).gate, undefined);
+  assert.deepEqual(sanitizeEntry({ gate: { timeoutMin: "30", xdist: 33 } }).gate, undefined);
+  assert.deepEqual(sanitizeEntry({ gate: { timeoutMin: 30, xdist: 1.5 } }).gate, { timeoutMin: 30 });
+});
+
+test("getRepoGate devuelve {} para un repo desconocido sin lanzar", () => {
+  assert.deepEqual(getRepoGate("repo-que-no-existe-gate"), {});
+});
+
+test("saveRepoOverrides no pierde un gate ya cargado y readRepoConfigFull/getRepoGate lo exponen", () => {
+  const repo = "zz-gate-scratch";
+  try {
+    saveRepoOverrides(repo, { vars: { A: "1" }, gate: { timeoutMin: 60, xdist: 4 } });
+    assert.deepEqual(getRepoGate(repo), { timeoutMin: 60, xdist: 4 });
+    // un guardado que no manda gate (Settings/workflow) lo conserva
+    const guardado = saveRepoOverrides(repo, { vars: { A: "2" } });
+    assert.deepEqual(guardado.gate, { timeoutMin: 60, xdist: 4 });
+    assert.deepEqual(getRepoGate(repo), { timeoutMin: 60, xdist: 4 });
+    // un repo con sólo gate no se descarta como entrada vacía
+    saveRepoOverrides(repo, { vars: {}, gate: { xdist: 2 } });
+    assert.deepEqual(getRepoGate(repo), { xdist: 2 });
+    // un gate inválido explícito lo limpia
+    saveRepoOverrides(repo, { gate: { xdist: 0 } });
+    assert.deepEqual(getRepoGate(repo), {});
+  } finally {
+    saveRepoOverrides(repo, { gate: {} });
+  }
 });
