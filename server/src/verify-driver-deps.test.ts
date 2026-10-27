@@ -236,3 +236,9 @@ test("notify: sin un conductor inequívoco devuelve false y no escribe en ningú
   for (const d of [ambiguo, ausente, otra, diagnostico, lanza]) assert.equal(await d.notify!("cowork-x", "t"), false);
   assert.equal(llamadas, 0);
 });
+
+test("el driver real lee el mtime de los sentinelas (vuelta a pre-merge desde pr/merge)", () => {
+  const deps = createVerifyDriverDeps(sources({}));
+  assert.equal(typeof deps.sentinelAt, "function");
+  assert.equal(deps.sentinelAt!("/no/existe/ronin-ciclo", "pre-merge"), null);
+});

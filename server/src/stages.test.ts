@@ -21,6 +21,7 @@ import {
   readSentinelsTail,
   readVerifyState,
   removeCycleDir,
+  sentinelMtime,
   verifierSpawned,
   verifyPassed,
   writeModelsInfo,
@@ -303,6 +304,7 @@ test("readVerifyState conserva shas, durationMs y notify", () => {
       queued: false,
       running: true,
       notify: "sent" as const,
+      notifiedAt: 120,
       reason: "ok",
     };
     writeVerifyState(cycle, "unit", st);
@@ -323,6 +325,7 @@ test("readVerifyState: campo con tipo incorrecto se ignora, el resto se lee", ()
         shas: { api: 5 },
         durationMs: "x",
         notify: "maybe",
+        notifiedAt: "ayer",
         queued: "yes",
         reason: "r",
       }),
@@ -365,6 +368,21 @@ test("verify state: el marcador sin-gate sobrevive a releer y nunca cuenta como 
     writeVerifyState(cycle, "pre-merge", { attempts: 0, status: "sin-gate", at: 1 });
     assert.equal(readVerifyState(cycle, "pre-merge")?.status, "sin-gate");
     assert.equal(verifyPassed(cycle, "pre-merge"), false);
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("sentinelMtime: mtime (ms) del sentinela de una etapa, null si no existe o es una carpeta", () => {
+  const cycle = mkdtempSync(join(tmpdir(), "ronin-sentinel-mtime-"));
+  try {
+    assert.equal(sentinelMtime(cycle, "pre-merge"), null);
+    writeFileSync(join(cycle, "pre-merge"), "");
+    const at = sentinelMtime(cycle, "pre-merge");
+    assert.equal(typeof at, "number");
+    assert.ok(at! <= Date.now() + 1000);
+    ensureCycleDir(cycle);
+    assert.equal(sentinelMtime(cycle, "evidence"), null);
   } finally {
     rmSync(cycle, { recursive: true, force: true });
   }

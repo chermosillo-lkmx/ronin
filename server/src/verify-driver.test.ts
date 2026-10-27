@@ -1470,3 +1470,129 @@ test("provisión fallida: antes de alcanzar el gate de merge no se escribe nada"
   assert.deepEqual(a.escritos, []);
   assert.deepEqual(a.mensajes, []);
 });
+
+// ---- Vuelta a pre-merge desde pr/merge: el sentinela re-tocado re-habilita el gate ----
+
+const MERGE_CURL: GateStage[] = [...MERGE, { key: "curl", label: "Curl" }];
+/** mtimes de sentinelas por etapa (ms); ausente = sentinela sin tocar. */
+const tocados = (m: Record<string, number>) => (_c: string, k: string): number | null => m[k] ?? null;
+
+test("selectGate: con enGate, un gate de merge resuelto se re-arma aunque la etapa más lejana sea otra", () => {
+  const passed = (): VerifyState => ({ attempts: 0, status: "passed", shas: { api: SHA_A } });
+  const enPreMerge = (k: string) => k === "pre-merge";
+  assert.equal(selectGate(MERGE, "pr", passed, () => limpio(SHA_B), enPreMerge)?.key, "pre-merge");
+  assert.equal(selectGate(MERGE, "pr", passed, () => limpio(SHA_A), enPreMerge), null);
+  assert.equal(selectGate(MERGE, "pr", passed, () => limpio(SHA_B), () => false), null);
+});
+
+test("vuelve a pre-merge desde pr con SHA nuevo → corre y notifica", async () => {
+  let lecturas = 0;
+  const a = avisos({
+    detect: () => "pr",
+    heads: async () => { lecturas++; return limpio(SHA_B); },
+    sentinelAt: tocados({ implementing: 100, "pre-merge": 300, pr: 200 }),
+  });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await a.tick();
+  assert.ok(lecturas >= 1);
+  assert.equal(a.corridas.length, 1);
+  assert.equal(a.estado()?.status, "passed");
+  assert.deepEqual(a.estado()?.shas, { api: SHA_B });
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: PASS \(bbbbbbb, /);
+});
+
+test("vuelve a pre-merge desde pr con el mismo SHA aprobado → no corre pero re-entrega una vez el veredicto vigente", async () => {
+  const ahora = 10 * 60_000;
+  const a = avisos({
+    detect: () => "pr",
+    heads: async () => limpio(SHA_A),
+    sentinelAt: tocados({ implementing: 100, "pre-merge": 300, pr: 200 }),
+    now: () => ahora,
+  });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, durationMs: 60_000, at: 150, notify: "sent" });
+  await a.tick();
+  assert.equal(a.corridas.length, 0);
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: PASS \(aaaaaaa, 1 min\) — continúa con pr$/);
+  assert.equal(a.estado()?.status, "passed");
+  assert.deepEqual(a.estado()?.shas, { api: SHA_A });
+  assert.equal(a.estado()?.notify, "sent");
+  assert.equal(a.estado()?.notifiedAt, ahora);
+  // Una sola vez: el re-toque ya quedó respondido.
+  await a.tick();
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  assert.equal(a.corridas.length, 0);
+});
+
+test("re-entrega: con intentos agotados y SHA nuevo responde intentos agotados, sin correr", async () => {
+  const a = avisos({
+    detect: () => "pr",
+    heads: async () => limpio(SHA_B),
+    sentinelAt: tocados({ "pre-merge": 300, pr: 200 }),
+    now: () => 1000,
+  });
+  a.setEstado({ attempts: 3, status: "failed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await a.tick();
+  assert.equal(a.corridas.length, 0);
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — intentos agotados \(3\/3\)/);
+});
+
+test("re-entrega: no se repite si el sentinela es anterior al último aviso, ni con el árbol sucio, ni sin entregar el primero", async () => {
+  const viejo = avisos({ detect: () => "pr", heads: async () => limpio(SHA_A), sentinelAt: tocados({ "pre-merge": 300, pr: 200 }) });
+  viejo.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notifiedAt: 400, notify: "sent" });
+  await viejo.tick();
+  assert.deepEqual(viejo.mensajes, []);
+
+  const sucio = avisos({ detect: () => "pr", heads: async () => [{ repo: "api", sha: SHA_A, dirty: true }], sentinelAt: tocados({ "pre-merge": 300, pr: 200 }) });
+  sucio.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await sucio.tick();
+  assert.deepEqual(sucio.mensajes, []);
+
+  const ocupado = avisos({ listSessions: async () => [{ name: "cowork-x", busy: true }], detect: () => "pr", sentinelAt: tocados({ "pre-merge": 300, pr: 200 }) });
+  ocupado.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await ocupado.tick();
+  assert.deepEqual(ocupado.mensajes, []);
+});
+
+test("en curl con SHA nuevo y pre-merge sin re-tocar → no corre, no lee HEADs, no avisa", async () => {
+  let lecturas = 0;
+  const a = avisos({
+    flowFor: () => MERGE_CURL,
+    detect: () => "curl",
+    heads: async () => { lecturas++; return limpio(SHA_B); },
+    sentinelAt: tocados({ implementing: 100, "pre-merge": 200, pr: 300, curl: 400 }),
+  });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 250, notify: "sent" });
+  await a.tick();
+  assert.equal(lecturas, 0);
+  assert.equal(a.corridas.length, 0);
+  assert.deepEqual(a.mensajes, []);
+  assert.deepEqual(a.escritos, []);
+});
+
+test("re-tocar pre-merge y luego una etapa posterior (pr, curl…) vuelve a la regla normal", async () => {
+  for (const marcas of [{ "pre-merge": 300, pr: 350 }, { "pre-merge": 300, pr: 200, curl: 350 }]) {
+    let lecturas = 0;
+    const a = avisos({
+      flowFor: () => MERGE_CURL,
+      detect: () => ("curl" in marcas ? "curl" : "pr"),
+      heads: async () => { lecturas++; return limpio(SHA_B); },
+      sentinelAt: tocados(marcas),
+    });
+    a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+    await a.tick();
+    assert.equal(lecturas, 0);
+    assert.equal(a.corridas.length, 0);
+    assert.deepEqual(a.mensajes, []);
+  }
+});
+
+test("re-entrega: una re-entrega reciente sin notify (reinicio a media entrega) no se da por perdida usando el `at` viejo", async () => {
+  const a = avisos({ detect: () => "pr", heads: async () => limpio(SHA_A), now: () => 10 * 60_000 });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notifiedAt: 10 * 60_000 - 1000 });
+  await a.tick();
+  assert.equal(a.estado()?.notify, undefined);
+});

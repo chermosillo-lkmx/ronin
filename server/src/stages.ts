@@ -241,6 +241,20 @@ export function lastSentinelAt(cycle: string, order: string[]): number | null {
   return newest;
 }
 
+/**
+ * mtime (ms) del sentinela de UNA etapa, o null si no existe (o no es un archivo). El driver lo usa
+ * para ver que el worker volvió a una etapa anterior: las plantillas tocan el sentinela al empezar
+ * cada etapa, así que un `pre-merge` re-tocado después de `pr` es más nuevo que éste.
+ */
+export function sentinelMtime(cycle: string, key: string): number | null {
+  try {
+    const st = statSync(join(cycle, key));
+    return st.isFile() ? st.mtimeMs : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---- P2: per-stage verifyCmd gate state (persisted in the cycle dir → survives restart, so a
 // restart can't reset the retry counter and loop the command forever). ----
 
@@ -260,6 +274,8 @@ export interface VerifyState {
   queued?: boolean;
   running?: boolean;
   notify?: "sent" | "failed";
+  /** Cuándo se re-entregó el veredicto vigente al worker que volvió al gate (ver verify-driver). */
+  notifiedAt?: number;
   reason?: string;
 }
 // stage keys are slugs ([a-z0-9-]) so they're safe as a filename component.
@@ -281,6 +297,7 @@ function parseVerifyState(raw: Record<string, unknown>): VerifyState {
   if (typeof raw.queued === "boolean") st.queued = raw.queued;
   if (typeof raw.running === "boolean") st.running = raw.running;
   if (raw.notify === "sent" || raw.notify === "failed") st.notify = raw.notify;
+  if (typeof raw.notifiedAt === "number") st.notifiedAt = raw.notifiedAt;
   if (typeof raw.reason === "string") st.reason = raw.reason;
   return st;
 }

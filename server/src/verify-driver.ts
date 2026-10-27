@@ -1,7 +1,7 @@
 import { cacheHit, realGitPort, repoHeads, type RepoHead } from "./gate-cache.js";
 import { readProvisionState, type ProvisionState } from "./provision.js";
 import { DEFAULT_GATE_SETTINGS } from "./settings.js";
-import { readVerifyState, writeVerifyLog, writeVerifyState, type VerifyState } from "./stages.js";
+import { readVerifyState, sentinelMtime, writeVerifyLog, writeVerifyState, type VerifyState } from "./stages.js";
 import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "./verify.js";
 
 /**
@@ -71,6 +71,15 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  *   alcanzada es la del propio gate. Tocado el sentinela de la siguiente (pr/merge, curl…), el worker
  *   ya siguió: actualizar desde main tras el merge no vuelve a correr la suite ni manda otro aviso.
  *   Un gate de merge SIN resolver sí se sigue debiendo aunque el worker se haya adelantado.
+ * - Vuelta al gate: pr/merge manda al worker de regreso a pre-merge si el HEAD cambió. Las plantillas
+ *   tocan cada sentinela al empezar su etapa, así que `pr` ya existe y la etapa más lejana sigue
+ *   siendo `pr`. Por eso el gate cuenta como "actual" también cuando su sentinela es al menos tan
+ *   nuevo como el de TODAS las etapas que le siguen (`sentinelAt`): re-tocar pre-merge lo re-habilita;
+ *   tocar después cualquier etapa posterior (pr otra vez, curl…) vuelve a la regla de arriba. Tras
+ *   el merge el worker no re-toca pre-merge, así que un SHA nuevo ahí no re-arma nada.
+ * - Re-entrega: si el worker volvió al gate (o lo re-tocó) y no hay nada que correr — mismo SHA
+ *   aprobado, o intentos agotados — se le re-entrega UNA vez el veredicto vigente: está esperando.
+ *   "Una vez" = el sentinela es más nuevo que el último aviso (`notifiedAt`, o `at` del desenlace).
  * - SIN-GATE: una etapa `pre-merge` sin `verifyCmd` (catálogo empaquetado, migraciones sin gate)
  *   dejaba al worker esperando un veredicto que nunca llegaría. Al alcanzarla, ocioso, se le avisa
  *   una vez `UNIT-GATE: SIN-GATE` y se anota `status: "sin-gate"` — nunca `passed`.
@@ -148,13 +157,15 @@ function mergeGateRearms(state: VerifyState, heads: RepoHead[] | null, maxRetrie
  *
  * `headsFor`: HEADs actuales del worktree. Con ellos, un gate de merge resuelto se re-arma si
  * hubo commit nuevo (ver `mergeGateRearms`) y el worker sigue en esa etapa (es la más lejana
- * alcanzada); sin ellos, o con el worker ya más adelante, resuelto es resuelto.
+ * alcanzada, o `enGate` dice que volvió a ella); sin ellos, o con el worker ya más adelante,
+ * resuelto es resuelto.
  */
 export function selectGate(
   stages: GateStage[],
   reached: string | null,
   stateFor: (stageKey: string) => VerifyState | null,
   headsFor?: () => RepoHead[] | null,
+  enGate?: (stageKey: string) => boolean,
 ): Gate | null {
   if (!reached) return null;
   const hasta = stages.findIndex((stage) => stage.key === reached);
@@ -168,7 +179,8 @@ export function selectGate(
     const mergeGate = stage.mergeGate === true;
     if (state?.status === "passed" || state?.status === "failed") {
       // Sólo mientras el worker sigue EN el gate: pasada la etapa siguiente, resuelto es resuelto.
-      if (!mergeGate || !headsFor || stage.key !== reached || !mergeGateRearms(state, headsFor(), maxRetries)) continue;
+      const actual = stage.key === reached || enGate?.(stage.key) === true;
+      if (!mergeGate || !headsFor || !actual || !mergeGateRearms(state, headsFor(), maxRetries)) continue;
     }
     return { key: stage.key, cmd, maxRetries, attempts: state?.attempts ?? 0, mergeGate };
   }
@@ -222,6 +234,11 @@ export interface DriverDeps {
    * Sólo lo usa el gate de merge. Sin él, el veredicto queda sólo por escrito, como antes.
    */
   notify?(session: string, text: string): Promise<boolean>;
+  /**
+   * mtime (ms) del sentinela de una etapa en el ciclo; null si no existe. Sin él (pruebas viejas,
+   * fronteras falsas) el gate sólo es "actual" cuando es la etapa más lejana alcanzada.
+   */
+  sentinelAt?(cycle: string, stageKey: string): number | null;
   /** Reloj para el plazo de entregas perdidas (inyectable en pruebas). Por defecto Date.now. */
   now?(): number;
   logError?(error: unknown): void;
@@ -418,7 +435,9 @@ export async function tickOnce(
           if (!avisaAlWorker(stage) || avisando.has(`${cycle}:${stage.key}`)) continue;
           const state = deps.readState(cycle, stage.key);
           if (!state || state.status === "pending" || state.notify !== undefined) continue;
-          if (state.at === undefined || ahora() - state.at < NOTIFY_STALE_MS) continue;
+          // Una re-entrega cuenta desde `notifiedAt`, no desde el `at` (viejo) del desenlace.
+          const desde = Math.max(state.at ?? -Infinity, state.notifiedAt ?? -Infinity);
+          if (desde === -Infinity || ahora() - desde < NOTIFY_STALE_MS) continue;
           deps.writeState(cycle, stage.key, { ...state, notify: "failed" });
         }
       }
@@ -429,6 +448,27 @@ export async function tickOnce(
       const reached = deps.detect(cycle, stages.map((s) => s.key));
       const alcanzado = reached ? stages.findIndex((s) => s.key === reached) : -1;
       const siguienteDe = (key: string): string | null => stages[stages.findIndex((s) => s.key === key) + 1]?.key ?? null;
+      const tocadoEn = (key: string): number | null => {
+        try {
+          return deps.sentinelAt?.(cycle, key) ?? null;
+        } catch {
+          return null;
+        }
+      };
+      /**
+       * ¿El worker está EN la etapa i? Si es la más lejana alcanzada, sí. Si no, sólo si volvió a
+       * ella: su sentinela es al menos tan nuevo como el de cada etapa posterior ya tocada.
+       */
+      const enEtapa = (i: number): boolean => {
+        if (i === alcanzado) return true;
+        if (i < 0 || i > alcanzado || !deps.sentinelAt) return false;
+        const propio = tocadoEn(stages[i]!.key);
+        if (propio === null) return false;
+        return stages.slice(i + 1).every((s) => {
+          const t = tocadoEn(s.key);
+          return t === null || t <= propio;
+        });
+      };
 
       // SIN-GATE: `pre-merge` sin gate configurado. El worker está ahí esperando un veredicto que
       // nunca llegará: se le dice una vez que siga. El marcador `sin-gate` no es un verde.
@@ -460,10 +500,11 @@ export async function tickOnce(
       // HEADs leídos UNA vez y ANTES de cualquier corrida: son los que se guardan con el veredicto.
       // Sólo si el worker está ocioso (ocupado no corre nada) y algún gate de merge ya alcanzado
       // puede correr: sin resolver, o resuelto pero con el worker todavía en él (re-arme). Antes del
-      // gate, o con el worker ya más allá de un gate resuelto, git sería trabajo tirado.
+      // gate, o con el worker ya más allá de un gate resuelto (sin haber vuelto a él), git sería
+      // trabajo tirado.
       const leerHeads = !sesion.busy && stages.some((s, i) => {
         if (s.mergeGate !== true || !s.verifyCmd?.trim() || i > alcanzado) return false;
-        if (i === alcanzado) return true;
+        if (enEtapa(i)) return true;
         const st = deps.readState(cycle, s.key)?.status;
         return st !== "passed" && st !== "failed";
       });
@@ -473,7 +514,26 @@ export async function tickOnce(
         reached,
         (key) => deps.readState(cycle, key),
         heads === undefined ? undefined : () => heads,
+        (key) => enEtapa(stages.findIndex((s) => s.key === key)),
       );
+
+      // Re-entrega: el worker volvió al gate de merge (o lo re-tocó) y no hay nada que correr. Sólo
+      // con el árbol legible y limpio (sucio: aún no hay qué responder), con el primer aviso ya
+      // resuelto y sin otra entrega en curso. Se anota `notifiedAt` para no repetirla.
+      if (deps.notify && deps.sentinelAt && heads && heads.length > 0 && !heads.some((h) => h.dirty)) {
+        stages.forEach((s, i) => {
+          if (s.mergeGate !== true || !s.verifyCmd?.trim() || gate?.key === s.key || !enEtapa(i)) return;
+          if (avisando.has(`${cycle}:${s.key}`)) return;
+          const st = deps.readState(cycle, s.key);
+          if (!st || (st.status !== "passed" && st.status !== "failed") || st.notify === undefined || st.queued || st.running) return;
+          const tocado = tocadoEn(s.key);
+          if (tocado === null || tocado <= (st.notifiedAt ?? st.at ?? Infinity)) return;
+          const { notify: _avisado, ...resto } = st;
+          const vigente: VerifyState = { ...resto, notifiedAt: ahora() };
+          deps.writeState(cycle, s.key, vigente);
+          avisar(sesion.name, cycle, s.key, vigente, siguienteDe(s.key), worktree, s.maxRetries ?? DEFAULT_GATE_RETRIES);
+        });
+      }
       if (!gate) continue;
 
       const clave = armKey(sesion.name, gate.key);
@@ -677,6 +737,7 @@ export const realGateDeps = {
   writeState: writeVerifyState,
   run: (cmd: string, cwd: string, opts: { timeoutMs: number; env: Record<string, string> }) => runVerify(cmd, cwd, opts.timeoutMs, opts.env),
   writeLog: writeVerifyLog,
+  sentinelAt: sentinelMtime,
   heads: (worktree: string) => repoHeads(worktree, realGitPort),
   cacheHit: (cached: VerifyState | null, heads: RepoHead[], worktree: string, e2eDirs: string[]) =>
     cacheHit(cached, heads, realGitPort, worktree, e2eDirs),
