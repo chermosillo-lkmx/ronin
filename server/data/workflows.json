@@ -70,7 +70,20 @@
             "key": "tests",
             "label": "Tests",
             "icon": "✅",
-            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
+            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre SÓLO tests dirigidos (los archivos o casos que tocaste o que cubren el cambio) generando JUnit: pytest -q <archivos> --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run <archivos> --reporter=junit --outputFile=reports/junit.xml). Repórtalo a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay); necesita el junit de esa corrida dirigida, y los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos. REGLA DE PRUEBAS UNITARIAS (obligatoria antes de cualquier merge): todo cambio en src/ trae sus pruebas unitarias en el mismo PR y las pruebas nuevas se ejecutan y pasan. NO corras la suite completa ni `unit-gate.sh` en esta etapa: Ronin corre el gate de unitarias una sola vez, en la etapa pre-merge. No se «arregla» un gate quitando, saltando (skip/xfail) o debilitando pruebas."
+          },
+          {
+            "key": "pre-merge",
+            "label": "Gate pre-merge",
+            "icon": "🛡",
+            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`, con el informe completo en {cycle}/verify-pre-merge.json. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee el informe, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela."
+          },
+          {
+            "key": "pr",
+            "label": "PR y merge",
+            "icon": "⤵️",
+            "executor": "claude",
+            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge. Antes de mergear confirma que el HEAD que vas a mergear es el SHA que aprobó el gate (campo `shas` de {cycle}/verify-pre-merge.json). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/` y las que declare el repo), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde."
           },
           {
             "key": "curl",
@@ -113,14 +126,20 @@
             "key": "tests",
             "label": "Pruebas",
             "icon": "✅",
-            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
+            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre SÓLO tests dirigidos (los archivos o casos que tocaste o que cubren el cambio) generando JUnit: pytest -q <archivos> --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run <archivos> --reporter=junit --outputFile=reports/junit.xml). Repórtalo a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay); necesita el junit de esa corrida dirigida, y los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos. REGLA DE PRUEBAS UNITARIAS (obligatoria antes de cualquier merge): todo cambio en src/ trae sus pruebas unitarias en el mismo PR y las pruebas nuevas se ejecutan y pasan. NO corras la suite completa ni `unit-gate.sh` en esta etapa: Ronin corre el gate de unitarias una sola vez, en la etapa pre-merge. No se «arregla» un gate quitando, saltando (skip/xfail) o debilitando pruebas."
+          },
+          {
+            "key": "pre-merge",
+            "label": "Gate pre-merge",
+            "icon": "🛡",
+            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`, con el informe completo en {cycle}/verify-pre-merge.json. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee el informe, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela."
           },
           {
             "key": "pr",
             "label": "PR y merge",
             "icon": "⤵️",
             "executor": "claude",
-            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge."
+            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge. Antes de mergear confirma que el HEAD que vas a mergear es el SHA que aprobó el gate (campo `shas` de {cycle}/verify-pre-merge.json). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/` y las que declare el repo), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde."
           },
           {
             "key": "curl",
@@ -164,7 +183,20 @@
             "key": "tests",
             "label": "Pruebas",
             "icon": "✅",
-            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos."
+            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre SÓLO tests dirigidos (los archivos o casos que tocaste o que cubren el cambio) generando JUnit: pytest -q <archivos> --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run <archivos> --reporter=junit --outputFile=reports/junit.xml). Repórtalo a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay); necesita el junit de esa corrida dirigida, y los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos. REGLA DE PRUEBAS UNITARIAS (obligatoria antes de cualquier merge): todo cambio en src/ trae sus pruebas unitarias en el mismo PR y las pruebas nuevas se ejecutan y pasan. NO corras la suite completa ni `unit-gate.sh` en esta etapa: Ronin corre el gate de unitarias una sola vez, en la etapa pre-merge. No se «arregla» un gate quitando, saltando (skip/xfail) o debilitando pruebas."
+          },
+          {
+            "key": "pre-merge",
+            "label": "Gate pre-merge",
+            "icon": "🛡",
+            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`, con el informe completo en {cycle}/verify-pre-merge.json. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee el informe, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela."
+          },
+          {
+            "key": "pr",
+            "label": "PR y merge",
+            "icon": "⤵️",
+            "executor": "claude",
+            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge. Antes de mergear confirma que el HEAD que vas a mergear es el SHA que aprobó el gate (campo `shas` de {cycle}/verify-pre-merge.json). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/` y las que declare el repo), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde."
           },
           {
             "key": "curl",
@@ -215,14 +247,20 @@
             "label": "Arreglar",
             "icon": "🤖",
             "executor": "codex",
-            "instruction": "Sólo si la revisión encontró hallazgos. Arréglalos sobre la rama del PR con TDD (test que falla primero, fix mínimo) y commits Conventional Commits; no reescribas lo que ya estaba bien. Si la revisión no encontró nada, marca la etapa y sigue sin tocar código. Deja en {ev}/arreglos.md qué cambiaste y por qué."
+            "instruction": "Sólo si la revisión encontró hallazgos. Arréglalos sobre la rama del PR con TDD (test que falla primero, fix mínimo) y commits Conventional Commits; no reescribas lo que ya estaba bien. Si la revisión no encontró nada, marca la etapa y sigue sin tocar código. Deja en {ev}/arreglos.md qué cambiaste y por qué. REGLA DE PRUEBAS UNITARIAS (obligatoria antes de cualquier merge): todo cambio en src/ trae sus pruebas unitarias en el mismo PR y las pruebas nuevas se ejecutan y pasan. Verifica con tests dirigidos; NO corras la suite completa ni `unit-gate.sh` aquí: Ronin corre el gate de unitarias una sola vez, en la etapa pre-merge. No se «arregla» un gate quitando, saltando (skip/xfail) o debilitando pruebas."
+          },
+          {
+            "key": "pre-merge",
+            "label": "Gate pre-merge",
+            "icon": "🛡",
+            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`, con el informe completo en {cycle}/verify-pre-merge.json. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee el informe, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela."
           },
           {
             "key": "merge",
             "label": "Merge a dev",
             "icon": "⤵️",
             "executor": "claude",
-            "instruction": "Comprueba que el PR sea mergeable de verdad —checks en verde, sin conflictos, base correcta— y haz el merge a dev. Si NO es mergeable, para aquí y explica por qué en {ev}/merge.md: nunca fuerces un merge ni cambies la base para esquivar un conflicto."
+            "instruction": "Comprueba que el PR sea mergeable de verdad —checks en verde, sin conflictos, base correcta— y haz el merge a dev. Si NO es mergeable, para aquí y explica por qué en {ev}/merge.md: nunca fuerces un merge ni cambies la base para esquivar un conflicto. Antes de mergear confirma que el HEAD que vas a mergear es el SHA que aprobó el gate (campo `shas` de {cycle}/verify-pre-merge.json). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/` y las que declare el repo), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde."
           },
           {
             "key": "deploy",

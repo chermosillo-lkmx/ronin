@@ -107,3 +107,23 @@ test("workflow catalog refuses to delete its last item", () => {
     assert.throws(() => deleteWorkflowCatalogItem(only.id, dir), /WORKFLOW_LAST/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("el catálogo empaquetado no contiene frases de re-corrida y tiene pre-merge antes de pr/merge", () => {
+  const raw = readFileSync(new URL("../data/workflows.json", import.meta.url), "utf8");
+  for (const frase of ["córrelo tú también", "vuelve a correr el gate", "con su unit-gate"]) {
+    assert.ok(!raw.includes(frase), `el catálogo empaquetado aún dice: ${frase}`);
+  }
+  const catalog = JSON.parse(raw) as { items: Array<{ name: string; config: { stages: Array<{ key: string; verifyCmd?: string; mergeGate?: boolean; instruction: string }> } }> };
+  for (const name of ["tmux-worker-loop", "claude-plan-codex-impl", "hotfix-verificado", "pr-review-merge-dev"]) {
+    const stages = catalog.items.find((w) => w.name === name)!.config.stages;
+    const keys = stages.map((s) => s.key);
+    const i = keys.indexOf("pre-merge");
+    assert.ok(i >= 0, `${name} sin pre-merge`);
+    assert.ok(["pr", "merge"].includes(keys[i + 1]!), `${name}: tras pre-merge viene ${keys[i + 1]}`);
+    assert.match(stages[i]!.instruction, /No corras la suite ni `unit-gate\.sh`/);
+  }
+  for (const w of catalog.items) for (const s of w.config.stages) {
+    assert.equal(s.verifyCmd, undefined, `${w.name}/${s.key}: el catálogo empaquetado no lleva verifyCmd`);
+    assert.equal(s.mergeGate, undefined, `${w.name}/${s.key}: ni mergeGate`);
+  }
+});
