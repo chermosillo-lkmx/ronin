@@ -828,8 +828,9 @@ test("45. UNIT_GATE_E2E_DIRS cuenta como e2e (con o sin barra final)", (t) => {
 });
 
 test("45b. UNIT_GATE_E2E_DIRS=qa/e2e no cubre qa/e2e2/", (t) => {
-  const { r } = e2eOnly(t, "qa/e2e2/x.py", { UNIT_GATE_E2E_DIRS: "qa/e2e" });
+  const { r, marker } = e2eOnly(t, "qa/e2e2/x.py", { UNIT_GATE_E2E_DIRS: "qa/e2e" });
   assert.doesNotMatch(r.out, /sólo e2e/);
+  assert.ok(marker, "la suite debió correr");
 });
 
 test("46. cambio en e2e_dev/ y en src/: corre la suite", (t) => {
@@ -870,4 +871,37 @@ test("49. UNIT_GATE_XDIST=4 sin xdist corre en serie y lo avisa", (t) => {
   const argv = readFileSync(extra.FAKE_ARGV, "utf8").split("\n");
   assert.ok(!argv.includes("-n"), argv.join(" "));
   assert.match(r.out, /pytest-xdist no está instalado/);
+});
+
+test("50. mv src/app.py → e2e_dev/app.py: el atajo sólo-e2e NO se dispara (renames)", (t) => {
+  const fx = fixture(t);
+  fx.git("checkout", "-q", "main");
+  fx.git("checkout", "-q", "-b", "feat/mv");
+  mkdirSync(join(fx.repo, "e2e_dev"), { recursive: true });
+  fx.git("mv", "src/app.py", "e2e_dev/app.py");
+  fx.git("commit", "-q", "-m", "mv");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const extra = e2eEnv(fx);
+  const r = fx.run({ ...withoutExtra, ...extra });
+  assert.doesNotMatch(r.out, /sólo e2e/);
+  assert.ok(existsAt(extra.FAKE_MARKER), r.out);
+});
+
+test("51. merge-base ok pero el git diff contra la base falla: no aplica el atajo e2e", (t) => {
+  const fx = fixture(t);
+  fx.git("checkout", "-q", "main");
+  fx.git("checkout", "-q", "-b", "feat/rd");
+  fx.write("e2e_dev/x.py", "x = 1\n"); // sin rastrear: único cambio visible cuando falla el diff
+  const realGit = sh("bash", ["-c", "command -v git"]).trim();
+  const bin = join(fx.tmp, "gitbin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "git"),
+    `#!/bin/bash\nif [ "$1" = diff ]; then n=0; for a in "$@"; do case "$a" in -*|diff) ;; *) n=$((n+1));; esac; done\n` +
+    `  [ "$n" -ge 2 ] && exit 128; fi\nexec "${realGit}" "$@"\n`);
+  chmodSync(join(bin, "git"), 0o755);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const extra = e2eEnv(fx);
+  const r = fx.run({ ...withoutExtra, ...extra, PATH: `${bin}:${process.env.PATH}` });
+  assert.doesNotMatch(r.out, /sólo e2e/);
+  assert.ok(existsAt(extra.FAKE_MARKER), r.out);
 });

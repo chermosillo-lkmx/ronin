@@ -474,9 +474,9 @@ for repo in "${candidates[@]}"; do
   git fetch -q origin main 2>/dev/null || true
   base="$(git merge-base HEAD "$BASE_REF" 2>/dev/null)" || { bad "$name: sin merge-base con $BASE_REF"; continue; }
   # Cambios de la rama + working tree (el worker puede no haber commiteado aún).
-  # El diff contra la base se captura aparte: el atajo sólo-e2e exige que haya salido 0.
-  base_diff="$(git diff --name-only "$base" HEAD 2>/dev/null)"; base_diff_rc=$?
-  changed="$( { printf '%s\n' "$base_diff"; git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sed '/^$/d' | sort -u)"
+  # --no-renames: un mv src/x → e2e_dev/x debe listar también la ruta vieja. El diff contra la base se captura aparte: el atajo sólo-e2e exige que haya salido 0.
+  base_diff="$(git diff --name-only --no-renames "$base" HEAD 2>/dev/null)"; base_diff_rc=$?
+  changed="$( { printf '%s\n' "$base_diff"; git diff --name-only --no-renames HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sed '/^$/d' | sort -u)"
   [ -z "$changed" ] && { say "· $name: sin cambios respecto a $BASE_REF — se omite"; continue; }
   checked=$((checked+1))
   # Atajo sólo-e2e: si TODAS las rutas son e2e (e2e_dev/ o UNIT_GATE_E2E_DIRS, con o sin «/» final,
