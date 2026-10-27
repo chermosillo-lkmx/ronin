@@ -143,6 +143,7 @@ test("addRepoSkillAssociation agrega la referencia conservando el resto del over
   const base = {
     workflow: null, vars: { DEV_URL: "http://localhost:3000" }, startCommand: "claude", setupCommand: "npm ci", kbPath: "docs/kb",
     plannerModel: "", workerModel: "", usesDefaultWorkflow: true, skills: [{ root: "global" as const, name: "api-review" }],
+    gate: { timeoutMin: 60 },
   };
   const saved: Array<[string, any]> = [];
   const io = {
@@ -157,6 +158,7 @@ test("addRepoSkillAssociation agrega la referencia conservando el resto del over
     { inheritWorkflow: saved[0][1].inheritWorkflow, vars: saved[0][1].vars, startCommand: saved[0][1].startCommand, setupCommand: saved[0][1].setupCommand, kbPath: saved[0][1].kbPath },
     { inheritWorkflow: true, vars: { DEV_URL: "http://localhost:3000" }, startCommand: "claude", setupCommand: "npm ci", kbPath: "docs/kb" },
   );
+  assert.deepEqual(saved[0][1].gate, { timeoutMin: 60 }); // la asociación no pierde el gate
   addRepoSkillAssociation("acme-api", { root: "global", name: "api-review" }, io);
   assert.equal(saved.length, 1);
 });
