@@ -79,6 +79,8 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  *   el merge el worker no re-toca pre-merge, así que un SHA nuevo ahí no re-arma nada.
  * - Re-entrega: si el worker volvió al gate (o lo re-tocó) y no hay nada que correr — mismo SHA
  *   aprobado, o intentos agotados — se le re-entrega UNA vez el veredicto vigente: está esperando.
+ *   Con el árbol sucio se le escribe y avisa una vez el FAIL de árbol sucio (sin `shas`, sin gastar
+ *   intento), que se re-arma en cuanto el árbol quede limpio.
  *   "Una vez" = el sentinela es más nuevo que el último aviso (`notifiedAt`, o `at` del desenlace).
  * - SIN-GATE: una etapa `pre-merge` sin `verifyCmd` (catálogo empaquetado, migraciones sin gate)
  *   dejaba al worker esperando un veredicto que nunca llegaría. Al alcanzarla, ocioso, se le avisa
@@ -518,9 +520,11 @@ export async function tickOnce(
       );
 
       // Re-entrega: el worker volvió al gate de merge (o lo re-tocó) y no hay nada que correr. Sólo
-      // con el árbol legible y limpio (sucio: aún no hay qué responder), con el primer aviso ya
-      // resuelto y sin otra entrega en curso. Se anota `notifiedAt` para no repetirla.
-      if (deps.notify && deps.sentinelAt && heads && heads.length > 0 && !heads.some((h) => h.dirty)) {
+      // con HEADs legibles, con el primer aviso ya resuelto y sin otra entrega en curso. Árbol
+      // limpio → el veredicto vigente; sucio → un FAIL por árbol sucio (sin `shas`, sin gastar
+      // intento: se re-arma en cuanto quede limpio). Se anota `notifiedAt` para no repetirla.
+      if (deps.notify && deps.sentinelAt && heads && heads.length > 0) {
+        const sucio = heads.some((h) => h.dirty);
         stages.forEach((s, i) => {
           if (s.mergeGate !== true || !s.verifyCmd?.trim() || gate?.key === s.key || !enEtapa(i)) return;
           if (avisando.has(`${cycle}:${s.key}`)) return;
@@ -529,7 +533,11 @@ export async function tickOnce(
           const tocado = tocadoEn(s.key);
           if (tocado === null || tocado <= (st.notifiedAt ?? st.at ?? Infinity)) return;
           const { notify: _avisado, ...resto } = st;
-          const vigente: VerifyState = { ...resto, notifiedAt: ahora() };
+          // Agotado sigue agotado aunque el árbol esté sucio: se re-entrega tal cual (pide humano).
+          const agotado = st.status === "failed" && st.attempts >= (s.maxRetries ?? DEFAULT_GATE_RETRIES);
+          const vigente: VerifyState = sucio && !agotado
+            ? { status: "failed", reason: DIRTY_REASON, attempts: st.attempts, at: ahora(), notifiedAt: ahora() }
+            : { ...resto, notifiedAt: ahora() };
           deps.writeState(cycle, s.key, vigente);
           avisar(sesion.name, cycle, s.key, vigente, siguienteDe(s.key), worktree, s.maxRetries ?? DEFAULT_GATE_RETRIES);
         });

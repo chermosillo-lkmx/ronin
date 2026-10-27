@@ -1540,16 +1540,11 @@ test("re-entrega: con intentos agotados y SHA nuevo responde intentos agotados, 
   assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — intentos agotados \(3\/3\)/);
 });
 
-test("re-entrega: no se repite si el sentinela es anterior al último aviso, ni con el árbol sucio, ni sin entregar el primero", async () => {
+test("re-entrega: no se repite si el sentinela es anterior al último aviso, ni con el worker ocupado", async () => {
   const viejo = avisos({ detect: () => "pr", heads: async () => limpio(SHA_A), sentinelAt: tocados({ "pre-merge": 300, pr: 200 }) });
   viejo.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notifiedAt: 400, notify: "sent" });
   await viejo.tick();
   assert.deepEqual(viejo.mensajes, []);
-
-  const sucio = avisos({ detect: () => "pr", heads: async () => [{ repo: "api", sha: SHA_A, dirty: true }], sentinelAt: tocados({ "pre-merge": 300, pr: 200 }) });
-  sucio.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
-  await sucio.tick();
-  assert.deepEqual(sucio.mensajes, []);
 
   const ocupado = avisos({ listSessions: async () => [{ name: "cowork-x", busy: true }], detect: () => "pr", sentinelAt: tocados({ "pre-merge": 300, pr: 200 }) });
   ocupado.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
@@ -1595,4 +1590,82 @@ test("re-entrega: una re-entrega reciente sin notify (reinicio a media entrega) 
   a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notifiedAt: 10 * 60_000 - 1000 });
   await a.tick();
   assert.equal(a.estado()?.notify, undefined);
+});
+
+test("vuelve a pre-merge con árbol sucio → recibe UNIT-GATE: FAIL — hay cambios sin commitear, una sola vez", async () => {
+  for (const previo of [
+    { attempts: 1, status: "passed" as const, shas: { api: SHA_A }, at: 150, notify: "sent" as const },
+    { attempts: 1, status: "failed" as const, reason: "hay cambios sin commitear", at: 150, notify: "sent" as const },
+  ]) {
+    const a = avisos({
+      detect: () => "pr",
+      heads: async () => [{ repo: "api", sha: SHA_B, dirty: true }],
+      sentinelAt: tocados({ "pre-merge": 300, pr: 200 }),
+      now: () => 1000,
+    });
+    a.setEstado(previo);
+    await a.tick();
+    await a.tick();
+    await a.tick();
+    assert.equal(a.corridas.length, 0);
+    assert.equal(a.mensajes.length, 1, previo.status);
+    assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — hay cambios sin commitear — /);
+    const st = a.estado();
+    assert.equal(st?.status, "failed");
+    assert.equal(st?.reason, "hay cambios sin commitear");
+    assert.equal(st?.attempts, 1);
+    assert.equal(st?.shas, undefined);
+    assert.equal(st?.notifiedAt, 1000);
+    assert.equal(st?.notify, "sent");
+  }
+});
+
+test("vuelve a pre-merge sucio, luego limpia y vuelve a tocar → corre normal", async () => {
+  let sucio = true;
+  const marcas: Record<string, number> = { "pre-merge": 300, pr: 200 };
+  const a = avisos({
+    detect: () => "pr",
+    heads: async () => [{ repo: "api", sha: SHA_B, dirty: sucio }],
+    sentinelAt: tocados(marcas),
+    now: () => 1000,
+  });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  sucio = false;
+  marcas["pre-merge"] = 2000;
+  await a.tick();
+  assert.equal(a.corridas.length, 1);
+  assert.equal(a.estado()?.status, "passed");
+  assert.deepEqual(a.estado()?.shas, { api: SHA_B });
+  assert.equal(a.mensajes.length, 2);
+  assert.match(a.mensajes[1][1], /^UNIT-GATE: PASS \(bbbbbbb, /);
+});
+
+test("tras el merge con árbol sucio y pre-merge sin re-tocar → no escribe ni avisa", async () => {
+  const a = avisos({
+    flowFor: () => MERGE_CURL,
+    detect: () => "curl",
+    heads: async () => [{ repo: "api", sha: SHA_B, dirty: true }],
+    sentinelAt: tocados({ "pre-merge": 200, pr: 300, curl: 400 }),
+  });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 250, notify: "sent" });
+  await a.tick();
+  assert.deepEqual(a.escritos, []);
+  assert.deepEqual(a.mensajes, []);
+});
+
+test("vuelve a pre-merge sucio con intentos agotados → se re-entrega el agotado tal cual, sin pisar el estado", async () => {
+  const a = avisos({
+    detect: () => "pr",
+    heads: async () => [{ repo: "api", sha: SHA_B, dirty: true }],
+    sentinelAt: tocados({ "pre-merge": 300, pr: 200 }),
+    now: () => 1000,
+  });
+  a.setEstado({ attempts: 3, status: "failed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await a.tick();
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — intentos agotados \(3\/3\)/);
+  assert.deepEqual(a.estado()?.shas, { api: SHA_A });
 });
