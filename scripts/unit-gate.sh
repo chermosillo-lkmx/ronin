@@ -14,10 +14,17 @@
 # Env: UNIT_GATE_BASE (default origin/main) · UNIT_GATE_SKIP_SUITE=1 (sólo reglas 1-2, para depurar)
 #      UNIT_GATE_MAIN_ROOT (default ~/code/lkmx/liebre: de ahí se toma el .venv si el worktree no tiene)
 #      UNIT_GATE_EXTRA_JUNIT (junits extra «a.xml:b.xml», relativos al repo; SÓLO para la regla 2)
+#      UNIT_GATE_REPORTS_DIR (default reports) carpeta, relativa al repo, de junit-gate.xml,
+#        coverage-gate.xml, unit-gate.log y coverage-gate/
+#      UNIT_GATE_E2E_DIRS (default vacío) rutas e2e extra a e2e_dev/, separadas por «:»: un sub-repo
+#        cuyos cambios son todos e2e se da por bueno sin correr su suite unitaria
+#      UNIT_GATE_XDIST (default vacío) entero >= 1: corre pytest con «-n N» si pytest-xdist es
+#        importable; si no, en serie con aviso (sólo runner python)
 set -u
 ROOT="${1:-$PWD}"
 BASE_REF="${UNIT_GATE_BASE:-origin/main}"
 MAIN_ROOT="${UNIT_GATE_MAIN_ROOT:-$HOME/code/lkmx/liebre}"
+REPORTS="${UNIT_GATE_REPORTS_DIR:-reports}"
 fail=0; checked=0
 say() { printf '%s\n' "$*"; }
 bad() { say "❌ $*"; fail=1; }
@@ -467,9 +474,25 @@ for repo in "${candidates[@]}"; do
   git fetch -q origin main 2>/dev/null || true
   base="$(git merge-base HEAD "$BASE_REF" 2>/dev/null)" || { bad "$name: sin merge-base con $BASE_REF"; continue; }
   # Cambios de la rama + working tree (el worker puede no haber commiteado aún).
-  changed="$( { git diff --name-only "$base" HEAD; git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u)"
+  # El diff contra la base se captura aparte: el atajo sólo-e2e exige que haya salido 0.
+  base_diff="$(git diff --name-only "$base" HEAD 2>/dev/null)"; base_diff_rc=$?
+  changed="$( { printf '%s\n' "$base_diff"; git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sed '/^$/d' | sort -u)"
   [ -z "$changed" ] && { say "· $name: sin cambios respecto a $BASE_REF — se omite"; continue; }
   checked=$((checked+1))
+  # Atajo sólo-e2e: si TODAS las rutas son e2e (e2e_dev/ o UNIT_GATE_E2E_DIRS, con o sin «/» final,
+  # comparadas por prefijo de directorio) no hay código de producto que probar: se omite este sub-repo.
+  if [ "$base_diff_rc" -eq 0 ]; then
+    e2e_prefixes=("e2e_dev")
+    IFS=':' read -r -a e2e_extra <<< "${UNIT_GATE_E2E_DIRS:-}"
+    for e in ${e2e_extra[@]+"${e2e_extra[@]}"}; do e="${e%/}"; [ -n "$e" ] && e2e_prefixes+=("$e"); done
+    only_e2e=1
+    while IFS= read -r f; do
+      hit=0
+      for e in "${e2e_prefixes[@]}"; do case "$f" in "$e"/*) hit=1; break;; esac; done
+      [ "$hit" -eq 1 ] || { only_e2e=0; break; }
+    done <<< "$changed"
+    if [ "$only_e2e" -eq 1 ]; then ok "$name: sólo e2e — suite unitaria no requerida"; continue; fi
+  fi
   # Runner y directorio(s) de código de producto. Python: los que declara el repo (coverage
   # `source` → src/ → packages.find; si no se sabe, FAIL cerrado). Node: src|app|lib como siempre.
   if [ -d tests ] && { [ -f pytest.ini ] || [ -f pyproject.toml ] || [ -f setup.cfg ] || find tests -name 'test_*.py' -print -quit 2>/dev/null | grep -q .; }; then
@@ -519,33 +542,41 @@ for repo in "${candidates[@]}"; do
   [ "${UNIT_GATE_SKIP_SUITE:-0}" = "1" ] && continue
 
   # Reglas 3 y 4 comparten la misma corrida: suite completa + XML de cobertura.
-  mkdir -p reports
-  junit="reports/junit-gate.xml"; rm -f "$junit"
+  mkdir -p "$REPORTS"
+  junit="$REPORTS/junit-gate.xml"; rm -f "$junit"
   if [ "$runner" = "python" ]; then
-    coverage_xml="reports/coverage-gate.xml"; rm -f "$coverage_xml"
+    coverage_xml="$REPORTS/coverage-gate.xml"; rm -f "$coverage_xml"
     PY="$(py_for "$repo")" || { bad "$name: sin intérprete (.venv) ni en el worktree ni en $MAIN_ROOT/$name"; continue; }
     extra=()
     case "$name" in ant-ms-cfdis) extra=(-o log_cli=false -m "not functional");; esac
     cov=(); while IFS= read -r d; do [ -n "$d" ] && cov+=("--cov=$d"); done <<< "$src_dirs"
-    say "   → $PY -m pytest tests -q -o addopts='' ${extra[*]+"${extra[*]}"} -p no:cacheprovider ${cov[*]} --cov-report=xml:$coverage_xml --junitxml=$junit"
-    "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > reports/unit-gate.log 2>&1
+    par=()
+    if [ -n "${UNIT_GATE_XDIST:-}" ]; then
+      if [[ "$UNIT_GATE_XDIST" =~ ^[1-9][0-9]*$ ]] && "$PY" -c 'import xdist' >/dev/null 2>&1; then
+        par=(-n "$UNIT_GATE_XDIST")
+      else
+        say "   ⚠ $name: UNIT_GATE_XDIST=$UNIT_GATE_XDIST pero pytest-xdist no está instalado — suite en serie"
+      fi
+    fi
+    say "   → $PY -m pytest tests -q -o addopts='' ${extra[*]+"${extra[*]}"} ${par[*]+"${par[*]}"} -p no:cacheprovider ${cov[*]} --cov-report=xml:$coverage_xml --junitxml=$junit"
+    "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1
     rc=$?
   elif [ "$runner" = "node" ]; then
     [ -d node_modules ] || { bad "$name: sin node_modules en el worktree (corre npm ci antes)"; continue; }
-    coverage_xml="reports/coverage-gate/cobertura-coverage.xml"
-    mkdir -p reports/coverage-gate; rm -f "$coverage_xml"
-    say "   → npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory=reports/coverage-gate --reporter=junit --outputFile=$junit"
-    npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory=reports/coverage-gate --reporter=junit --outputFile="$junit" > reports/unit-gate.log 2>&1
+    coverage_xml="$REPORTS/coverage-gate/cobertura-coverage.xml"
+    mkdir -p "$REPORTS/coverage-gate"; rm -f "$coverage_xml"
+    say "   → npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory=$REPORTS/coverage-gate --reporter=junit --outputFile=$junit"
+    npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory="$REPORTS/coverage-gate" --reporter=junit --outputFile="$junit" > "$REPORTS/unit-gate.log" 2>&1
     rc=$?
   else
     bad "$name: no reconozco el runner (ni tests/ de pytest ni package.json)"; continue
   fi
-  [ -f "$junit" ] || { bad "$name: la suite no produjo $junit (rc=$rc); cola de reports/unit-gate.log:"; tail -15 reports/unit-gate.log | sed 's/^/     /'; continue; }
+  [ -f "$junit" ] || { bad "$name: la suite no produjo $junit (rc=$rc); cola de $REPORTS/unit-gate.log:"; tail -15 "$REPORTS/unit-gate.log" | sed 's/^/     /'; continue; }
   read -r t f e s <<< "$(junit_summary "$junit")"
   if [ "$t" -eq 0 ]; then bad "$name: el junit no tiene casos (0 tests)"; continue; fi
   if [ "$f" -ne 0 ] || [ "$e" -ne 0 ]; then
     bad "$name: suite en ROJO — $t tests, $f failed, $e errors, $s skipped"
-    grep -E "^(FAILED|ERROR) " reports/unit-gate.log | head -20 | sed 's/^/     /'
+    grep -E "^(FAILED|ERROR) " "$REPORTS/unit-gate.log" | head -20 | sed 's/^/     /'
     continue
   fi
   ok "$name: suite en verde — $t tests, 0 failed, $s skipped"

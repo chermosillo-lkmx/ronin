@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,7 +93,11 @@ function fixture(t) {
   mkdirSync(dirname(py), { recursive: true });
   writeFileSync(
     py,
-    `#!/bin/bash\nfor a in "$@"; do case "$a" in\n` +
+    `#!/bin/bash\n` +
+    `if [ "$1" = "-c" ] && [ "$2" = "import xdist" ]; then [ "\${FAKE_XDIST:-}" = "1" ]; exit $?; fi\n` +
+    `[ -n "\${FAKE_MARKER:-}" ] && : > "$FAKE_MARKER"\n` +
+    `[ -n "\${FAKE_ARGV:-}" ] && printf '%s\\n' "$@" > "$FAKE_ARGV"\n` +
+    `for a in "$@"; do case "$a" in\n` +
     `  --junitxml=*) cp "$FAKE_SUITE_JUNIT" "\${a#--junitxml=}";;\n` +
     `  --cov-report=xml:*) [ -f "$FAKE_SUITE_COVERAGE" ] && cp "$FAKE_SUITE_COVERAGE" "\${a#--cov-report=xml:}";;\n` +
     `esac; done\necho "fake pytest"\nexit 0\n`,
@@ -778,4 +782,92 @@ test("42. setup.cfg [coverage:run] source también declara el directorio", (t) =
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /^\s+hub\/app\.py$/m);
   assert.match(r.out, /--cov=hub /);
+});
+
+// ── Carpeta de reportes, atajo sólo-e2e y xdist opcional ──
+const existsAt = (...p) => existsSync(join(...p));
+const e2eEnv = (fx) => ({ FAKE_MARKER: join(fx.tmp, "marker"), FAKE_ARGV: join(fx.tmp, "argv") });
+
+test("43. UNIT_GATE_REPORTS_DIR: el junit y el log van a esa carpeta y no a reports/", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_REPORTS_DIR: "reports/ronin-gate" });
+  assert.equal(r.code, 0, r.out);
+  assert.ok(existsAt(fx.repo, "reports/ronin-gate/junit-gate.xml"), r.out);
+  assert.ok(existsAt(fx.repo, "reports/ronin-gate/unit-gate.log"), r.out);
+  assert.ok(!existsAt(fx.repo, "reports/junit-gate.xml"), r.out);
+});
+
+function e2eOnly(t, path, env = {}) {
+  const fx = fixture(t);
+  fx.git("checkout", "-q", "main");
+  fx.git("checkout", "-q", "-b", "feat/e2e");
+  fx.write(path, "def test_x():\n    assert True\n");
+  fx.git("add", "-A");
+  fx.git("commit", "-q", "-m", "e2e");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const extra = e2eEnv(fx);
+  const r = fx.run({ ...withoutExtra, ...extra, ...env });
+  return { fx, r, marker: existsAt(extra.FAKE_MARKER) };
+}
+
+test("44. cambios sólo en e2e_dev/: PASS sin correr la suite", (t) => {
+  const { r, marker } = e2eOnly(t, "e2e_dev/x.py");
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /sólo e2e — suite unitaria no requerida/);
+  assert.ok(!marker, "la suite no debió correr");
+});
+
+test("45. UNIT_GATE_E2E_DIRS cuenta como e2e (con o sin barra final)", (t) => {
+  for (const dirs of ["qa/e2e", "qa/e2e/"]) {
+    const { r, marker } = e2eOnly(t, "qa/e2e/x.py", { UNIT_GATE_E2E_DIRS: dirs });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /sólo e2e — suite unitaria no requerida/);
+    assert.ok(!marker);
+  }
+});
+
+test("45b. UNIT_GATE_E2E_DIRS=qa/e2e no cubre qa/e2e2/", (t) => {
+  const { r } = e2eOnly(t, "qa/e2e2/x.py", { UNIT_GATE_E2E_DIRS: "qa/e2e" });
+  assert.doesNotMatch(r.out, /sólo e2e/);
+});
+
+test("46. cambio en e2e_dev/ y en src/: corre la suite", (t) => {
+  const fx = fixture(t);
+  fx.write("e2e_dev/x.py", "def test_x():\n    assert True\n");
+  fx.git("add", "-A");
+  fx.git("commit", "-q", "-m", "e2e");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const extra = e2eEnv(fx);
+  const r = fx.run({ ...withoutExtra, ...extra });
+  assert.doesNotMatch(r.out, /sólo e2e/);
+  assert.ok(existsAt(extra.FAKE_MARKER), r.out);
+});
+
+test("47. git diff ilegible → no aplica el atajo e2e", (t) => {
+  const fx = fixture(t);
+  fx.write("e2e_dev/x.py", "x = 1\n");
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_BASE: "origin/no-existe" });
+  assert.notEqual(r.code, 0, r.out);
+  assert.doesNotMatch(r.out, /sólo e2e/);
+});
+
+test("48. UNIT_GATE_XDIST=4 con xdist importable pasa -n 4", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const extra = e2eEnv(fx);
+  fx.run({ ...withoutExtra, ...extra, UNIT_GATE_XDIST: "4", FAKE_XDIST: "1" });
+  const argv = readFileSync(extra.FAKE_ARGV, "utf8").split("\n");
+  const i = argv.indexOf("-n");
+  assert.ok(i >= 0 && argv[i + 1] === "4", argv.join(" "));
+});
+
+test("49. UNIT_GATE_XDIST=4 sin xdist corre en serie y lo avisa", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const extra = e2eEnv(fx);
+  const r = fx.run({ ...withoutExtra, ...extra, UNIT_GATE_XDIST: "4" });
+  const argv = readFileSync(extra.FAKE_ARGV, "utf8").split("\n");
+  assert.ok(!argv.includes("-n"), argv.join(" "));
+  assert.match(r.out, /pytest-xdist no está instalado/);
 });
