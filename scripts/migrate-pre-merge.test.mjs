@@ -203,3 +203,23 @@ test("el catálogo empaquetado (sin ningún verifyCmd) sigue migrando", () => {
     assert.equal(run(file).status, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("textos de la revisión final: SIN-GATE, salida en .log, pr/merge exigen status passed y sin «las que declare el repo»", () => {
+  const { dir, file } = sandbox();
+  try {
+    assert.equal(run(file).status, 0);
+    const d = load(file);
+    assert.ok(!readFileSync(file, "utf8").includes("y las que declare el repo"));
+    for (const name of ["tmux-worker-loop", "claude-plan-codex-impl", "hotfix-verificado", "pr-review-merge-dev"]) {
+      const pre = stage(wf(d, name), "pre-merge").instruction;
+      assert.match(pre, /Si Ronin responde `UNIT-GATE: SIN-GATE`, sigue con la siguiente etapa\./);
+      assert.match(pre, /\{cycle\}\/verify-pre-merge\.log/);
+      assert.ok(!pre.includes("informe completo en {cycle}/verify-pre-merge.json"), name);
+      assert.match(pre, /intervención humana/);
+      const merge = stage(wf(d, name), name === "pr-review-merge-dev" ? "merge" : "pr").instruction;
+      assert.match(merge, /`status` sea `passed`/, name);
+      assert.match(merge, /`shas`/, name);
+      assert.match(merge, /UNIT-GATE: SIN-GATE/, name);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

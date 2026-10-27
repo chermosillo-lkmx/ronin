@@ -76,14 +76,14 @@
             "key": "pre-merge",
             "label": "Gate pre-merge",
             "icon": "🛡",
-            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`, con el informe completo en {cycle}/verify-pre-merge.json. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee el informe, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela."
+            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`; el veredicto queda en {cycle}/verify-pre-merge.json y la salida del gate en {cycle}/verify-pre-merge.log. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee esa salida, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela; si dice que los intentos se agotaron, para y pide intervención humana. Si Ronin responde `UNIT-GATE: SIN-GATE`, sigue con la siguiente etapa."
           },
           {
             "key": "pr",
             "label": "PR y merge",
             "icon": "⤵️",
             "executor": "claude",
-            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge. Antes de mergear confirma que el HEAD que vas a mergear es el SHA que aprobó el gate (campo `shas` de {cycle}/verify-pre-merge.json). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/` y las que declare el repo), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde."
+            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge. Antes de mergear confirma en {cycle}/verify-pre-merge.json que `status` sea `passed` (un FAIL también guarda `shas`) y que el HEAD que vas a mergear sea el SHA que aprobó el gate (campo `shas`). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/`), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde. Sólo si Ronin respondió `UNIT-GATE: SIN-GATE` (el flujo no tiene gate de unitarias) no hay veredicto que comprobar."
           },
           {
             "key": "curl",
@@ -132,14 +132,14 @@
             "key": "pre-merge",
             "label": "Gate pre-merge",
             "icon": "🛡",
-            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`, con el informe completo en {cycle}/verify-pre-merge.json. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee el informe, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela."
+            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`; el veredicto queda en {cycle}/verify-pre-merge.json y la salida del gate en {cycle}/verify-pre-merge.log. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee esa salida, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela; si dice que los intentos se agotaron, para y pide intervención humana. Si Ronin responde `UNIT-GATE: SIN-GATE`, sigue con la siguiente etapa."
           },
           {
             "key": "pr",
             "label": "PR y merge",
             "icon": "⤵️",
             "executor": "claude",
-            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge. Antes de mergear confirma que el HEAD que vas a mergear es el SHA que aprobó el gate (campo `shas` de {cycle}/verify-pre-merge.json). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/` y las que declare el repo), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde."
+            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge. Antes de mergear confirma en {cycle}/verify-pre-merge.json que `status` sea `passed` (un FAIL también guarda `shas`) y que el HEAD que vas a mergear sea el SHA que aprobó el gate (campo `shas`). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/`), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde. Sólo si Ronin respondió `UNIT-GATE: SIN-GATE` (el flujo no tiene gate de unitarias) no hay veredicto que comprobar."
           },
           {
             "key": "curl",
@@ -189,14 +189,14 @@
             "key": "pre-merge",
             "label": "Gate pre-merge",
             "icon": "🛡",
-            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`, con el informe completo en {cycle}/verify-pre-merge.json. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee el informe, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela."
+            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`; el veredicto queda en {cycle}/verify-pre-merge.json y la salida del gate en {cycle}/verify-pre-merge.log. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee esa salida, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela; si dice que los intentos se agotaron, para y pide intervención humana. Si Ronin responde `UNIT-GATE: SIN-GATE`, sigue con la siguiente etapa."
           },
           {
             "key": "pr",
             "label": "PR y merge",
             "icon": "⤵️",
             "executor": "claude",
-            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge. Antes de mergear confirma que el HEAD que vas a mergear es el SHA que aprobó el gate (campo `shas` de {cycle}/verify-pre-merge.json). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/` y las que declare el repo), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde."
+            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge. Antes de mergear confirma en {cycle}/verify-pre-merge.json que `status` sea `passed` (un FAIL también guarda `shas`) y que el HEAD que vas a mergear sea el SHA que aprobó el gate (campo `shas`). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/`), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde. Sólo si Ronin respondió `UNIT-GATE: SIN-GATE` (el flujo no tiene gate de unitarias) no hay veredicto que comprobar."
           },
           {
             "key": "curl",
@@ -253,14 +253,14 @@
             "key": "pre-merge",
             "label": "Gate pre-merge",
             "icon": "🛡",
-            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`, con el informe completo en {cycle}/verify-pre-merge.json. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee el informe, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela."
+            "instruction": "Asegúrate de que todo está commiteado, toca el sentinela de `pre-merge` y termina tu turno. **No corras la suite ni `unit-gate.sh`.** Ronin corre el gate y te escribe el veredicto: `UNIT-GATE: PASS` o `UNIT-GATE: FAIL`; el veredicto queda en {cycle}/verify-pre-merge.json y la salida del gate en {cycle}/verify-pre-merge.log. Con `UNIT-GATE: PASS` sigue a la siguiente etapa. Con `UNIT-GATE: FAIL`, lee esa salida, arregla con tests dirigidos, commitea y vuelve a tocar el sentinela; si dice que los intentos se agotaron, para y pide intervención humana. Si Ronin responde `UNIT-GATE: SIN-GATE`, sigue con la siguiente etapa."
           },
           {
             "key": "merge",
             "label": "Merge a dev",
             "icon": "⤵️",
             "executor": "claude",
-            "instruction": "Comprueba que el PR sea mergeable de verdad —checks en verde, sin conflictos, base correcta— y haz el merge a dev. Si NO es mergeable, para aquí y explica por qué en {ev}/merge.md: nunca fuerces un merge ni cambies la base para esquivar un conflicto. Antes de mergear confirma que el HEAD que vas a mergear es el SHA que aprobó el gate (campo `shas` de {cycle}/verify-pre-merge.json). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/` y las que declare el repo), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde."
+            "instruction": "Comprueba que el PR sea mergeable de verdad —checks en verde, sin conflictos, base correcta— y haz el merge a dev. Si NO es mergeable, para aquí y explica por qué en {ev}/merge.md: nunca fuerces un merge ni cambies la base para esquivar un conflicto. Antes de mergear confirma en {cycle}/verify-pre-merge.json que `status` sea `passed` (un FAIL también guarda `shas`) y que el HEAD que vas a mergear sea el SHA que aprobó el gate (campo `shas`). Si difiere, mira `git diff --name-only <sha aprobado> HEAD`: si toca algo fuera de las rutas e2e (`e2e_dev/`), vuelve a la etapa pre-merge; si sólo toca e2e, el PASS sigue vigente. Sin `UNIT-GATE: PASS` vigente no hay merge, aunque los checks de GitHub estén en verde. Sólo si Ronin respondió `UNIT-GATE: SIN-GATE` (el flujo no tiene gate de unitarias) no hay veredicto que comprobar."
           },
           {
             "key": "deploy",

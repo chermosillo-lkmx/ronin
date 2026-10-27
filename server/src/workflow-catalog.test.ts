@@ -121,7 +121,14 @@ test("el catálogo empaquetado no contiene frases de re-corrida y tiene pre-merg
     assert.ok(i >= 0, `${name} sin pre-merge`);
     assert.ok(["pr", "merge"].includes(keys[i + 1]!), `${name}: tras pre-merge viene ${keys[i + 1]}`);
     assert.match(stages[i]!.instruction, /No corras la suite ni `unit-gate\.sh`/);
+    // Sin verifyCmd aquí, Ronin responde SIN-GATE: el worker tiene que saber seguir (y el merge no exigir un PASS).
+    assert.match(stages[i]!.instruction, /Si Ronin responde `UNIT-GATE: SIN-GATE`, sigue con la siguiente etapa\./);
+    assert.match(stages[i]!.instruction, /\{cycle\}\/verify-pre-merge\.log/);
+    assert.ok(!stages[i]!.instruction.includes("informe completo en {cycle}/verify-pre-merge.json"), name);
+    assert.match(stages[i + 1]!.instruction, /`status` sea `passed`/, name);
+    assert.match(stages[i + 1]!.instruction, /UNIT-GATE: SIN-GATE/, name);
   }
+  assert.ok(!raw.includes("y las que declare el repo"), "las rutas e2e son sólo e2e_dev/ (lo que usa el driver)");
   for (const w of catalog.items) for (const s of w.config.stages) {
     assert.equal(s.verifyCmd, undefined, `${w.name}/${s.key}: el catálogo empaquetado no lleva verifyCmd`);
     assert.equal(s.mergeGate, undefined, `${w.name}/${s.key}: ni mergeGate`);
