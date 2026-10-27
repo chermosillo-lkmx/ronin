@@ -4,10 +4,13 @@
 // se quitan las instrucciones de re-correr la suite. Idempotente: si el workflow ya tiene una
 // etapa `pre-merge`, no se toca. Uso: node scripts/migrate-pre-merge.mjs <workflows.json>
 // Deja `<archivo>.bak-<YYYYMMDD-HHMMSS>` (hora local) sólo cuando algo cambia.
-import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const GATE_SCRIPT = /unit-gate\.sh$/;
+// unit-gate.sh como segmento de ruta o palabra suelta, con o sin argumentos (también dentro de un wrapper).
+const GATE_SCRIPT = /(^|[\s/])unit-gate\.sh(\s|$)/;
+const isGate = (s) => GATE_SCRIPT.test(s?.verifyCmd ?? "");
+const GATED_KEYS = ["tests", "arreglar"];
 
 export const TESTS_INSTRUCTION =
   "Repara fixtures rotos antes de escribir tests nuevos. Corre SÓLO tests dirigidos (los archivos o casos que tocaste o que cubren el cambio) generando JUnit: pytest -q <archivos> --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run <archivos> --reporter=junit --outputFile=reports/junit.xml). Repórtalo a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay); necesita el junit de esa corrida dirigida, y los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos. REGLA DE PRUEBAS UNITARIAS (obligatoria antes de cualquier merge): todo cambio en src/ trae sus pruebas unitarias en el mismo PR y las pruebas nuevas se ejecutan y pasan. NO corras la suite completa ni `unit-gate.sh` en esta etapa: Ronin corre el gate de unitarias una sola vez, en la etapa pre-merge. No se «arregla» un gate quitando, saltando (skip/xfail) o debilitando pruebas.";
@@ -46,9 +49,15 @@ function preMergeStage(verifyCmd) {
 const prStage = () => ({ key: "pr", label: "PR y merge", icon: "⤵️", executor: "claude", instruction: withMergeRule(PR_BASE) });
 
 /** Migra un workflow en sitio. Devuelve true si cambió algo. */
-export function migrateWorkflow(w) {
+export function migrateWorkflow(w, archivoTieneGate = false) {
   const stages = w.config?.stages;
-  if (!Array.isArray(stages) || stages.some((s) => s.key === "pre-merge")) return false;
+  if (!Array.isArray(stages)) return false;
+  if (stages.some((s) => s.key === "pre-merge")) {
+    if (stages.some((s) => GATED_KEYS.includes(s.key) && isGate(s))) {
+      throw new Error(`el workflow «${w.name}» ya tiene pre-merge pero tests/arreglar aún llevan el verifyCmd de unit-gate: migración a medias, revísalo a mano. No se escribió nada.`);
+    }
+    return false;
+  }
   const idxMerge = stages.findIndex((s) => s.key === "pr" || s.key === "merge");
   const idxTests = stages.findIndex((s) => s.key === "tests");
   const idxCurl = stages.findIndex((s) => s.key === "curl");
@@ -57,7 +66,7 @@ export function migrateWorkflow(w) {
   // El verifyCmd del gate de unitarias se mueve de tests/arreglar a pre-merge.
   let verifyCmd;
   for (const s of stages) {
-    if ((s.key === "tests" || s.key === "arreglar") && GATE_SCRIPT.test(s.verifyCmd ?? "")) {
+    if (GATED_KEYS.includes(s.key) && isGate(s)) {
       verifyCmd ??= s.verifyCmd;
       delete s.verifyCmd;
       delete s.maxRetries;
@@ -71,6 +80,9 @@ export function migrateWorkflow(w) {
     else if (s.key === "curl" || s.key === "pruebas-dev") s.instruction = s.instruction.replaceAll(" (con su unit-gate)", " (exento del gate de unitarias)");
   }
 
+  if (!verifyCmd && archivoTieneGate) {
+    throw new Error(`el workflow «${w.name}» mergea pero no se reconoció su gate de unit-gate en tests/arreglar, y el archivo tiene unit-gate en otros workflows: se perdería el gate. No se escribió nada.`);
+  }
   if (idxMerge >= 0) stages.splice(idxMerge, 0, preMergeStage(verifyCmd));
   else stages.splice(idxTests + 1, 0, preMergeStage(verifyCmd), prStage());
   return true;
@@ -78,7 +90,8 @@ export function migrateWorkflow(w) {
 
 export function migrateCatalog(data) {
   let changed = false;
-  for (const w of data.items ?? []) if (migrateWorkflow(w)) changed = true;
+  const tieneGate = (data.items ?? []).some((w) => (w.config?.stages ?? []).some(isGate));
+  for (const w of data.items ?? []) if (migrateWorkflow(w, tieneGate)) changed = true;
   return changed;
 }
 
@@ -91,10 +104,14 @@ function main(file) {
   if (!file) { console.error("uso: migrate-pre-merge.mjs <workflows.json>"); return 2; }
   const raw = readFileSync(file, "utf8");
   const data = JSON.parse(raw);
-  if (!migrateCatalog(data)) { console.log(`sin cambios: ${file}`); return 0; }
+  let changed;
+  try { changed = migrateCatalog(data); } catch (e) { console.error(`migrate-pre-merge: ${e.message}`); return 1; }
+  if (!changed) { console.log(`sin cambios: ${file}`); return 0; }
   const bak = `${file}.bak-${stamp()}`;
   copyFileSync(file, bak);
-  writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
+  const tmp = `${file}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`);
+  renameSync(tmp, file);
   console.log(`migrado: ${file}\nrespaldo: ${bak}`);
   return 0;
 }

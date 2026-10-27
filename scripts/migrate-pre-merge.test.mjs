@@ -1,7 +1,7 @@
 // Pruebas de scripts/migrate-pre-merge.mjs sobre una copia fija del catálogo vivo (2026-10-27).
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -144,5 +144,62 @@ test("el orden de claves de las etapas intactas se conserva", () => {
     const b = JSON.stringify(stage(wf(after, "claude-plan-codex-impl"), "i18n"));
     assert.equal(a, b);
     assert.deepEqual(after.items.map((w) => w.id), before.items.map((w) => w.id));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+function editar(file, fn) {
+  const d = load(file);
+  fn(d);
+  writeFileSync(file, `${JSON.stringify(d, null, 2)}\n`);
+}
+
+test("un verifyCmd con wrapper y argumentos se reconoce como unit-gate y se mueve a pre-merge", () => {
+  const { dir, file } = sandbox();
+  try {
+    const cmd = "/opt/wrap.sh /Users/x/claude-cowork/scripts/unit-gate.sh --verbose";
+    editar(file, (d) => { stage(wf(d, "claude-plan-codex-impl"), "tests").verifyCmd = cmd; });
+    const r = run(file);
+    assert.equal(r.status, 0, r.stderr);
+    const w = wf(load(file), "claude-plan-codex-impl");
+    assert.equal(stage(w, "pre-merge").verifyCmd, cmd);
+    assert.equal(stage(w, "pre-merge").mergeGate, true);
+    assert.equal(stage(w, "tests").verifyCmd, undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("gate irreconocible en tests con unit-gate en otro workflow: aborta sin escribir nada", () => {
+  const { dir, file } = sandbox();
+  try {
+    editar(file, (d) => { stage(wf(d, "hotfix-verificado"), "tests").verifyCmd = "/opt/mi-gate-raro"; });
+    const antes = readFileSync(file, "utf8");
+    const r = run(file);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /hotfix-verificado/);
+    assert.equal(readFileSync(file, "utf8"), antes);
+    assert.deepEqual(readdirSync(dir).sort(), ["workflows.json"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("workflow a medias (pre-merge presente y tests aún con unit-gate): aborta sin escribir nada", () => {
+  const { dir, file } = sandbox();
+  try {
+    run(file);
+    for (const f of readdirSync(dir)) if (f.includes(".bak-")) rmSync(join(dir, f));
+    editar(file, (d) => { stage(wf(d, "claude-plan-codex-impl"), "tests").verifyCmd = UNIT_GATE; });
+    const antes = readFileSync(file, "utf8");
+    const r = run(file);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /claude-plan-codex-impl/);
+    assert.equal(readFileSync(file, "utf8"), antes);
+    assert.deepEqual(readdirSync(dir).sort(), ["workflows.json"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("el catálogo empaquetado (sin ningún verifyCmd) sigue migrando", () => {
+  const dir = mkdtempSync(join(tmpdir(), "migrate-pre-merge-"));
+  try {
+    const file = join(dir, "workflows.json");
+    copyFileSync(join(here, "..", "server", "data", "workflows.json"), file);
+    assert.equal(run(file).status, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
