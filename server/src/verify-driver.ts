@@ -13,7 +13,10 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  * Gate de merge (`mergeGate`, el de unitarias previo al merge). Su riesgo es el VERDE FALSO: un
  * PASS para código que no se probó. Por eso, a diferencia de un gate normal:
  * - Lee los HEADs de cada sub-repo ANTES de correr y guarda ésos: si el worker commitea durante la
- *   corrida, el PASS no cubre el commit nuevo. HEADs ilegibles o vacíos → no corre ni gasta intento.
+ *   corrida, el PASS no cubre el commit nuevo. Tras un PASS se vuelven a leer: si cambiaron (commit,
+ *   edición, git ilegible) el veredicto es `failed` sin `shas`, nunca un verde dudoso.
+ * - HEADs ilegibles o sin repos → `failed` con su razón, sin correr, sin gastar intento y sin `shas`
+ *   (se avisa una vez); se re-arma solo cuando vuelvan a leerse.
  * - Árbol sucio → `failed` sin correr, sin gastar intento y sin `shas` (se mira ANTES que la caché:
  *   `cacheHit` no ve la suciedad).
  * - Un PASS guardado que cubre los HEADs actuales (mismos SHAs o commits sólo-e2e) se reusa sin correr.
@@ -33,6 +36,9 @@ export const DEFAULT_GATE_RETRIES = 2;
 /** Rutas cuyo cambio no invalida un PASS del gate de merge (ver `cacheHit`). */
 export const MERGE_GATE_E2E_DIRS = ["e2e_dev/"];
 export const DIRTY_REASON = "hay cambios sin commitear";
+export const UNREADABLE_HEADS_REASON = "no se pudieron leer los HEADs del worktree";
+export const NO_REPOS_REASON = "no encontré repos con tests en el worktree";
+export const CHANGED_REASON = "el árbol cambió durante la corrida";
 
 export interface GateStage {
   key: string;
@@ -56,6 +62,12 @@ const shasOf = (heads: RepoHead[]): Record<string, string> => Object.fromEntries
 function sameShas(stored: Record<string, string> | undefined, heads: RepoHead[]): boolean {
   if (!stored || Object.keys(stored).length !== heads.length) return false;
   return heads.every((h) => Object.hasOwn(stored, h.repo) && stored[h.repo] === h.sha);
+}
+
+/** Misma foto: mismos sub-repos, mismos SHAs y todos limpios. null o vacío nunca es "igual". */
+function sameHeads(antes: RepoHead[], despues: RepoHead[] | null): boolean {
+  if (!despues || despues.length === 0 || despues.some((h) => h.dirty)) return false;
+  return sameShas(shasOf(antes), despues);
 }
 
 /**
@@ -173,12 +185,16 @@ export async function tickOnce(deps: DriverDeps, armed: Map<string, boolean>): P
       const provision = deps.provisionOf(cycle);
       if (provision?.status === "running" || provision?.status === "failed") continue;
       // HEADs leídos UNA vez y ANTES de cualquier corrida: son los que se guardan con el veredicto.
-      // Sólo si el flujo tiene gate de merge y el worker está ocioso (ocupado no corre nada).
-      const hasMergeGate = stages.some((s) => s.mergeGate === true && s.verifyCmd?.trim());
-      const heads = hasMergeGate && !sesion.busy ? await deps.heads(launch.worktree) : undefined;
+      // Sólo si el worker está ocioso (ocupado no corre nada) y ya alcanzó el primer gate de merge
+      // del flujo: antes de eso no hay nada que re-armar y git sería trabajo tirado.
+      const reached = deps.detect(cycle, stages.map((s) => s.key));
+      const primerMerge = stages.findIndex((s) => s.mergeGate === true && s.verifyCmd?.trim());
+      const alcanzado = reached ? stages.findIndex((s) => s.key === reached) : -1;
+      const leerHeads = primerMerge >= 0 && alcanzado >= primerMerge && !sesion.busy;
+      const heads = leerHeads ? await deps.heads(launch.worktree) : undefined;
       const gate = selectGate(
         stages,
-        deps.detect(cycle, stages.map((s) => s.key)),
+        reached,
         (key) => deps.readState(cycle, key),
         heads === undefined ? undefined : () => heads,
       );
@@ -212,9 +228,10 @@ export async function tickOnce(deps: DriverDeps, armed: Map<string, boolean>): P
 }
 
 /**
- * Un gate de merge, en orden: ocupado → nada; HEADs ilegibles/vacíos → nada (logError); árbol
- * sucio → failed sin correr; caché → passed sin correr; si no, corre. El orden sucio→caché es
- * deliberado: `cacheHit` ignora `dirty` y un árbol sucio con SHAs cacheados no puede dar verde.
+ * Un gate de merge, en orden: ocupado → nada; HEADs ilegibles/vacíos → failed con razón; árbol
+ * sucio → failed sin correr; caché → passed sin correr; si no, corre y un PASS se re-valida.
+ * El orden sucio→caché es deliberado: `cacheHit` ignora `dirty` y un árbol sucio con SHAs
+ * cacheados no puede dar verde.
  */
 async function runMergeGate(
   deps: DriverDeps,
@@ -226,14 +243,20 @@ async function runMergeGate(
   heads: RepoHead[] | null | undefined,
 ): Promise<GateReport | null> {
   if (sesion.busy) return null;
-  if (!heads || heads.length === 0) {
-    deps.logError?.(new Error(`gate ${gate.key} de ${sesion.name}: no se pudieron leer los HEADs de ${worktree}; no se corre`));
-    return null;
-  }
   const informe = (state: VerifyState, output: string): GateReport => {
     deps.writeState(cycle, gate.key, state);
     return { session: sesion.name, stageKey: gate.key, status: state.status, attempts: state.attempts, output };
   };
+
+  if (!heads || heads.length === 0) {
+    // Sin HEADs no hay qué probar ni qué guardar: failed SIN `shas` y sin gastar intento, para que
+    // la UI y el worker no esperen para siempre. Se re-arma solo cuando los HEADs vuelvan a leerse.
+    const reason = heads ? NO_REPOS_REASON : UNREADABLE_HEADS_REASON;
+    const previo = deps.readState(cycle, gate.key);
+    if (previo?.status === "failed" && previo.reason === reason) return null; // ya avisado: sin ruido
+    deps.logError?.(new Error(`gate ${gate.key} de ${sesion.name}: ${reason} (${worktree}); no se corre`));
+    return informe({ status: "failed", reason, attempts: gate.attempts }, reason);
+  }
 
   if (heads.some((h) => h.dirty)) {
     // Sin `shas`: se re-arma en cuanto el árbol quede limpio. Sin gastar intento: no se probó nada.
@@ -248,6 +271,11 @@ async function runMergeGate(
   const inicio = Date.now();
   const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
   const fin = Date.now();
+  // Un PASS sólo vale si el árbol sigue igual que en la foto previa: un commit o una edición a
+  // media corrida pudo quedar fuera de lo probado. Sin `shas` → se re-arma en el siguiente tick limpio.
+  if (resultado.ok && !sameHeads(heads, await deps.heads(worktree))) {
+    return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts }, resultado.output);
+  }
   // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
   const state: VerifyState = resultado.ok
     ? { attempts: gate.attempts, status: "passed", shas, durationMs: fin - inicio, at: fin }
