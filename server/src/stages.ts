@@ -269,7 +269,7 @@ function parseVerifyState(raw: Record<string, unknown>): VerifyState {
     shas &&
     typeof shas === "object" &&
     !Array.isArray(shas) &&
-    Object.values(shas).every((v) => typeof v === "string")
+    Object.values(shas).every((v) => typeof v === "string" && /^[0-9a-f]{40,64}$/.test(v))
   )
     st.shas = shas as Record<string, string>;
   if (typeof raw.durationMs === "number") st.durationMs = raw.durationMs;

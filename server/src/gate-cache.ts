@@ -58,11 +58,16 @@ function statusPaths(line: string): string[] {
   return body.includes(" -> ") ? body.split(" -> ") : [body];
 }
 
+// reports/ se ignora sólo para untracked («??», lo que escribe el gate); un archivo trackeado
+// modificado bajo reports/ puede ser código de producto y sí ensucia.
 function isDirty(porcelain: string): boolean {
   return porcelain
     .split("\n")
     .filter((l) => l.trim() !== "")
-    .some((l) => statusPaths(l).some((p) => !inReports(p.replace(/^"|"$/g, ""))));
+    .some((l) => {
+      if (!l.startsWith("??")) return true;
+      return statusPaths(l).some((p) => !inReports(p.replace(/^"|"$/g, "")));
+    });
 }
 
 /** HEAD y suciedad de cada sub-repo del worktree; `null` si algún comando git falla. */
@@ -91,18 +96,21 @@ export async function cacheHit(
   worktree: string,
   e2eDirs: string[],
 ): Promise<boolean> {
+  if (heads.length === 0) return false;
   if (!cached || cached.status !== "passed" || !cached.shas) return false;
   const shas = cached.shas;
   if (Object.keys(shas).length !== heads.length) return false;
   const prefixes = e2eDirs.map(normDir);
   for (const h of heads) {
+    if (!Object.hasOwn(shas, h.repo)) return false;
     const prev = shas[h.repo];
-    if (prev === undefined) return false;
+    // Defensa en profundidad: el SHA guardado llega a git, así que debe ser hex puro.
+    if (typeof prev !== "string" || !/^[0-9a-f]{40,64}$/.test(prev)) return false;
     if (prev === h.sha) continue;
     // El cwd del sub-repo: el propio worktree si es repo, si no el hijo con ese nombre.
     const cwd = basename(worktree) === h.repo && isGateRepo(worktree) ? worktree : join(worktree, h.repo);
     // --no-renames: un renombre no debe esconder el borrado de código de producto.
-    const d = await git.run(["diff", "--name-only", "--no-renames", prev, h.sha], cwd);
+    const d = await git.run(["diff", "--name-only", "--no-renames", "--end-of-options", prev, h.sha], cwd);
     if (!d.ok) return false;
     const files = d.out.split("\n").filter((l) => l.trim() !== "");
     if (!files.every((f) => prefixes.some((p) => f.startsWith(p)))) return false;

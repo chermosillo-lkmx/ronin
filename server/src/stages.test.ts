@@ -296,7 +296,7 @@ test("readVerifyState conserva shas, durationMs y notify", () => {
     const st = {
       attempts: 2,
       status: "passed" as const,
-      shas: { api: "abc" },
+      shas: { api: "abc".repeat(14).slice(0, 40) },
       durationMs: 1234,
       at: 99,
       queued: false,
@@ -327,6 +327,19 @@ test("readVerifyState: campo con tipo incorrecto se ignora, el resto se lee", ()
       }),
     );
     assert.deepEqual(readVerifyState(cycle, "unit"), { attempts: 1, status: "failed", reason: "r" });
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("readVerifyState: shas con valor no hex (HEAD) se descartan enteras", () => {
+  const cycle = mkdtempSync(join(tmpdir(), "verify-sha-"));
+  try {
+    writeFileSync(
+      join(cycle, "verify-unit.json"),
+      JSON.stringify({ attempts: 1, status: "passed", shas: { api: "a".repeat(40), web: "HEAD" } }),
+    );
+    assert.deepEqual(readVerifyState(cycle, "unit"), { attempts: 1, status: "passed" });
   } finally {
     rmSync(cycle, { recursive: true, force: true });
   }
