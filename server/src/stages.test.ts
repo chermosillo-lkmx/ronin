@@ -289,3 +289,45 @@ test("mergeGate sobrevive al congelado de flow.json", () => {
   assert.equal(back?.stages[0].mergeGate, true);
   assert.deepEqual(back, flow);
 });
+
+test("readVerifyState conserva shas, durationMs y notify", () => {
+  const cycle = mkdtempSync(join(tmpdir(), "verify-ext-"));
+  try {
+    const st = {
+      attempts: 2,
+      status: "passed" as const,
+      shas: { api: "abc" },
+      durationMs: 1234,
+      at: 99,
+      queued: false,
+      running: true,
+      notify: "sent" as const,
+      reason: "ok",
+    };
+    writeVerifyState(cycle, "unit", st);
+    assert.deepEqual(readVerifyState(cycle, "unit"), st);
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("readVerifyState: campo con tipo incorrecto se ignora, el resto se lee", () => {
+  const cycle = mkdtempSync(join(tmpdir(), "verify-bad-"));
+  try {
+    writeFileSync(
+      join(cycle, "verify-unit.json"),
+      JSON.stringify({
+        attempts: 1,
+        status: "failed",
+        shas: { api: 5 },
+        durationMs: "x",
+        notify: "maybe",
+        queued: "yes",
+        reason: "r",
+      }),
+    );
+    assert.deepEqual(readVerifyState(cycle, "unit"), { attempts: 1, status: "failed", reason: "r" });
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});

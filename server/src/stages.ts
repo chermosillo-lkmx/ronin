@@ -248,15 +248,44 @@ export type VerifyStatus = "pending" | "passed" | "failed";
 export interface VerifyState {
   attempts: number;
   status: VerifyStatus;
+  // Caché del gate de pruebas (opcionales; sólo los escribe el driver de verificación).
+  /** sub-repo → SHA probado. */
+  shas?: Record<string, string>;
+  durationMs?: number;
+  at?: number;
+  queued?: boolean;
+  running?: boolean;
+  notify?: "sent" | "failed";
+  reason?: string;
 }
 // stage keys are slugs ([a-z0-9-]) so they're safe as a filename component.
 const verifyFile = (stageKey: string): string => `verify-${stageKey}.json`;
+
+// Los campos opcionales con tipo incorrecto se descartan uno a uno; no invalidan el archivo.
+function parseVerifyState(raw: Record<string, unknown>): VerifyState {
+  const st: VerifyState = { attempts: raw.attempts as number, status: raw.status as VerifyStatus };
+  const shas = raw.shas;
+  if (
+    shas &&
+    typeof shas === "object" &&
+    !Array.isArray(shas) &&
+    Object.values(shas).every((v) => typeof v === "string")
+  )
+    st.shas = shas as Record<string, string>;
+  if (typeof raw.durationMs === "number") st.durationMs = raw.durationMs;
+  if (typeof raw.at === "number") st.at = raw.at;
+  if (typeof raw.queued === "boolean") st.queued = raw.queued;
+  if (typeof raw.running === "boolean") st.running = raw.running;
+  if (raw.notify === "sent" || raw.notify === "failed") st.notify = raw.notify;
+  if (typeof raw.reason === "string") st.reason = raw.reason;
+  return st;
+}
 
 export function readVerifyState(cycle: string, stageKey: string): VerifyState | null {
   try {
     const raw = JSON.parse(readFileSync(join(cycle, verifyFile(stageKey)), "utf8"));
     if (raw && typeof raw.attempts === "number" && typeof raw.status === "string")
-      return { attempts: raw.attempts, status: raw.status as VerifyStatus };
+      return parseVerifyState(raw);
   } catch {
     /* absent */
   }
