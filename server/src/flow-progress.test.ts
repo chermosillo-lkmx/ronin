@@ -233,3 +233,77 @@ test("readFlowProgress: gate-sin-entregar se apaga en cuanto el worker tocó un 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- Gate de merge: su estado se ve aunque el centinela de la etapa ya exista ----
+
+const FLUJO_MERGE: WorkflowConfig = {
+  stages: [
+    { key: "implementing", label: "Impl", icon: "🤖", instruction: "…" },
+    { key: "pre-merge", label: "Gate pre-merge", icon: "🛡", instruction: "…", verifyCmd: "unit-gate", maxRetries: 3, mergeGate: true },
+    { key: "pr", label: "PR", icon: "⤵️", instruction: "…" },
+  ],
+  verifyAfter: [],
+};
+
+function cicloMerge(estado: object | null, sentinelas: string[] = ["implementing", "pre-merge"]): string {
+  const dir = mkdtempSync(join(tmpdir(), "flow-progress-merge-"));
+  writeFileSync(join(dir, "flow.json"), JSON.stringify(FLUJO_MERGE));
+  sentinelas.forEach((k, i) => centinela(dir, k, 1_700_000_000_000 + i * 1000));
+  if (estado) writeFileSync(join(dir, "verify-pre-merge.json"), JSON.stringify(estado));
+  return dir;
+}
+
+test("readFlowProgress: gate de merge fallido con su centinela tocado sale failed, con intentos y razón", () => {
+  const dir = cicloMerge({ attempts: 1, status: "failed", reason: "timeout", notify: "sent" });
+  try {
+    const etapa = readFlowProgress(dir)!.stages[1]!;
+    assert.equal(etapa.status, "failed");
+    assert.equal(etapa.attempts, 1);
+    assert.equal(etapa.gate, "failed");
+    assert.equal(etapa.reason, "timeout");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readFlowProgress: gate de merge en cola o corriendo se dice aunque la etapa esté cumplida", () => {
+  const enCola = cicloMerge({ attempts: 0, status: "pending", queued: true });
+  const corriendo = cicloMerge({ attempts: 0, status: "pending", running: true, queued: false });
+  try {
+    const a = readFlowProgress(enCola)!.stages[1]!;
+    assert.equal(a.gate, "queued");
+    assert.equal(a.status, "done");
+    const b = readFlowProgress(corriendo)!.stages[1]!;
+    assert.equal(b.gate, "running");
+  } finally {
+    rmSync(enCola, { recursive: true, force: true });
+    rmSync(corriendo, { recursive: true, force: true });
+  }
+});
+
+test("readFlowProgress: gate de merge passed o sin estado no añade nada", () => {
+  const passed = cicloMerge({ attempts: 0, status: "passed", notify: "sent" });
+  const nada = cicloMerge(null);
+  try {
+    for (const dir of [passed, nada]) {
+      const etapa = readFlowProgress(dir)!.stages[1]!;
+      assert.equal(etapa.status, "done");
+      assert.equal("gate" in etapa, false);
+    }
+  } finally {
+    rmSync(passed, { recursive: true, force: true });
+    rmSync(nada, { recursive: true, force: true });
+  }
+});
+
+test("readFlowProgress: gate de merge con los intentos agotados pide atención gate-agotado", () => {
+  const agotado = cicloMerge({ attempts: 3, status: "failed", notify: "sent" });
+  const conIntentos = cicloMerge({ attempts: 2, status: "failed", notify: "sent" });
+  try {
+    assert.equal(readFlowProgress(agotado)!.stages[1]!.attention, "gate-agotado");
+    assert.equal("attention" in readFlowProgress(conIntentos)!.stages[1]!, false);
+  } finally {
+    rmSync(agotado, { recursive: true, force: true });
+    rmSync(conIntentos, { recursive: true, force: true });
+  }
+});

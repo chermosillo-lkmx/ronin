@@ -76,11 +76,17 @@ function Marker({ status }: { status: FlowStageProgress["status"] }) {
 
 /** Línea de meta de una etapa. Sin dato que dar, cadena vacía: la fila se queda sin segundo renglón. */
 export function stageMeta(stage: FlowStageProgress, now: number): string {
+  if (stage.attention === "gate-agotado") return [stageMetaBase(stage, now), "intentos agotados · pide intervención humana"].filter(Boolean).join(" · ");
   if (stage.attention === "gate-sin-entregar") return [stageMetaBase(stage, now), "veredicto sin entregar al worker"].filter(Boolean).join(" · ");
   return stageMetaBase(stage, now);
 }
 
 function stageMetaBase(stage: FlowStageProgress, now: number): string {
+  // Gate de merge: corre con el centinela de la etapa ya tocado, así que su estado va primero.
+  if (stage.gate === "running") return "corriendo el gate";
+  if (stage.gate === "queued") return "en cola para el gate";
+  if (stage.gate === "failed")
+    return ["falló el gate", stage.attempts ? `intento ${stage.attempts}` : null, stage.reason ?? null].filter(Boolean).join(" · ");
   if (stage.status === "failed")
     return `falló la verificación${stage.attempts ? ` · intento ${stage.attempts}` : ""}`;
   if (stage.status === "current")

@@ -235,15 +235,22 @@ export function attachFlow(
 }
 
 /**
- * Un veredicto del gate de merge que Ronin no pudo entregar (`gate-sin-entregar` en el flujo)
- * pone la sesión en `decision` para que el semáforo existente la marque y el operador lo vea.
+ * Un veredicto del gate de merge que Ronin no pudo entregar (`gate-sin-entregar` en el flujo), o un
+ * gate de merge con los intentos agotados (`gate-agotado`, gana), pone la sesión en `decision` para
+ * que el semáforo existente la marque y el operador lo vea.
  * Sólo sobre un worker `idle`: uno trabajando sigue `working` (el driver de gates lee ese nivel
  * para no correr a media faena) y `shell`/`gone`/`decision` ya piden atención por sí mismos.
  */
 export function attachGateAttention(sessions: TmuxSessionInfo[]): TmuxSessionInfo[] {
   return sessions.map((session) => {
+    if (session.attention?.level !== "idle") return session;
+    const agotado = session.flow?.stages.find((stage) => stage.attention === "gate-agotado");
+    if (agotado) {
+      const question = `El gate ${agotado.key} agotó sus intentos${agotado.attempts !== undefined ? ` (${agotado.attempts})` : ""}; hace falta intervención humana`;
+      return { ...session, attention: { ...session.attention, level: "decision", question } };
+    }
     const etapa = session.flow?.stages.find((stage) => stage.attention === "gate-sin-entregar");
-    if (!etapa || session.attention?.level !== "idle") return session;
+    if (!etapa) return session;
     return { ...session, attention: { ...session.attention, level: "decision", question: `Ronin no pudo entregarle al worker el veredicto del gate ${etapa.key}` } };
   });
 }

@@ -418,3 +418,14 @@ test("attachGateAttention: un veredicto sin entregar pone en decisión a un work
   assert.equal(trabajando!.attention!.level, "working");
   assert.equal(sinAviso!.attention!.level, "idle");
 });
+
+test("attachGateAttention: un gate de merge con los intentos agotados pone en decisión a un worker ocioso", () => {
+  const base = buildInventory("cowork-x\t1\t1753747200\t0", "cowork-x\t0\t%1\tzsh\t\t\t1", () => true)[0]!;
+  const flow = { done: 2, total: 3, stages: [
+    { key: "impl", label: "Impl", status: "done" as const },
+    { key: "pre-merge", label: "Gate", status: "failed" as const, attempts: 3, attention: "gate-agotado" as const },
+    { key: "pr", label: "PR", status: "pending" as const },
+  ] };
+  const [ocioso] = attachGateAttention([{ ...base, flow, attention: { level: "idle", paneId: "%1" } }]);
+  assert.deepEqual(ocioso!.attention, { level: "decision", paneId: "%1", question: "El gate pre-merge agotó sus intentos (3); hace falta intervención humana" });
+});

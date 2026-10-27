@@ -106,7 +106,16 @@ test("toStatus reporta el gate fallido", () => {
     { key: "planning", label: "P", status: "done" }, { key: "implementing", label: "I", status: "done" },
     { key: "tests", label: "T", status: "failed", attempts: 2 }, { key: "done", label: "E", status: "pending" },
   ] } });
-  assert.deepEqual(toStatus(failed).gate, { stage: "tests", attempts: 2 });
+  assert.deepEqual(toStatus(failed).gate, { stage: "tests", state: "failed", attempts: 2 });
+});
+
+test("toStatus reporta el gate de merge en cola o corriendo aunque su etapa esté cumplida", () => {
+  const conGate = (gate: "queued" | "running") => session({ flow: { workflow: "w", done: 2, total: 3, stages: [
+    { key: "implementing", label: "I", status: "done" }, { key: "pre-merge", label: "G", status: "done", gate },
+    { key: "pr", label: "PR", status: "current" },
+  ] } });
+  assert.deepEqual(toStatus(conGate("queued")).gate, { stage: "pre-merge", state: "queued" });
+  assert.deepEqual(toStatus(conGate("running")).gate, { stage: "pre-merge", state: "running" });
 });
 
 test("catalog combina repos y workflows", async () => {

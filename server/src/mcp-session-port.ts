@@ -37,6 +37,7 @@ export function toStatus(session: TmuxSessionInfo, pane?: string | null): McpSes
   const flow = session.flow;
   const current = flow?.stages.find((stage) => stage.status === "current" || stage.status === "failed");
   const failed = flow?.stages.find((stage) => stage.status === "failed");
+  const enMarcha = flow?.stages.find((stage) => stage.gate === "queued" || stage.gate === "running");
   const level = session.attention?.level ?? null;
   const pending = flow ? flow.done < flow.total : true;
   const needsInput = level === "decision" || (level === "idle" && pending);
@@ -48,7 +49,9 @@ export function toStatus(session: TmuxSessionInfo, pane?: string | null): McpSes
     stagesTotal: flow?.total ?? 0,
     attention: level,
     needsInput,
-    gate: failed ? { stage: failed.key, ...(failed.attempts !== undefined ? { attempts: failed.attempts } : {}) } : null,
+    gate: failed
+      ? { stage: failed.key, state: "failed", ...(failed.attempts !== undefined ? { attempts: failed.attempts } : {}) }
+      : enMarcha ? { stage: enMarcha.key, state: enMarcha.gate as "queued" | "running" } : null,
   };
   if (session.attention?.question) status.question = session.attention.question.slice(0, MAX_QUESTION);
   else if (level === "idle" && needsInput && pane) {

@@ -12,7 +12,8 @@ export interface McpSessionStatus {
   question?: string;
   /** Etiquetas del menú numerado, sólo cuando la decisión es un menú; se responde con su número (1..n). */
   options?: string[];
-  gate: { stage: string; attempts?: number } | null;
+  /** Gate de verificación en juego: fallido, o el de merge en cola/corriendo (aunque su etapa esté cumplida). */
+  gate: { stage: string; state: "failed" | "queued" | "running"; attempts?: number } | null;
 }
 export interface McpSessionPort {
   catalog(): Promise<McpCatalog>;
