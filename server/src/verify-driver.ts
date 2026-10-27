@@ -58,6 +58,12 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  * - Una entrega fallida queda `notify: "failed"` y NO se reintenta: escribir a ciegas en un pane
  *   que no responde es peor que avisar al operador, y `flow-progress` la marca como
  *   `gate-sin-entregar` para que el semáforo la muestre.
+ * - Va al pane CONDUCTOR (el `%N` de la ventana 0, o el `driver` del arreglo de 4 panes), nunca a
+ *   `-t <sesión>`: el conductor abre ventanas para delegar etapas y el pane activo puede ser otro
+ *   agente. Sin un conductor inequívoco la entrega es `failed`, no un intento a ciegas.
+ * - Una entrega perdida (Ronin se reinició con ella en curso) deja un desenlace sin `notify`. Pasado
+ *   `NOTIFY_STALE_MS` desde su `at`, y si no se está entregando en este proceso, se marca `failed`
+ *   sin reenviar: el worker quizá ya lo recibió y un duplicado lo confundiría; el operador lo ve.
  * Los gates normales no avisan: siguen dejando su veredicto sólo por escrito.
  */
 
@@ -68,6 +74,12 @@ export const DIRTY_REASON = "hay cambios sin commitear";
 export const UNREADABLE_HEADS_REASON = "no se pudieron leer los HEADs del worktree";
 export const NO_REPOS_REASON = "no encontré repos con tests en el worktree";
 export const CHANGED_REASON = "el árbol cambió durante la corrida";
+/**
+ * Plazo tras el cual un desenlace del gate de merge sin `notify` se da por entrega perdida. Una
+ * entrega espera a la TUI hasta 30 s (TUI_READY_ATTEMPTS × TUI_READY_INTERVAL_MS en engine.ts),
+ * más el paste (~1,2 s) y los Enter de reintento; 2 min deja margen de sobra para un tmux lento.
+ */
+export const NOTIFY_STALE_MS = 2 * 60_000;
 
 export interface GateStage {
   key: string;
@@ -187,6 +199,8 @@ export interface DriverDeps {
    * Sólo lo usa el gate de merge. Sin él, el veredicto queda sólo por escrito, como antes.
    */
   notify?(session: string, text: string): Promise<boolean>;
+  /** Reloj para el plazo de entregas perdidas (inyectable en pruebas). Por defecto Date.now. */
+  now?(): number;
   logError?(error: unknown): void;
 }
 
@@ -239,6 +253,8 @@ export interface GateSlots {
   marked?: Map<string, { cycle: string; stageKey: string }>;
   /** Interno del driver (se crea solo): entregas de veredicto en curso. Se borran solas al resolverse. */
   entregas?: Set<Promise<void>>;
+  /** Interno: `ciclo:etapa` → entregas en curso en ESTE proceso; ésas nunca se dan por perdidas. */
+  avisando?: Map<string, number>;
 }
 
 /** Una corrida lista para lanzar: corre, escribe el desenlace y devuelve el informe. */
@@ -267,6 +283,8 @@ export async function tickOnce(
 ): Promise<void> {
   const marcados = (slots.marked ??= new Map());
   const entregas = (slots.entregas ??= new Set());
+  const avisando = (slots.avisando ??= new Map());
+  const ahora = (): number => deps.now?.() ?? Date.now();
   const vigentes = new Set<string>(); // lanzadas o encoladas en este tick: su marca es actual
   // Registrar un error nunca puede lanzar: dentro de una corrida en vuelo eso sería un rechazo sin dueño.
   const registrar = (error: unknown): void => {
@@ -290,6 +308,8 @@ export async function tickOnce(
    */
   const avisar = (session: string, cycle: string, stageKey: string, state: VerifyState, next: string | null, worktree: string): void => {
     if (!deps.notify) return;
+    const llave = `${cycle}:${stageKey}`;
+    avisando.set(llave, (avisando.get(llave) ?? 0) + 1);
     const entrega = (async () => {
       let ok = false;
       try {
@@ -305,7 +325,12 @@ export async function tickOnce(
       } catch (error) {
         registrar(error);
       }
-    })().finally(() => entregas.delete(entrega));
+    })().finally(() => {
+      entregas.delete(entrega);
+      const quedan = (avisando.get(llave) ?? 1) - 1;
+      if (quedan > 0) avisando.set(llave, quedan);
+      else avisando.delete(llave);
+    });
     entregas.add(entrega);
   };
 
@@ -332,6 +357,18 @@ export async function tickOnce(
 
       const stages = deps.flowFor(sesion.name, launch.repo);
       const cycle = deps.cycleFor(sesion.name);
+
+      // Entregas perdidas: un desenlace del gate de merge sin `notify`, viejo y que no se está
+      // entregando aquí. Se marca `failed` (la UI lo muestra) y no se reenvía.
+      if (deps.notify) {
+        for (const stage of stages) {
+          if (stage.mergeGate !== true || !stage.verifyCmd?.trim() || avisando.has(`${cycle}:${stage.key}`)) continue;
+          const state = deps.readState(cycle, stage.key);
+          if (!state || (state.status !== "passed" && state.status !== "failed") || state.notify !== undefined) continue;
+          if (state.at === undefined || ahora() - state.at < NOTIFY_STALE_MS) continue;
+          deps.writeState(cycle, stage.key, { ...state, notify: "failed" });
+        }
+      }
 
       // Sin entorno no hay nada que probar. `running`: la instalación sigue en marcha. `failed`:
       // el entorno no se pudo armar — se salta SIN tocar el estado del gate, porque un venv que
@@ -482,13 +519,13 @@ async function planMergeGate(
     const previo = deps.readState(cycle, gate.key);
     if (previo?.status === "failed" && previo.reason === reason) return null; // ya avisado: sin ruido
     deps.logError?.(new Error(`gate ${gate.key} de ${sesion.name}: ${reason} (${worktree}); no se corre`));
-    informar(informe({ status: "failed", reason, attempts: gate.attempts }, reason));
+    informar(informe({ status: "failed", reason, attempts: gate.attempts, at: Date.now() }, reason));
     return null;
   }
 
   if (heads.some((h) => h.dirty)) {
     // Sin `shas`: se re-arma en cuanto el árbol quede limpio. Sin gastar intento: no se probó nada.
-    informar(informe({ status: "failed", reason: DIRTY_REASON, attempts: gate.attempts }, DIRTY_REASON));
+    informar(informe({ status: "failed", reason: DIRTY_REASON, attempts: gate.attempts, at: Date.now() }, DIRTY_REASON));
     return null;
   }
 
@@ -506,7 +543,7 @@ async function planMergeGate(
     // Un PASS sólo vale si el árbol sigue igual que en la foto previa: un commit o una edición a
     // media corrida pudo quedar fuera de lo probado. Sin `shas` → se re-arma en el siguiente tick limpio.
     if (resultado.ok && !sameHeads(heads, await deps.heads(worktree))) {
-      return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts }, resultado.output);
+      return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts, at: Date.now() }, resultado.output);
     }
     // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
     const state: VerifyState = resultado.ok

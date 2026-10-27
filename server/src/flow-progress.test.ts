@@ -221,3 +221,15 @@ test("readFlowProgress: un veredicto entregado (notify sent) no pide atención",
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("readFlowProgress: gate-sin-entregar se apaga en cuanto el worker tocó un centinela posterior", () => {
+  const dir = cicloTemporal();
+  try {
+    centinela(dir, "tests", 1_700_000_200_000);
+    centinela(dir, "done", 1_700_000_300_000);
+    writeFileSync(join(dir, "verify-tests.json"), JSON.stringify({ attempts: 0, status: "passed", notify: "failed" }));
+    assert.equal(readFlowProgress(dir)!.stages.some((s) => "attention" in s), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -15,6 +15,13 @@ const STAGES: GateStage[] = [
 ];
 
 const sinEstado = () => null;
+
+/** Los desenlaces del gate de merge llevan `at` (reloj real): se comprueba que exista y se quita. */
+function sinAt<T extends { at?: number } | undefined>(state: T): Omit<NonNullable<T>, "at"> {
+  assert.equal(typeof state?.at, "number");
+  const { at: _at, ...resto } = state as NonNullable<T>;
+  return resto;
+}
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 
@@ -394,7 +401,7 @@ test("tickOnce: mergeGate con árbol sucio: failed con reason y sin llamar a run
     const informes = await tick(d, new Map());
     assert.equal(corridas.length, 0);
     assert.equal(cache, 0);
-    assert.deepEqual(escrito, [{ status: "failed", reason: "hay cambios sin commitear", attempts: 1 }]);
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "hay cambios sin commitear", attempts: 1 }]);
     assert.deepEqual(informes.map((i) => i.status), ["failed"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -479,7 +486,7 @@ test("tickOnce: mergeGate: un commit durante la corrida no deja passed (ni con l
       run: async () => { commiteado = true; return { ok: true, code: 0, output: "verde" }; },
     });
     await tick(d, new Map());
-    assert.deepEqual(escrito, [{ status: "failed", reason: "el árbol cambió durante la corrida", attempts: 1 }]);
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "el árbol cambió durante la corrida", attempts: 1 }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -495,7 +502,7 @@ test("tickOnce: mergeGate: árbol limpio antes y sucio después de un PASS → n
       run: async () => { corrio = true; return { ok: true, code: 0, output: "verde" }; },
     });
     await tick(d, new Map());
-    assert.deepEqual(escrito, [{ status: "failed", reason: "el árbol cambió durante la corrida", attempts: 0 }]);
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "el árbol cambió durante la corrida", attempts: 0 }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -551,7 +558,7 @@ test("tickOnce: mergeGate heads null → failed con reason, sin gastar intento, 
     });
     const informes = await tick(d, new Map());
     assert.equal(corridas.length, 0);
-    assert.deepEqual(escrito, [{ status: "failed", reason: "no se pudieron leer los HEADs del worktree", attempts: 1 }]);
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "no se pudieron leer los HEADs del worktree", attempts: 1 }]);
     assert.deepEqual(informes.map((i) => i.status), ["failed"]);
     assert.equal(errores.length, 1);
   } finally {
@@ -565,7 +572,7 @@ test("tickOnce: mergeGate heads vacío → failed con reason", async () => {
     const { d, escrito, corridas } = mergeDeps({ cycle: dir, heads: async () => [], logError: () => {} });
     await tick(d, new Map());
     assert.equal(corridas.length, 0);
-    assert.deepEqual(escrito, [{ status: "failed", reason: "no encontré repos con tests en el worktree", attempts: 0 }]);
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "no encontré repos con tests en el worktree", attempts: 0 }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -942,7 +949,7 @@ test("concurrencia: gate de merge y gate normal comparten el mismo cupo; el merg
   assert.deepEqual(f.lanzadas, ["s1", "m1"]);
   commiteado = true; // un commit a media corrida
   await f.terminar("m1", true, "pre-merge");
-  assert.deepEqual(f.estado("m1", "pre-merge"), { status: "failed", reason: "el árbol cambió durante la corrida", attempts: 0 });
+  assert.deepEqual(sinAt(f.estado("m1", "pre-merge")), { status: "failed", reason: "el árbol cambió durante la corrida", attempts: 0 });
 });
 
 test("concurrencia: un run que lanza no tumba el driver, se registra y libera el cupo", async () => {
@@ -1097,7 +1104,7 @@ test("verdictMessage FAIL sin reason: sin el tramo de la razón", () => {
  * Una sesión con gate de merge y estado en memoria. `notify` responde con lo que diga `entrega`
  * (true, false o lanzar). `tick` espera corridas Y entregas: así las pruebas no duermen.
  */
-function avisos(over: Partial<DriverDeps> & { entrega?: () => Promise<boolean> } = {}) {
+function avisos(over: Partial<DriverDeps> & { entrega?: () => Promise<boolean>; cycle?: string } = {}) {
   let estado: VerifyState | null = null;
   const escritos: VerifyState[] = [];
   const mensajes: Array<[string, string]> = [];
@@ -1267,4 +1274,65 @@ test("notify: con el estado real en disco (otro orden de claves al releer) tambi
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- Task 7, ronda 1: entregas perdidas por reinicio ----
+
+test("notify: un desenlace viejo sin notify (entrega perdida en un reinicio) queda notify:\"failed\" sin reenviar", async () => {
+  const a = avisos({ now: () => 10 * 60_000 + 1_000 });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, durationMs: 5, at: 1_000 });
+  await a.tick();
+  assert.equal(a.mensajes.length, 0);
+  assert.equal(a.estado()?.notify, "failed");
+  assert.equal(a.estado()?.status, "passed");
+  await a.tick();
+  assert.equal(a.escritos.length, 1); // se marca una sola vez
+});
+
+test("notify: un desenlace reciente sin notify no se marca (su entrega puede seguir en curso en otro proceso)", async () => {
+  const a = avisos({ now: () => 30_000 });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, durationMs: 5, at: 1_000 });
+  await a.tick();
+  assert.equal(a.estado()?.notify, undefined);
+  assert.equal(a.escritos.length, 0);
+});
+
+test("notify: una entrega en curso en este proceso no se da por perdida aunque pase el plazo", async () => {
+  const x = diferido<boolean>();
+  let ahora = Date.now();
+  const a = avisos({ entrega: () => x.promise, cacheHit: async () => true, now: () => ahora });
+  await tickOnce(a.d, new Map(), a.slots);
+  ahora += 60 * 60_000;
+  await tickOnce(a.d, new Map(), a.slots);
+  assert.equal(a.estado()?.notify, undefined);
+  x.resolve(true);
+  await Promise.all([...(a.slots.entregas ?? [])]);
+  assert.equal(a.estado()?.notify, "sent");
+});
+
+test("notify: los desenlaces sin corrida (sucio, HEADs ilegibles, árbol cambiado) también llevan `at`", async () => {
+  const sucio = avisos({ heads: async () => [{ repo: "api", sha: SHA_A, dirty: true }] });
+  await sucio.tick();
+  assert.equal(typeof sucio.estado()?.at, "number");
+  const ilegible = avisos({ heads: async () => null, logError: () => {} });
+  await ilegible.tick();
+  assert.equal(typeof ilegible.estado()?.at, "number");
+  let n = 0;
+  const cambiado = avisos({ heads: async () => (n++ === 0 ? limpio(SHA_A) : limpio(SHA_B)) });
+  await cambiado.tick();
+  assert.equal(cambiado.estado()?.reason, "el árbol cambió durante la corrida");
+  assert.equal(typeof cambiado.estado()?.at, "number");
+});
+
+test("notify: un gate normal viejo sin notify no se marca (sólo el de merge avisa)", async () => {
+  const escritos: VerifyState[] = [];
+  const d = deps({
+    cycle: "/c",
+    detect: () => "curl",
+    now: () => 10 ** 9,
+    readState: () => ({ attempts: 0, status: "passed", at: 1 }),
+    writeState: (_c, _k, s) => void escritos.push(s),
+  });
+  await tickOnce(d, new Map(), { max: 99, inFlight: new Map() });
+  assert.deepEqual(escritos, []);
 });

@@ -58,7 +58,8 @@ export function readFlowProgress(cycle: string): SessionFlow | null {
       status,
       ...(at !== null ? { at } : {}),
       ...(status === "failed" && verify ? { attempts: verify.attempts } : {}),
-      ...(estado?.notify === "failed" ? { attention: "gate-sin-entregar" as const } : {}),
+      // Sólo mientras el worker no haya pasado de esa etapa: un centinela posterior dice que siguió.
+      ...(estado?.notify === "failed" && cumplidas.indexOf(true, i + 1) === -1 ? { attention: "gate-sin-entregar" as const } : {}),
     };
   });
 

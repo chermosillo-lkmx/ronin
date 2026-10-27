@@ -169,15 +169,70 @@ test("maxConcurrent sale de gate.maxConcurrent de settings, leído en cada llama
   assert.equal(deps.maxConcurrent?.(), 4);
 });
 
+/** Una sesión de workflow: ventana 0 = el conductor (%3); la 1 la abrió para delegar y es la ACTIVA (%7). */
+const conVentanas = (panes: Array<{ id: string; windowIndex: number; role: string | null }>) => async () => ({
+  diagnostic: null,
+  sessions: [{ name: "cowork-x", kind: "managed" as const, attention: { level: "idle" }, panes }],
+});
+
 test("notify: true si la entrega llegó; false si deliverPrompt dice que no o lanza", async () => {
   const vistos: Array<[string, string]> = [];
-  const ok = createVerifyDriverDeps(sources({ deliverPrompt: async (s, t) => { vistos.push([s, t]); return true; } }));
+  const inventario = conVentanas([{ id: "%3", windowIndex: 0, role: "conductor" }]);
+  const ok = createVerifyDriverDeps(sources({ readTmuxInventory: inventario, deliverPrompt: async (s, t) => { vistos.push([s, t]); return true; } }));
   assert.equal(await ok.notify!("cowork-x", "UNIT-GATE: PASS"), true);
-  assert.deepEqual(vistos, [["cowork-x", "UNIT-GATE: PASS"]]);
+  assert.deepEqual(vistos, [["%3", "UNIT-GATE: PASS"]]);
 
-  const sinCli = createVerifyDriverDeps(sources({ deliverPrompt: async () => false }));
+  const sinCli = createVerifyDriverDeps(sources({ readTmuxInventory: inventario, deliverPrompt: async () => false }));
   assert.equal(await sinCli.notify!("cowork-x", "t"), false);
 
-  const lanza = createVerifyDriverDeps(sources({ deliverPrompt: async () => { throw new Error("tmux"); } }));
+  const lanza = createVerifyDriverDeps(sources({ readTmuxInventory: inventario, deliverPrompt: async () => { throw new Error("tmux"); } }));
   assert.equal(await lanza.notify!("cowork-x", "t"), false);
+});
+
+test("notify: entrega al pane conductor (%N de la ventana 0), nunca al pane activo de la sesión", async () => {
+  const vistos: string[] = [];
+  const deps = createVerifyDriverDeps(sources({
+    readTmuxInventory: conVentanas([
+      { id: "%3", windowIndex: 0, role: "conductor" },
+      { id: "%7", windowIndex: 1, role: "ejecutor" },
+    ]),
+    deliverPrompt: async (target) => { vistos.push(target); return true; },
+  }));
+  assert.equal(await deps.notify!("cowork-x", "UNIT-GATE: PASS"), true);
+  assert.deepEqual(vistos, ["%3"]);
+});
+
+test("notify: en el arreglo de 4 panes entrega al pane driver", async () => {
+  const vistos: string[] = [];
+  const deps = createVerifyDriverDeps(sources({
+    readTmuxInventory: conVentanas([
+      { id: "%1", windowIndex: 0, role: "driver" },
+      { id: "%2", windowIndex: 0, role: "worker" },
+      { id: "%4", windowIndex: 0, role: "review" },
+    ]),
+    deliverPrompt: async (target) => { vistos.push(target); return true; },
+  }));
+  assert.equal(await deps.notify!("cowork-x", "t"), true);
+  assert.deepEqual(vistos, ["%1"]);
+});
+
+test("notify: sin un conductor inequívoco devuelve false y no escribe en ningún pane", async () => {
+  let llamadas = 0;
+  const entregar = async () => { llamadas++; return true; };
+  const ambiguo = createVerifyDriverDeps(sources({
+    readTmuxInventory: conVentanas([
+      { id: "%1", windowIndex: 0, role: "conductor" },
+      { id: "%2", windowIndex: 0, role: "conductor" },
+    ]),
+    deliverPrompt: entregar,
+  }));
+  const ausente = createVerifyDriverDeps(sources({ readTmuxInventory: conVentanas([{ id: "%7", windowIndex: 1, role: "ejecutor" }]), deliverPrompt: entregar }));
+  const otra = createVerifyDriverDeps(sources({ readTmuxInventory: async () => ({ diagnostic: null, sessions: [] }), deliverPrompt: entregar }));
+  const diagnostico = createVerifyDriverDeps(sources({
+    readTmuxInventory: async () => ({ diagnostic: { kind: "x" }, sessions: [] }),
+    deliverPrompt: entregar,
+  }));
+  const lanza = createVerifyDriverDeps(sources({ readTmuxInventory: async () => { throw new Error("tmux"); }, deliverPrompt: entregar }));
+  for (const d of [ambiguo, ausente, otra, diagnostico, lanza]) assert.equal(await d.notify!("cowork-x", "t"), false);
+  assert.equal(llamadas, 0);
 });
