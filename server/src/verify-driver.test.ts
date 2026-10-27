@@ -349,38 +349,38 @@ test("selectGate: mergeGate failed se re-arma cuando cambia el SHA", () => {
 
 test("selectGate: mergeGate failed con el mismo SHA no vuelve a correr", () => {
   const failed = (): VerifyState => ({ attempts: 1, status: "failed", shas: { api: SHA_A } });
-  assert.equal(selectGate(MERGE, "pr", failed, () => limpio(SHA_A)), null);
+  assert.equal(selectGate(MERGE, "pre-merge", failed, () => limpio(SHA_A)), null);
 });
 
 test("selectGate: mergeGate failed sin headsFor conserva el comportamiento de antes (se salta)", () => {
   const failed = (): VerifyState => ({ attempts: 1, status: "failed", shas: { api: SHA_A } });
-  assert.equal(selectGate(MERGE, "pr", failed), null);
+  assert.equal(selectGate(MERGE, "pre-merge", failed), null);
 });
 
 test("selectGate: mergeGate failed por árbol sucio (sin shas) se re-arma en cuanto el árbol está limpio", () => {
   const sucio = (): VerifyState => ({ attempts: 0, status: "failed", reason: "hay cambios sin commitear" });
   assert.equal(selectGate(MERGE, "pre-merge", sucio, () => limpio(SHA_A))?.key, "pre-merge");
   // Con el árbol todavía sucio no se re-arma: no hay nada nuevo que probar.
-  assert.equal(selectGate(MERGE, "pr", sucio, () => [{ repo: "api", sha: SHA_A, dirty: true }]), null);
+  assert.equal(selectGate(MERGE, "pre-merge", sucio, () => [{ repo: "api", sha: SHA_A, dirty: true }]), null);
 });
 
 test("selectGate: mergeGate failed no se re-arma si los HEADs no se pueden leer", () => {
   const failed = (): VerifyState => ({ attempts: 1, status: "failed", shas: { api: SHA_A } });
-  assert.equal(selectGate(MERGE, "pr", failed, () => null), null);
-  assert.equal(selectGate(MERGE, "pr", failed, () => []), null);
+  assert.equal(selectGate(MERGE, "pre-merge", failed, () => null), null);
+  assert.equal(selectGate(MERGE, "pre-merge", failed, () => []), null);
 });
 
 test("selectGate: mergeGate con los reintentos agotados (commits distintos) queda failed aunque cambie el SHA", () => {
   const agotado = (): VerifyState => ({ attempts: 3, status: "failed", shas: { api: SHA_A } });
-  assert.equal(selectGate(MERGE, "pr", agotado, () => limpio(SHA_B)), null);
+  assert.equal(selectGate(MERGE, "pre-merge", agotado, () => limpio(SHA_B)), null);
 });
 
 test("selectGate: mergeGate passed se vuelve a considerar con un commit nuevo (la caché decide si corre)", () => {
   const passed = (): VerifyState => ({ attempts: 0, status: "passed", shas: { api: SHA_A } });
-  assert.equal(selectGate(MERGE, "pr", passed, () => limpio(SHA_A)), null);
+  assert.equal(selectGate(MERGE, "pre-merge", passed, () => limpio(SHA_A)), null);
   assert.equal(selectGate(MERGE, "pre-merge", passed, () => limpio(SHA_B))?.key, "pre-merge");
-  assert.equal(selectGate(MERGE, "pr", passed, () => [{ repo: "api", sha: SHA_B, dirty: true }]), null);
-  assert.equal(selectGate(MERGE, "pr", passed), null);
+  assert.equal(selectGate(MERGE, "pre-merge", passed, () => [{ repo: "api", sha: SHA_B, dirty: true }]), null);
+  assert.equal(selectGate(MERGE, "pre-merge", passed), null);
 });
 
 test("selectGate: un gate sin mergeGate failed no se re-arma aunque cambie el SHA", () => {
