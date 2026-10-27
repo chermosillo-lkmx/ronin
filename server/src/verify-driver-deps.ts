@@ -63,6 +63,7 @@ export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverD
     ...realGateDeps,
     // Se lee en cada llamada: un cambio en settings.json o repo-config.json aplica sin reiniciar.
     gateConfig: (repo) => gateConfigFrom(sources.gateSettings(), sources.repoGate(repo)),
+    maxConcurrent: () => sources.gateSettings().maxConcurrent,
     logError: (error) => console.error("[claude-cowork]", error),
   };
 }

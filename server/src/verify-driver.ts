@@ -1,5 +1,6 @@
 import { cacheHit, realGitPort, repoHeads, type RepoHead } from "./gate-cache.js";
 import { readProvisionState, type ProvisionState } from "./provision.js";
+import { DEFAULT_GATE_SETTINGS } from "./settings.js";
 import { readVerifyState, writeVerifyState, type VerifyState } from "./stages.js";
 import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "./verify.js";
 
@@ -26,6 +27,19 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  * - El re-arme lo da el cambio de SHA, no el armado en memoria por ocupado/ocioso: sobrevive a un
  *   reinicio de Ronin sin repetir corridas.
  * Timeout y entorno salen de `gateConfig(repo)` para todos los gates, con o sin la bandera.
+ *
+ * Concurrencia. Con 6-8 sesiones, correr las suites una tras otra dentro del tick hacía cola de
+ * horas. Ahora el tick DECIDE (HEADs, árbol sucio, caché, ritmo ocupado/ocioso) y LANZA: las
+ * corridas viven fuera del tick, con un cupo global (`maxConcurrent`, releído en cada tick) que
+ * comparten gates de merge y normales. Sólo una corrida real del comando ocupa cupo; una caché o
+ * un árbol sucio se resuelven al momento y nunca esperan detrás de una suite.
+ * - Sin cupo, el gate queda `queued: true` (una sola escritura, no una por tick). Si deja de tener
+ *   que correr — sesión desaparecida o ya no de workflow, worker ocupado, caché — se le quita.
+ * - Al lanzar se escribe `running: true, queued: false`; el desenlace reescribe el estado sin
+ *   `running` y llama a `onReport` una vez. El desenlace sale de la foto del lanzamiento (intentos,
+ *   HEADs previos del gate de merge), nunca de releer un estado más nuevo.
+ * - `running: true` en disco sin corrida en vuelo es una huérfana (Ronin se reinició a media
+ *   suite): se trata como lista para correr, sin esperar al armado y sin gastar intento.
  *
  * Lo que este driver NO hace, a propósito: no le escribe al worker. Ronin observa el flujo, no lo
  * ejecuta — quien toca los sentinelas y avanza es el propio worker dentro de tmux. El gate deja el
@@ -151,30 +165,78 @@ export interface DriverDeps {
   cacheHit(cached: VerifyState | null, heads: RepoHead[], worktree: string, e2eDirs: string[]): Promise<boolean>;
   /** Timeout y entorno del gate para un repo (override del repo o global), leídos en cada llamada. */
   gateConfig(repo: string): { timeoutMs: number; env: Record<string, string> };
+  /** Cupo global de corridas simultáneas (`gate.maxConcurrent` de settings), leído en cada tick. */
+  maxConcurrent?(): number;
   logError?(error: unknown): void;
 }
 
-/** Clave de armado en memoria: el estado persistido guarda intentos, no el rearme. */
+/** Clave de armado en memoria y de cupo: el estado persistido guarda intentos, no el rearme. */
 const armKey = (session: string, stageKey: string): string => `${session}:${stageKey}`;
+
+/**
+ * El cupo global de corridas. Uno solo para gates de merge y normales: lo que se reparte es CPU y
+ * memoria de la máquina, no turnos por tipo de gate.
+ */
+export interface GateSlots {
+  /** Corridas simultáneas permitidas; `startVerifyDriver` lo relee de settings en cada tick. */
+  max: number;
+  /** `sesión:etapa` → corrida en marcha. Se borra sola al terminar. */
+  inFlight: Map<string, Promise<void>>;
+  /**
+   * Interno del driver (se crea solo): `sesión:etapa` cuyo estado en disco lleva una marca
+   * (`queued`, o `running` huérfano) que quizá haya que limpiar. Así una sesión que desaparece
+   * del inventario no deja su marca para siempre.
+   */
+  marked?: Map<string, { cycle: string; stageKey: string }>;
+}
+
+/** Una corrida lista para lanzar: corre, escribe el desenlace y devuelve el informe. */
+type Corrida = () => Promise<GateReport>;
+
+/** El estado sin las marcas de cola: lo que queda cuando ya no está ni encolado ni corriendo. */
+function sinMarcas(state: VerifyState): VerifyState {
+  const { queued: _queued, running: _running, ...resto } = state;
+  return resto;
+}
 
 /**
  * Una pasada del driver. Nunca lanza: una sesión ilegible se salta y las demás siguen — el gate
  * es una comodidad, no puede tumbar el servidor.
+ *
+ * Decide en el tick y corre fuera de él: lee HEADs, árbol sucio, caché y HEADs ilegibles aquí
+ * mismo (eso no gasta cupo y nunca espera detrás de una suite), y sólo una corrida real del
+ * comando ocupa un lugar en `slots`. No espera a las corridas: las lanza hasta llenar
+ * `slots.max` y deja las demás con `queued: true`. Cada corrida terminada llama a `onReport`.
  */
-export async function tickOnce(deps: DriverDeps, armed: Map<string, boolean>): Promise<GateReport[]> {
-  const informes: GateReport[] = [];
+export async function tickOnce(
+  deps: DriverDeps,
+  armed: Map<string, boolean>,
+  slots: GateSlots,
+  onReport?: (r: GateReport) => void,
+): Promise<void> {
+  const marcados = (slots.marked ??= new Map());
+  const vigentes = new Set<string>(); // lanzadas o encoladas en este tick: su marca es actual
+  const informar = (informe: GateReport): void => {
+    try {
+      onReport?.(informe);
+    } catch (error) {
+      deps.logError?.(error);
+    }
+  };
+
   let sesiones: SessionSnapshot[];
   try {
     sesiones = await deps.listSessions();
   } catch (error) {
     deps.logError?.(error);
-    return informes;
+    return;
   }
 
   for (const sesion of sesiones) {
     try {
       const launch = deps.launchOf(sesion.name);
       if (!launch || launch.mode !== "workflow" || !launch.worktree) continue;
+      const worktree = launch.worktree;
 
       const stages = deps.flowFor(sesion.name, launch.repo);
       const cycle = deps.cycleFor(sesion.name);
@@ -191,7 +253,7 @@ export async function tickOnce(deps: DriverDeps, armed: Map<string, boolean>): P
       const primerMerge = stages.findIndex((s) => s.mergeGate === true && s.verifyCmd?.trim());
       const alcanzado = reached ? stages.findIndex((s) => s.key === reached) : -1;
       const leerHeads = primerMerge >= 0 && alcanzado >= primerMerge && !sesion.busy;
-      const heads = leerHeads ? await deps.heads(launch.worktree) : undefined;
+      const heads = leerHeads ? await deps.heads(worktree) : undefined;
       const gate = selectGate(
         stages,
         reached,
@@ -200,40 +262,103 @@ export async function tickOnce(deps: DriverDeps, armed: Map<string, boolean>): P
       );
       if (!gate) continue;
 
-      if (gate.mergeGate) {
-        const informe = await runMergeGate(deps, sesion, launch.repo, launch.worktree, cycle, gate, heads);
-        if (informe) informes.push(informe);
-        continue;
-      }
-
       const clave = armKey(sesion.name, gate.key);
-      const decision = verifyRunDecision(sesion.busy, gate.attempts, armed.get(clave) === true);
-      if (decision === "arm") {
-        armed.set(clave, true);
+      // Ya corre: ni se relanza ni se reescribe su estado.
+      if (slots.inFlight.has(clave)) continue;
+
+      const previo = deps.readState(cycle, gate.key);
+      // Huérfana: `running` en disco sin corrida en vuelo (Ronin se reinició a media suite). Esa
+      // corrida ya estaba autorizada, así que cuenta como armada y no gasta intento: el desenlace
+      // sale de los intentos guardados, que el lanzamiento no tocó.
+      const huerfana = previo?.running === true;
+      if (previo?.queued === true || huerfana) marcados.set(clave, { cycle, stageKey: gate.key });
+
+      const corrida = gate.mergeGate
+        ? await planMergeGate(deps, sesion, launch.repo, worktree, cycle, gate, heads, informar)
+        : planGate(deps, sesion, launch.repo, worktree, cycle, gate, armed.get(clave) === true || huerfana, () => armed.set(clave, true));
+      if (!corrida) continue;
+
+      vigentes.add(clave);
+      if (slots.inFlight.size >= slots.max) {
+        // Sin cupo: a la cola. Se escribe una sola vez, no en cada tick que siga esperando. Se
+        // conserva el estado previo (p.ej. un passed con sus SHAs): al salir de la cola sin correr,
+        // quitar la marca lo deja tal cual estaba.
+        marcados.set(clave, { cycle, stageKey: gate.key });
+        if (previo?.queued !== true || huerfana) {
+          const base: VerifyState = previo ? sinMarcas(previo) : { attempts: gate.attempts, status: "pending" };
+          deps.writeState(cycle, gate.key, { ...base, queued: true });
+        }
         continue;
       }
-      if (decision === "skip") continue;
 
-      armed.delete(clave);
-      const resultado = await deps.run(gate.cmd, launch.worktree, deps.gateConfig(launch.repo));
-      const desenlace = verifyOutcome(resultado.ok, gate.attempts, gate.maxRetries);
-      const state: VerifyState = { attempts: desenlace.attempts, status: desenlace.status };
-      deps.writeState(cycle, gate.key, state);
-      informes.push({ session: sesion.name, stageKey: gate.key, status: state.status, attempts: state.attempts, output: resultado.output });
+      if (!gate.mergeGate) armed.delete(clave);
+      marcados.delete(clave);
+      deps.writeState(cycle, gate.key, { attempts: gate.attempts, status: "pending", running: true, queued: false });
+      const enVuelo = corrida()
+        .then(informar, (error: unknown) => {
+          // La corrida misma reventó (no un rojo): sin veredicto, se quita `running` y el gate
+          // queda como estaba al lanzarse para que el siguiente tick lo reconsidere.
+          deps.logError?.(error);
+          try {
+            deps.writeState(cycle, gate.key, { attempts: gate.attempts, status: "pending" });
+          } catch (otro) {
+            deps.logError?.(otro);
+          }
+        })
+        .finally(() => slots.inFlight.delete(clave));
+      slots.inFlight.set(clave, enVuelo);
     } catch (error) {
       deps.logError?.(error);
     }
   }
-  return informes;
+
+  // Marcas que ya no corresponden: encolada que ya no tiene que correr (sesión desaparecida, que
+  // dejó de ser de workflow, worker ocupado, caché…) o `running` huérfano que no se relanzó.
+  for (const [clave, { cycle, stageKey }] of marcados) {
+    if (vigentes.has(clave)) continue;
+    marcados.delete(clave);
+    if (slots.inFlight.has(clave)) continue;
+    try {
+      const state = deps.readState(cycle, stageKey);
+      if (state && (state.queued !== undefined || state.running !== undefined)) deps.writeState(cycle, stageKey, sinMarcas(state));
+    } catch (error) {
+      deps.logError?.(error);
+    }
+  }
+}
+
+/** Un gate normal: el ritmo ocupado/ocioso decide; si toca correr, devuelve la corrida. */
+function planGate(
+  deps: DriverDeps,
+  sesion: SessionSnapshot,
+  repo: string,
+  worktree: string,
+  cycle: string,
+  gate: Gate,
+  armado: boolean,
+  armar: () => void,
+): Corrida | null {
+  const decision = verifyRunDecision(sesion.busy, gate.attempts, armado);
+  if (decision === "arm") armar();
+  if (decision !== "run") return null;
+  // El desenlace sale de `gate` (el estado al decidir), nunca de una relectura posterior.
+  return async () => {
+    const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
+    const desenlace = verifyOutcome(resultado.ok, gate.attempts, gate.maxRetries);
+    const state: VerifyState = { attempts: desenlace.attempts, status: desenlace.status };
+    deps.writeState(cycle, gate.key, state);
+    return { session: sesion.name, stageKey: gate.key, status: state.status, attempts: state.attempts, output: resultado.output };
+  };
 }
 
 /**
  * Un gate de merge, en orden: ocupado → nada; HEADs ilegibles/vacíos → failed con razón; árbol
- * sucio → failed sin correr; caché → passed sin correr; si no, corre y un PASS se re-valida.
- * El orden sucio→caché es deliberado: `cacheHit` ignora `dirty` y un árbol sucio con SHAs
- * cacheados no puede dar verde.
+ * sucio → failed sin correr; caché → passed sin correr; si no, devuelve la corrida, y un PASS se
+ * re-valida contra los HEADs de ANTES de correr. Todo lo que no es correr se resuelve aquí, en el
+ * tick, y se informa por `informar`. El orden sucio→caché es deliberado: `cacheHit` ignora `dirty`
+ * y un árbol sucio con SHAs cacheados no puede dar verde.
  */
-async function runMergeGate(
+async function planMergeGate(
   deps: DriverDeps,
   sesion: SessionSnapshot,
   repo: string,
@@ -241,7 +366,8 @@ async function runMergeGate(
   cycle: string,
   gate: Gate,
   heads: RepoHead[] | null | undefined,
-): Promise<GateReport | null> {
+  informar: (r: GateReport) => void,
+): Promise<Corrida | null> {
   if (sesion.busy) return null;
   const informe = (state: VerifyState, output: string): GateReport => {
     deps.writeState(cycle, gate.key, state);
@@ -255,32 +381,38 @@ async function runMergeGate(
     const previo = deps.readState(cycle, gate.key);
     if (previo?.status === "failed" && previo.reason === reason) return null; // ya avisado: sin ruido
     deps.logError?.(new Error(`gate ${gate.key} de ${sesion.name}: ${reason} (${worktree}); no se corre`));
-    return informe({ status: "failed", reason, attempts: gate.attempts }, reason);
+    informar(informe({ status: "failed", reason, attempts: gate.attempts }, reason));
+    return null;
   }
 
   if (heads.some((h) => h.dirty)) {
     // Sin `shas`: se re-arma en cuanto el árbol quede limpio. Sin gastar intento: no se probó nada.
-    return informe({ status: "failed", reason: DIRTY_REASON, attempts: gate.attempts }, DIRTY_REASON);
+    informar(informe({ status: "failed", reason: DIRTY_REASON, attempts: gate.attempts }, DIRTY_REASON));
+    return null;
   }
 
   const shas = shasOf(heads);
   if (await deps.cacheHit(deps.readState(cycle, gate.key), heads, worktree, MERGE_GATE_E2E_DIRS)) {
-    return informe({ attempts: gate.attempts, status: "passed", shas, durationMs: 0, at: Date.now(), reason: "caché" }, "caché");
+    informar(informe({ attempts: gate.attempts, status: "passed", shas, durationMs: 0, at: Date.now(), reason: "caché" }, "caché"));
+    return null;
   }
 
-  const inicio = Date.now();
-  const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
-  const fin = Date.now();
-  // Un PASS sólo vale si el árbol sigue igual que en la foto previa: un commit o una edición a
-  // media corrida pudo quedar fuera de lo probado. Sin `shas` → se re-arma en el siguiente tick limpio.
-  if (resultado.ok && !sameHeads(heads, await deps.heads(worktree))) {
-    return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts }, resultado.output);
-  }
-  // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
-  const state: VerifyState = resultado.ok
-    ? { attempts: gate.attempts, status: "passed", shas, durationMs: fin - inicio, at: fin }
-    : { attempts: gate.attempts + 1, status: "failed", shas, durationMs: fin - inicio, at: fin };
-  return informe(state, resultado.output);
+  // `heads` y `gate.attempts` son la foto del lanzamiento: el desenlace se calcula contra ellos.
+  return async () => {
+    const inicio = Date.now();
+    const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
+    const fin = Date.now();
+    // Un PASS sólo vale si el árbol sigue igual que en la foto previa: un commit o una edición a
+    // media corrida pudo quedar fuera de lo probado. Sin `shas` → se re-arma en el siguiente tick limpio.
+    if (resultado.ok && !sameHeads(heads, await deps.heads(worktree))) {
+      return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts }, resultado.output);
+    }
+    // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
+    const state: VerifyState = resultado.ok
+      ? { attempts: gate.attempts, status: "passed", shas, durationMs: fin - inicio, at: fin }
+      : { attempts: gate.attempts + 1, status: "failed", shas, durationMs: fin - inicio, at: fin };
+    return informe(state, resultado.output);
+  };
 }
 
 export interface DriverHandle {
@@ -288,16 +420,24 @@ export interface DriverHandle {
 }
 
 /**
- * Arranca el bucle. Un solo tick en vuelo a la vez: una suite tarda minutos y solaparlos
- * quemaría los reintentos contra la misma corrida.
+ * Arranca el bucle. Un solo tick a la vez (`corriendo`): dos ticks solapados decidirían dos veces
+ * sobre la misma sesión. Las corridas viven fuera del tick, en `slots`, y el cupo se relee de
+ * `maxConcurrent` en cada tick: un cambio en settings.json aplica sin reiniciar. `stop()` sólo
+ * detiene el bucle; las corridas en vuelo terminan solas.
  */
 export function startVerifyDriver(deps: DriverDeps, intervalMs = 20_000): DriverHandle {
   const armed = new Map<string, boolean>();
+  const slots: GateSlots = { max: DEFAULT_GATE_SETTINGS.maxConcurrent, inFlight: new Map() };
   let corriendo = false;
   const timer = setInterval(() => {
     if (corriendo) return;
     corriendo = true;
-    void tickOnce(deps, armed)
+    try {
+      slots.max = deps.maxConcurrent?.() ?? DEFAULT_GATE_SETTINGS.maxConcurrent;
+    } catch (error) {
+      deps.logError?.(error);
+    }
+    void tickOnce(deps, armed, slots)
       .catch((error) => deps.logError?.(error))
       .finally(() => { corriendo = false; });
   }, intervalMs);

@@ -159,3 +159,11 @@ test("gateConfig toma el timeout del repo o, si falta, el global (en ms), leído
   global = 30;
   assert.equal(deps.gateConfig("api").timeoutMs, 30 * 60_000);
 });
+
+test("maxConcurrent sale de gate.maxConcurrent de settings, leído en cada llamada", () => {
+  let max = 2;
+  const deps = createVerifyDriverDeps(sources({ gateSettings: () => ({ timeoutMin: 45, maxConcurrent: max }) }));
+  assert.equal(deps.maxConcurrent?.(), 2);
+  max = 4;
+  assert.equal(deps.maxConcurrent?.(), 4);
+});
