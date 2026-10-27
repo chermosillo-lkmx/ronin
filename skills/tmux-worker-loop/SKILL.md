@@ -374,6 +374,7 @@ without losing a single check:
    env="$D/harness.$slot.env"
    base=$(awk -F= '$1 == "BASELINE_REF" {print $2}' "$env")
    set -f; specs=(); for g in $(awk -F= '$1 == "TEST_GLOBS" {sub(/^[^=]*=/, ""); print}' "$env"); do specs+=(":(glob)**/$g"); done; set +f
+   [ "${#specs[@]}" -gt 0 ] || { echo "TEST_GLOBS vacío"; exit 1; }   # no pathspec would list every file
    touched=$( { git -C "$worktree" diff --name-only --diff-filter=d "$base" -- "${specs[@]}"
                 git -C "$worktree" ls-files --others --exclude-standard -- "${specs[@]}"; } \
               | sort -u | while IFS= read -r f; do printf '%q ' "$f"; done )

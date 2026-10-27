@@ -396,11 +396,15 @@ function anchoredDynamicAllowOutside(cycleDir, path, slot, interval, reason) {
 // feature.mjs after BASELINE_REF, so it claimed a clean cycle with unjustified
 // production already present. Commit the failing production state first; the
 // only BASELINE→RED change is then the test that demonstrates the behavior.
-async function createClosedRgrFixture(testName = "verified cycle", { captureCatches = true, baselineFiles = {} } = {}) {
+async function createClosedRgrFixture(
+  testName = "verified cycle",
+  { captureCatches = true, baselineFiles = {}, rgrEnvironment } = {},
+) {
   const fixture = await createRgrFixture(
     `import assert from "node:assert/strict";\nimport test from "node:test";\nimport { value } from "./feature.mjs";\ntest(${JSON.stringify(testName)}, () => assert.equal(value, 1));\n`,
     { captureBaseline: false },
   );
+  if (rgrEnvironment) fixture.rgrEnvironment = rgrEnvironment;
   await writeFile(`${fixture.worktree}/feature.mjs`, "export const value = 0;\n");
   for (const [path, content] of Object.entries(baselineFiles)) {
     await writeFile(`${fixture.worktree}/${path}`, content);
@@ -1612,12 +1616,18 @@ test("plan case 68: numbered baseline refs cannot be overwritten", async () => {
 });
 
 test("plan case 57: baseline recapture reports its diff without rewriting a closed cycle", async () => {
+  // Both ambient tests exist at BASELINE_REF, so both count as pre-existing.
+  // The cycle runs with RGR_AMBIENT_FAIL set ("first environment" fails); the
+  // recapture runs without it, so that failure is removed and the other added.
   const fixture = await createClosedRgrFixture("baseline recapture cycle", {
     baselineFiles: {
-      "ambient.test.mjs": 'import assert from "node:assert/strict";\nimport test from "node:test";\ntest("recaptured environment", () => assert.equal(process.env.RGR_AMBIENT_FAIL, undefined));\n',
+      "ambient.test.mjs": 'import assert from "node:assert/strict";\nimport test from "node:test";\n'
+        + 'test("first environment", () => assert.equal(process.env.RGR_AMBIENT_FAIL, undefined));\n'
+        + 'test("recaptured environment", () => assert.equal(process.env.RGR_AMBIENT_FAIL, "1"));\n',
     },
+    rgrEnvironment: { RGR_AMBIENT_FAIL: "1" },
   });
-  fixture.rgrEnvironment = { RGR_AMBIENT_FAIL: "1" };
+  fixture.rgrEnvironment = {};
   assert.equal(runRgr(fixture, "baseline").status, 0);
 
   const result = runVerify(fixture.cycleDir);
@@ -1626,9 +1636,9 @@ test("plan case 57: baseline recapture reports its diff without rewriting a clos
 
   assert.equal(result.status, 0, report);
   assert.equal(rgrRecords(log, "BASELINE").length, 2);
-  assert.match(report, /warning baseline-recaptured from=001 to=002 added=1 removed=0/);
+  assert.match(report, /warning baseline-recaptured from=001 to=002 added=1 removed=1/);
   assert.match(report, /baseline-added seq=002 value="ambient\.test\.mjs::recaptured environment"/);
-  assert.doesNotMatch(report, /baseline-removed seq=002/);
+  assert.match(report, /baseline-removed seq=002 value="ambient\.test\.mjs::first environment"/);
 });
 
 test("plan case 70: a closed cycle remains bound to its immutable baseline after recapture", async () => {
@@ -3918,6 +3928,7 @@ test("SKILL define y protege los tests tocados del Main", async () => {
 
   assert.ok(skill.includes("touched=$("));
   assert.ok(skill.includes('[ -n "$touched" ] || { echo "no hay tests tocados"; exit 1; }'));
+  assert.ok(skill.includes('[ "${#specs[@]}" -gt 0 ] || { echo "TEST_GLOBS vacío"; exit 1; }'));
   assert.ok(skill.includes(":(glob)**/"));
   assert.ok(!worker.includes("Run unit + integration tests. Print exact pytest summary lines."));
   assert.ok(worker.includes("pre-merge"));
