@@ -86,3 +86,11 @@ test("runVerify: timeout kills the whole process GROUP — a backgrounded grandc
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("runVerify: un timeout con salida larga conserva la marca [timeout] al final y lo dice en timedOut", async () => {
+  const r = await runVerify("yes ruido | head -c 20000; sleep 5", process.cwd(), 400);
+  assert.equal(r.ok, false);
+  assert.equal(r.timedOut, true);
+  assert.match(r.output, /\[timeout\]$/);
+  assert.ok(r.output.length < 8200);
+});

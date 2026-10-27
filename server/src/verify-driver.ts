@@ -1,7 +1,7 @@
 import { cacheHit, realGitPort, repoHeads, type RepoHead } from "./gate-cache.js";
 import { readProvisionState, type ProvisionState } from "./provision.js";
 import { DEFAULT_GATE_SETTINGS } from "./settings.js";
-import { readVerifyState, writeVerifyState, type VerifyState } from "./stages.js";
+import { readVerifyState, writeVerifyLog, writeVerifyState, type VerifyState } from "./stages.js";
 import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "./verify.js";
 
 /**
@@ -65,6 +65,21 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  *   `NOTIFY_STALE_MS` desde su `at`, y si no se está entregando en este proceso, se marca `failed`
  *   sin reenviar: el worker quizá ya lo recibió y un duplicado lo confundiría; el operador lo ve.
  * Los gates normales no avisan: siguen dejando su veredicto sólo por escrito.
+ *
+ * Revisión final (reglas que cierran huecos del gate de merge):
+ * - Re-arme acotado: un gate de merge resuelto sólo se re-considera mientras la etapa más lejana
+ *   alcanzada es la del propio gate. Tocado el sentinela de la siguiente (pr/merge, curl…), el worker
+ *   ya siguió: actualizar desde main tras el merge no vuelve a correr la suite ni manda otro aviso.
+ *   Un gate de merge SIN resolver sí se sigue debiendo aunque el worker se haya adelantado.
+ * - SIN-GATE: una etapa `pre-merge` sin `verifyCmd` (catálogo empaquetado, migraciones sin gate)
+ *   dejaba al worker esperando un veredicto que nunca llegaría. Al alcanzarla, ocioso, se le avisa
+ *   una vez `UNIT-GATE: SIN-GATE` y se anota `status: "sin-gate"` — nunca `passed`.
+ * - Intentos agotados: el FAIL que gasta el último intento no manda "vuelve a tocar el sentinela"
+ *   (el gate ya no se re-arma) sino que pide intervención humana; flow-progress lo marca `gate-agotado`.
+ * - La salida de cada corrida queda en `<cycle>/verify-<etapa>.log` (`writeLog`) y un timeout se
+ *   guarda con `reason: "timeout"` (sí gasta intento).
+ * - Entorno que no se pudo preparar con el worker ya en el gate de merge: `failed` con su razón, sin
+ *   gastar intento y avisado una vez, en vez de un silencio que lo deja esperando.
  */
 
 export const DEFAULT_GATE_RETRIES = 2;
@@ -74,6 +89,10 @@ export const DIRTY_REASON = "hay cambios sin commitear";
 export const UNREADABLE_HEADS_REASON = "no se pudieron leer los HEADs del worktree";
 export const NO_REPOS_REASON = "no encontré repos con tests en el worktree";
 export const CHANGED_REASON = "el árbol cambió durante la corrida";
+export const TIMEOUT_REASON = "timeout";
+export const PROVISION_FAILED_REASON = "el entorno del worktree no se pudo preparar";
+/** La etapa del gate de unitarias previo al merge; sin `verifyCmd` se avisa SIN-GATE. */
+export const PRE_MERGE_KEY = "pre-merge";
 /**
  * Plazo tras el cual un desenlace del gate de merge sin `notify` se da por entrega perdida. Una
  * entrega espera a la TUI hasta 30 s (TUI_READY_ATTEMPTS × TUI_READY_INTERVAL_MS en engine.ts),
@@ -128,7 +147,8 @@ function mergeGateRearms(state: VerifyState, heads: RepoHead[] | null, maxRetrie
  * tocar el siguiente sentinela sin esperar a nadie, pero la deuda sigue siendo suya.
  *
  * `headsFor`: HEADs actuales del worktree. Con ellos, un gate de merge resuelto se re-arma si
- * hubo commit nuevo (ver `mergeGateRearms`); sin ellos, resuelto es resuelto, como siempre.
+ * hubo commit nuevo (ver `mergeGateRearms`) y el worker sigue en esa etapa (es la más lejana
+ * alcanzada); sin ellos, o con el worker ya más adelante, resuelto es resuelto.
  */
 export function selectGate(
   stages: GateStage[],
@@ -147,7 +167,8 @@ export function selectGate(
     const maxRetries = stage.maxRetries ?? DEFAULT_GATE_RETRIES;
     const mergeGate = stage.mergeGate === true;
     if (state?.status === "passed" || state?.status === "failed") {
-      if (!mergeGate || !headsFor || !mergeGateRearms(state, headsFor(), maxRetries)) continue;
+      // Sólo mientras el worker sigue EN el gate: pasada la etapa siguiente, resuelto es resuelto.
+      if (!mergeGate || !headsFor || stage.key !== reached || !mergeGateRearms(state, headsFor(), maxRetries)) continue;
     }
     return { key: stage.key, cmd, maxRetries, attempts: state?.attempts ?? 0, mergeGate };
   }
@@ -186,6 +207,8 @@ export interface DriverDeps {
   readState(cycle: string, stageKey: string): VerifyState | null;
   writeState(cycle: string, stageKey: string, state: VerifyState): void;
   run(cmd: string, cwd: string, opts: { timeoutMs: number; env: Record<string, string> }): Promise<VerifyResult>;
+  /** Guarda la salida de la corrida en `<cycle>/verify-<etapa>.log` (se sobrescribe). Best-effort. */
+  writeLog?(cycle: string, stageKey: string, output: string): void;
   /** HEAD y suciedad de cada sub-repo del worktree; null si git no se pudo leer. */
   heads(worktree: string): Promise<RepoHead[] | null>;
   /** `cacheHit` de gate-cache con el git real ya inyectado. */
@@ -209,14 +232,22 @@ export interface DriverDeps {
  * `next`: la etapa que sigue al gate en el flujo (null si es la última). `worktree`: dónde están
  * los sub-repos; el log de cada uno vive en `<sub-repo>/reports/ronin-gate/`.
  */
-export function verdictMessage(stageKey: string, state: VerifyState, cycle: string, next: string | null, worktree?: string): string {
+export function verdictMessage(stageKey: string, state: VerifyState, cycle: string, next: string | null, worktree?: string, maxRetries?: number): string {
+  const siguiente = next ?? "la siguiente etapa";
+  if (state.status === "sin-gate") return `UNIT-GATE: SIN-GATE — este flujo no tiene gate de unitarias configurado; continúa con ${siguiente}`;
+  const log = `${cycle}/verify-${stageKey}.log`;
+  const json = `${cycle}/verify-${stageKey}.json`;
+  if (state.status === "failed" && maxRetries !== undefined && state.attempts >= maxRetries) {
+    // El gate ya no se re-arma: pedirle que vuelva a tocar el sentinela lo dejaría esperando.
+    return `UNIT-GATE: FAIL — intentos agotados (${state.attempts}/${maxRetries}); pide intervención humana — salida en ${log}, veredicto en ${json}`;
+  }
   if (state.status === "passed") {
     const sha = Object.values(state.shas ?? {})[0]?.slice(0, 7);
     const cuanto = state.reason === "caché" ? "caché" : `${Math.max(1, Math.round((state.durationMs ?? 0) / 60_000))} min`;
-    return `UNIT-GATE: PASS (${sha ? `${sha}, ` : ""}${cuanto}) — continúa con ${next ?? "la siguiente etapa"}`;
+    return `UNIT-GATE: PASS (${sha ? `${sha}, ` : ""}${cuanto}) — continúa con ${siguiente}`;
   }
   const razon = state.reason ? ` — ${state.reason}` : "";
-  return `UNIT-GATE: FAIL${razon} — lee ${cycle}/verify-${stageKey}.json y unit-gate.log en ${worktree ?? "el worktree"}/<sub-repo>/reports/ronin-gate/; arregla con tests dirigidos, commitea y vuelve a tocar el sentinela`;
+  return `UNIT-GATE: FAIL${razon} — lee ${log} (salida del gate), ${json} y unit-gate.log en ${worktree ?? "el worktree"}/<sub-repo>/reports/ronin-gate/; arregla con tests dirigidos, commitea y vuelve a tocar el sentinela`;
 }
 
 /** JSON con las claves ordenadas: releer de disco (`parseVerifyState`) cambia el orden. */
@@ -266,6 +297,28 @@ function sinMarcas(state: VerifyState): VerifyState {
   return resto;
 }
 
+/** Etapas cuyo desenlace se le avisa al worker: el gate de merge y la `pre-merge` sin gate (SIN-GATE). */
+function avisaAlWorker(stage: GateStage): boolean {
+  const cmd = stage.verifyCmd?.trim();
+  return (stage.mergeGate === true && !!cmd) || (stage.key === PRE_MERGE_KEY && !cmd);
+}
+
+/** ¿La corrida se cortó por timeout? `runVerify` lo dice en `timedOut` y con `[timeout]` al final. */
+const porTimeout = (r: VerifyResult): boolean => r.timedOut === true || /\[timeout\]\s*$/.test(r.output);
+
+/** La salida de una corrida a `<cycle>/verify-<etapa>.log`. Nunca lanza: el log no decide nada. */
+function guardarLog(deps: DriverDeps, cycle: string, stageKey: string, output: string): void {
+  try {
+    deps.writeLog?.(cycle, stageKey, output);
+  } catch (error) {
+    try {
+      deps.logError?.(error);
+    } catch {
+      /* el propio log falló */
+    }
+  }
+}
+
 /**
  * Una pasada del driver. Nunca lanza: una sesión ilegible se salta y las demás siguen — el gate
  * es una comodidad, no puede tumbar el servidor.
@@ -306,14 +359,14 @@ export async function tickOnce(
    * entrega que falla o revienta queda `notify: "failed"`. Sólo marca el estado si sigue siendo
    * el desenlace avisado — una entrega lenta no puede sellar uno más nuevo.
    */
-  const avisar = (session: string, cycle: string, stageKey: string, state: VerifyState, next: string | null, worktree: string): void => {
+  const avisar = (session: string, cycle: string, stageKey: string, state: VerifyState, next: string | null, worktree: string, maxRetries?: number): void => {
     if (!deps.notify) return;
     const llave = `${cycle}:${stageKey}`;
     avisando.set(llave, (avisando.get(llave) ?? 0) + 1);
     const entrega = (async () => {
       let ok = false;
       try {
-        ok = (await deps.notify!(session, verdictMessage(stageKey, state, cycle, next, worktree))) === true;
+        ok = (await deps.notify!(session, verdictMessage(stageKey, state, cycle, next, worktree, maxRetries))) === true;
       } catch (error) {
         registrar(error);
       }
@@ -362,9 +415,9 @@ export async function tickOnce(
       // entregando aquí. Se marca `failed` (la UI lo muestra) y no se reenvía.
       if (deps.notify) {
         for (const stage of stages) {
-          if (stage.mergeGate !== true || !stage.verifyCmd?.trim() || avisando.has(`${cycle}:${stage.key}`)) continue;
+          if (!avisaAlWorker(stage) || avisando.has(`${cycle}:${stage.key}`)) continue;
           const state = deps.readState(cycle, stage.key);
-          if (!state || (state.status !== "passed" && state.status !== "failed") || state.notify !== undefined) continue;
+          if (!state || state.status === "pending" || state.notify !== undefined) continue;
           if (state.at === undefined || ahora() - state.at < NOTIFY_STALE_MS) continue;
           deps.writeState(cycle, stage.key, { ...state, notify: "failed" });
         }
@@ -373,15 +426,47 @@ export async function tickOnce(
       // Sin entorno no hay nada que probar. `running`: la instalación sigue en marcha. `failed`:
       // el entorno no se pudo armar — se salta SIN tocar el estado del gate, porque un venv que
       // no existe no es un veredicto sobre el código y un rojo aquí sería una señal falsa.
+      const reached = deps.detect(cycle, stages.map((s) => s.key));
+      const alcanzado = reached ? stages.findIndex((s) => s.key === reached) : -1;
+      const siguienteDe = (key: string): string | null => stages[stages.findIndex((s) => s.key === key) + 1]?.key ?? null;
+
+      // SIN-GATE: `pre-merge` sin gate configurado. El worker está ahí esperando un veredicto que
+      // nunca llegará: se le dice una vez que siga. El marcador `sin-gate` no es un verde.
+      const preMerge = stages.find((s) => s.key === PRE_MERGE_KEY);
+      if (deps.notify && preMerge && !preMerge.verifyCmd?.trim() && reached === PRE_MERGE_KEY && !sesion.busy && !deps.readState(cycle, PRE_MERGE_KEY)) {
+        const marcador: VerifyState = { attempts: 0, status: "sin-gate", at: ahora() };
+        deps.writeState(cycle, PRE_MERGE_KEY, marcador);
+        avisar(sesion.name, cycle, PRE_MERGE_KEY, marcador, siguienteDe(PRE_MERGE_KEY), worktree);
+      }
+
+      // Sin entorno no hay nada que probar. `running`: la instalación sigue en marcha. `failed`:
+      // el entorno no se pudo armar — un gate normal se salta SIN tocar su estado (un venv que no
+      // existe no es un veredicto sobre el código). Pero un gate de merge sin resolver con el worker
+      // ya en él lo dejaría esperando para siempre: queda `failed` con la razón, sin gastar intento
+      // ni guardar `shas` (se re-arma solo con el entorno listo) y se avisa una vez.
       const provision = deps.provisionOf(cycle);
+      if (provision?.status === "failed" && !sesion.busy) {
+        stages.forEach((stage, i) => {
+          if (stage.mergeGate !== true || !stage.verifyCmd?.trim() || i > alcanzado) return;
+          const previo = deps.readState(cycle, stage.key);
+          if (previo && previo.status !== "pending") return; // resuelto o ya avisado
+          deps.logError?.(new Error(`gate ${stage.key} de ${sesion.name}: ${PROVISION_FAILED_REASON}; no se corre`));
+          const state: VerifyState = { status: "failed", reason: PROVISION_FAILED_REASON, attempts: previo?.attempts ?? 0, at: ahora() };
+          deps.writeState(cycle, stage.key, state);
+          avisar(sesion.name, cycle, stage.key, state, siguienteDe(stage.key), worktree, stage.maxRetries ?? DEFAULT_GATE_RETRIES);
+        });
+      }
       if (provision?.status === "running" || provision?.status === "failed") continue;
       // HEADs leídos UNA vez y ANTES de cualquier corrida: son los que se guardan con el veredicto.
-      // Sólo si el worker está ocioso (ocupado no corre nada) y ya alcanzó el primer gate de merge
-      // del flujo: antes de eso no hay nada que re-armar y git sería trabajo tirado.
-      const reached = deps.detect(cycle, stages.map((s) => s.key));
-      const primerMerge = stages.findIndex((s) => s.mergeGate === true && s.verifyCmd?.trim());
-      const alcanzado = reached ? stages.findIndex((s) => s.key === reached) : -1;
-      const leerHeads = primerMerge >= 0 && alcanzado >= primerMerge && !sesion.busy;
+      // Sólo si el worker está ocioso (ocupado no corre nada) y algún gate de merge ya alcanzado
+      // puede correr: sin resolver, o resuelto pero con el worker todavía en él (re-arme). Antes del
+      // gate, o con el worker ya más allá de un gate resuelto, git sería trabajo tirado.
+      const leerHeads = !sesion.busy && stages.some((s, i) => {
+        if (s.mergeGate !== true || !s.verifyCmd?.trim() || i > alcanzado) return false;
+        if (i === alcanzado) return true;
+        const st = deps.readState(cycle, s.key)?.status;
+        return st !== "passed" && st !== "failed";
+      });
       const heads = leerHeads ? await deps.heads(worktree) : undefined;
       const gate = selectGate(
         stages,
@@ -405,8 +490,8 @@ export async function tickOnce(
       const encolado = previo?.queued === true;
       if (encolado || huerfana) marcados.set(clave, { cycle, stageKey: gate.key });
 
-      const next = stages[stages.findIndex((s) => s.key === gate.key) + 1]?.key ?? null;
-      const avisarDesenlace = (state: VerifyState) => avisar(sesion.name, cycle, gate.key, state, next, worktree);
+      const next = siguienteDe(gate.key);
+      const avisarDesenlace = (state: VerifyState) => avisar(sesion.name, cycle, gate.key, state, next, worktree, gate.maxRetries);
       const corrida = gate.mergeGate
         ? await planMergeGate(deps, sesion, launch.repo, worktree, cycle, gate, heads, informar, avisarDesenlace)
         : planGate(deps, sesion, launch.repo, worktree, cycle, gate, armed.get(clave) === true || huerfana || encolado, () => armed.set(clave, true));
@@ -479,6 +564,7 @@ function planGate(
   // El desenlace sale de `gate` (el estado al decidir), nunca de una relectura posterior.
   return async () => {
     const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
+    guardarLog(deps, cycle, gate.key, resultado.output);
     const desenlace = verifyOutcome(resultado.ok, gate.attempts, gate.maxRetries);
     const state: VerifyState = { attempts: desenlace.attempts, status: desenlace.status };
     deps.writeState(cycle, gate.key, state);
@@ -540,6 +626,7 @@ async function planMergeGate(
     const inicio = Date.now();
     const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
     const fin = Date.now();
+    guardarLog(deps, cycle, gate.key, resultado.output);
     // Un PASS sólo vale si el árbol sigue igual que en la foto previa: un commit o una edición a
     // media corrida pudo quedar fuera de lo probado. Sin `shas` → se re-arma en el siguiente tick limpio.
     if (resultado.ok && !sameHeads(heads, await deps.heads(worktree))) {
@@ -548,7 +635,7 @@ async function planMergeGate(
     // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
     const state: VerifyState = resultado.ok
       ? { attempts: gate.attempts, status: "passed", shas, durationMs: fin - inicio, at: fin }
-      : { attempts: gate.attempts + 1, status: "failed", shas, durationMs: fin - inicio, at: fin };
+      : { attempts: gate.attempts + 1, status: "failed", shas, durationMs: fin - inicio, at: fin, ...(porTimeout(resultado) ? { reason: TIMEOUT_REASON } : {}) };
     return informe(state, resultado.output);
   };
 }
@@ -589,6 +676,7 @@ export const realGateDeps = {
   readState: readVerifyState,
   writeState: writeVerifyState,
   run: (cmd: string, cwd: string, opts: { timeoutMs: number; env: Record<string, string> }) => runVerify(cmd, cwd, opts.timeoutMs, opts.env),
+  writeLog: writeVerifyLog,
   heads: (worktree: string) => repoHeads(worktree, realGitPort),
   cacheHit: (cached: VerifyState | null, heads: RepoHead[], worktree: string, e2eDirs: string[]) =>
     cacheHit(cached, heads, realGitPort, worktree, e2eDirs),

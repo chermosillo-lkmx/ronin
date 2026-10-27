@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -26,6 +26,7 @@ import {
   writeModelsInfo,
   writeDriverInfo,
   writeVerifyState,
+  writeVerifyLog,
 } from "./stages.js";
 
 function freshCycle(): string {
@@ -340,6 +341,30 @@ test("readVerifyState: shas con valor no hex (HEAD) se descartan enteras", () =>
       JSON.stringify({ attempts: 1, status: "passed", shas: { api: "a".repeat(40), web: "HEAD" } }),
     );
     assert.deepEqual(readVerifyState(cycle, "unit"), { attempts: 1, status: "passed" });
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("writeVerifyLog: deja la salida del gate en <cycle>/verify-<etapa>.log y la sobrescribe en cada corrida", () => {
+  const cycle = freshCycle();
+  try {
+    ensureCycleDir(cycle);
+    writeVerifyLog(cycle, "pre-merge", "primera");
+    writeVerifyLog(cycle, "pre-merge", "segunda");
+    assert.equal(readFileSync(join(cycle, "verify-pre-merge.log"), "utf8"), "segunda");
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("verify state: el marcador sin-gate sobrevive a releer y nunca cuenta como passed", () => {
+  const cycle = freshCycle();
+  try {
+    ensureCycleDir(cycle);
+    writeVerifyState(cycle, "pre-merge", { attempts: 0, status: "sin-gate", at: 1 });
+    assert.equal(readVerifyState(cycle, "pre-merge")?.status, "sin-gate");
+    assert.equal(verifyPassed(cycle, "pre-merge"), false);
   } finally {
     rmSync(cycle, { recursive: true, force: true });
   }

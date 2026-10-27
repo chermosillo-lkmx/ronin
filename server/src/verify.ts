@@ -10,6 +10,8 @@ export interface VerifyResult {
   ok: boolean;
   code: number | null;
   output: string;
+  /** Se cortó por timeout; `output` termina además en `[timeout]` (fuera del recorte). */
+  timedOut?: boolean;
 }
 
 /**
@@ -49,7 +51,8 @@ export function runVerify(cmd: string, cwd: string, timeoutMs = 120000, env: Rec
     const finish = (r: VerifyResult) => {
       if (done) return;
       done = true;
-      resolve({ ...r, output: truncateOutput(r.output) });
+      // La marca de timeout va DESPUÉS del recorte: con salida larga, recortar primero la borraba.
+      resolve({ ...r, output: truncateOutput(r.output) + (r.timedOut ? "\n[timeout]" : "") });
     };
 
     let child;
@@ -66,7 +69,7 @@ export function runVerify(cmd: string, cwd: string, timeoutMs = 120000, env: Rec
       } catch {
         /* already gone */
       }
-      finish({ ok: false, code: null, output: out + "\n[timeout]" });
+      finish({ ok: false, code: null, output: out, timedOut: true });
     }, timeoutMs);
 
     // Cap accumulation (not just the final truncate) so a chatty command before a 120s timeout

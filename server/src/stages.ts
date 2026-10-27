@@ -244,7 +244,11 @@ export function lastSentinelAt(cycle: string, order: string[]): number | null {
 // ---- P2: per-stage verifyCmd gate state (persisted in the cycle dir → survives restart, so a
 // restart can't reset the retry counter and loop the command forever). ----
 
-export type VerifyStatus = "pending" | "passed" | "failed";
+/**
+ * `sin-gate`: la etapa `pre-merge` de un flujo sin gate de unitarias configurado. Sólo marca que a
+ * Ronin ya le avisó al worker que siga (`UNIT-GATE: SIN-GATE`); NO es un verde y nada lo cuenta así.
+ */
+export type VerifyStatus = "pending" | "passed" | "failed" | "sin-gate";
 export interface VerifyState {
   attempts: number;
   status: VerifyStatus;
@@ -295,6 +299,18 @@ export function readVerifyState(cycle: string, stageKey: string): VerifyState | 
 export function writeVerifyState(cycle: string, stageKey: string, state: VerifyState): void {
   try {
     writeFileSync(join(cycle, verifyFile(stageKey)), JSON.stringify(state));
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Salida (ya recortada por `runVerify`) de la última corrida del gate, en `<cycle>/verify-<etapa>.log`.
+ * Se sobrescribe en cada desenlace: es lo que el worker lee para saber por qué falló. Best-effort.
+ */
+export function writeVerifyLog(cycle: string, stageKey: string, output: string): void {
+  try {
+    writeFileSync(join(cycle, `verify-${stageKey}.log`), output);
   } catch {
     /* best-effort */
   }
