@@ -1,3 +1,4 @@
+import { cacheHit, realGitPort, repoHeads, type RepoHead } from "./gate-cache.js";
 import { readProvisionState, type ProvisionState } from "./provision.js";
 import { readVerifyState, writeVerifyState, type VerifyState } from "./stages.js";
 import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "./verify.js";
@@ -9,20 +10,36 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  * llegó el worker, busca la etapa con `verifyCmd` que aún se debe y la ejecuta cuando el worker
  * está ocioso.
  *
+ * Gate de merge (`mergeGate`, el de unitarias previo al merge). Su riesgo es el VERDE FALSO: un
+ * PASS para código que no se probó. Por eso, a diferencia de un gate normal:
+ * - Lee los HEADs de cada sub-repo ANTES de correr y guarda ésos: si el worker commitea durante la
+ *   corrida, el PASS no cubre el commit nuevo. HEADs ilegibles o vacíos → no corre ni gasta intento.
+ * - Árbol sucio → `failed` sin correr, sin gastar intento y sin `shas` (se mira ANTES que la caché:
+ *   `cacheHit` no ve la suciedad).
+ * - Un PASS guardado que cubre los HEADs actuales (mismos SHAs o commits sólo-e2e) se reusa sin correr.
+ * - Un FAIL queda `failed` con sus SHAs: el mismo commit no se reintenta. Se re-arma cuando el árbol
+ *   está limpio en SHAs distintos, así que `maxRetries` cuenta commits, no corridas. Un `passed`
+ *   también se re-considera con un commit nuevo; ahí la caché decide si hace falta correr.
+ * - El re-arme lo da el cambio de SHA, no el armado en memoria por ocupado/ocioso: sobrevive a un
+ *   reinicio de Ronin sin repetir corridas.
+ * Timeout y entorno salen de `gateConfig(repo)` para todos los gates, con o sin la bandera.
+ *
  * Lo que este driver NO hace, a propósito: no le escribe al worker. Ronin observa el flujo, no lo
  * ejecuta — quien toca los sentinelas y avanza es el propio worker dentro de tmux. El gate deja el
  * veredicto por escrito (estado persistido + informe); avisar al worker es una decisión aparte.
  */
 
 export const DEFAULT_GATE_RETRIES = 2;
-/** Un gate corre una suite entera: el default de `runVerify` (2 min) se queda corto. */
-export const GATE_TIMEOUT_MS = 900_000;
+/** Rutas cuyo cambio no invalida un PASS del gate de merge (ver `cacheHit`). */
+export const MERGE_GATE_E2E_DIRS = ["e2e_dev/"];
+export const DIRTY_REASON = "hay cambios sin commitear";
 
 export interface GateStage {
   key: string;
   label: string;
   verifyCmd?: string;
   maxRetries?: number;
+  mergeGate?: true;
 }
 
 export interface Gate {
@@ -30,17 +47,41 @@ export interface Gate {
   cmd: string;
   maxRetries: number;
   attempts: number;
+  mergeGate: boolean;
+}
+
+/** sub-repo → SHA, la forma en que se persisten los HEADs probados. */
+const shasOf = (heads: RepoHead[]): Record<string, string> => Object.fromEntries(heads.map((h) => [h.repo, h.sha]));
+
+function sameShas(stored: Record<string, string> | undefined, heads: RepoHead[]): boolean {
+  if (!stored || Object.keys(stored).length !== heads.length) return false;
+  return heads.every((h) => Object.hasOwn(stored, h.repo) && stored[h.repo] === h.sha);
+}
+
+/**
+ * ¿Un gate de merge ya resuelto vuelve a estar en juego? Sólo con HEADs legibles, no vacíos, todos
+ * limpios y distintos de los guardados (sin `shas` cuenta como distinto). Un `failed` además
+ * necesita intentos libres: agotados, se queda failed.
+ */
+function mergeGateRearms(state: VerifyState, heads: RepoHead[] | null, maxRetries: number): boolean {
+  if (!heads || heads.length === 0 || heads.some((h) => h.dirty)) return false;
+  if (state.status === "failed" && state.attempts >= maxRetries) return false;
+  return !sameShas(state.shas, heads);
 }
 
 /**
  * Gate que toca considerar: el MÁS TEMPRANO del flujo que ya fue alcanzado, tiene `verifyCmd` y
  * no está resuelto. Que el worker se haya adelantado no cancela un gate — es autónomo y puede
  * tocar el siguiente sentinela sin esperar a nadie, pero la deuda sigue siendo suya.
+ *
+ * `headsFor`: HEADs actuales del worktree. Con ellos, un gate de merge resuelto se re-arma si
+ * hubo commit nuevo (ver `mergeGateRearms`); sin ellos, resuelto es resuelto, como siempre.
  */
 export function selectGate(
   stages: GateStage[],
   reached: string | null,
   stateFor: (stageKey: string) => VerifyState | null,
+  headsFor?: () => RepoHead[] | null,
 ): Gate | null {
   if (!reached) return null;
   const hasta = stages.findIndex((stage) => stage.key === reached);
@@ -50,8 +91,12 @@ export function selectGate(
     const cmd = stage.verifyCmd?.trim();
     if (!cmd) continue;
     const state = stateFor(stage.key);
-    if (state?.status === "passed" || state?.status === "failed") continue;
-    return { key: stage.key, cmd, maxRetries: stage.maxRetries ?? DEFAULT_GATE_RETRIES, attempts: state?.attempts ?? 0 };
+    const maxRetries = stage.maxRetries ?? DEFAULT_GATE_RETRIES;
+    const mergeGate = stage.mergeGate === true;
+    if (state?.status === "passed" || state?.status === "failed") {
+      if (!mergeGate || !headsFor || !mergeGateRearms(state, headsFor(), maxRetries)) continue;
+    }
+    return { key: stage.key, cmd, maxRetries, attempts: state?.attempts ?? 0, mergeGate };
   }
   return null;
 }
@@ -87,7 +132,13 @@ export interface DriverDeps {
   provisionOf(cycle: string): ProvisionState | null;
   readState(cycle: string, stageKey: string): VerifyState | null;
   writeState(cycle: string, stageKey: string, state: VerifyState): void;
-  run(cmd: string, cwd: string): Promise<VerifyResult>;
+  run(cmd: string, cwd: string, opts: { timeoutMs: number; env: Record<string, string> }): Promise<VerifyResult>;
+  /** HEAD y suciedad de cada sub-repo del worktree; null si git no se pudo leer. */
+  heads(worktree: string): Promise<RepoHead[] | null>;
+  /** `cacheHit` de gate-cache con el git real ya inyectado. */
+  cacheHit(cached: VerifyState | null, heads: RepoHead[], worktree: string, e2eDirs: string[]): Promise<boolean>;
+  /** Timeout y entorno del gate para un repo (override del repo o global), leídos en cada llamada. */
+  gateConfig(repo: string): { timeoutMs: number; env: Record<string, string> };
   logError?(error: unknown): void;
 }
 
@@ -121,8 +172,23 @@ export async function tickOnce(deps: DriverDeps, armed: Map<string, boolean>): P
       // no existe no es un veredicto sobre el código y un rojo aquí sería una señal falsa.
       const provision = deps.provisionOf(cycle);
       if (provision?.status === "running" || provision?.status === "failed") continue;
-      const gate = selectGate(stages, deps.detect(cycle, stages.map((s) => s.key)), (key) => deps.readState(cycle, key));
+      // HEADs leídos UNA vez y ANTES de cualquier corrida: son los que se guardan con el veredicto.
+      // Sólo si el flujo tiene gate de merge y el worker está ocioso (ocupado no corre nada).
+      const hasMergeGate = stages.some((s) => s.mergeGate === true && s.verifyCmd?.trim());
+      const heads = hasMergeGate && !sesion.busy ? await deps.heads(launch.worktree) : undefined;
+      const gate = selectGate(
+        stages,
+        deps.detect(cycle, stages.map((s) => s.key)),
+        (key) => deps.readState(cycle, key),
+        heads === undefined ? undefined : () => heads,
+      );
       if (!gate) continue;
+
+      if (gate.mergeGate) {
+        const informe = await runMergeGate(deps, sesion, launch.repo, launch.worktree, cycle, gate, heads);
+        if (informe) informes.push(informe);
+        continue;
+      }
 
       const clave = armKey(sesion.name, gate.key);
       const decision = verifyRunDecision(sesion.busy, gate.attempts, armed.get(clave) === true);
@@ -133,7 +199,7 @@ export async function tickOnce(deps: DriverDeps, armed: Map<string, boolean>): P
       if (decision === "skip") continue;
 
       armed.delete(clave);
-      const resultado = await deps.run(gate.cmd, launch.worktree);
+      const resultado = await deps.run(gate.cmd, launch.worktree, deps.gateConfig(launch.repo));
       const desenlace = verifyOutcome(resultado.ok, gate.attempts, gate.maxRetries);
       const state: VerifyState = { attempts: desenlace.attempts, status: desenlace.status };
       deps.writeState(cycle, gate.key, state);
@@ -143,6 +209,50 @@ export async function tickOnce(deps: DriverDeps, armed: Map<string, boolean>): P
     }
   }
   return informes;
+}
+
+/**
+ * Un gate de merge, en orden: ocupado → nada; HEADs ilegibles/vacíos → nada (logError); árbol
+ * sucio → failed sin correr; caché → passed sin correr; si no, corre. El orden sucio→caché es
+ * deliberado: `cacheHit` ignora `dirty` y un árbol sucio con SHAs cacheados no puede dar verde.
+ */
+async function runMergeGate(
+  deps: DriverDeps,
+  sesion: SessionSnapshot,
+  repo: string,
+  worktree: string,
+  cycle: string,
+  gate: Gate,
+  heads: RepoHead[] | null | undefined,
+): Promise<GateReport | null> {
+  if (sesion.busy) return null;
+  if (!heads || heads.length === 0) {
+    deps.logError?.(new Error(`gate ${gate.key} de ${sesion.name}: no se pudieron leer los HEADs de ${worktree}; no se corre`));
+    return null;
+  }
+  const informe = (state: VerifyState, output: string): GateReport => {
+    deps.writeState(cycle, gate.key, state);
+    return { session: sesion.name, stageKey: gate.key, status: state.status, attempts: state.attempts, output };
+  };
+
+  if (heads.some((h) => h.dirty)) {
+    // Sin `shas`: se re-arma en cuanto el árbol quede limpio. Sin gastar intento: no se probó nada.
+    return informe({ status: "failed", reason: DIRTY_REASON, attempts: gate.attempts }, DIRTY_REASON);
+  }
+
+  const shas = shasOf(heads);
+  if (await deps.cacheHit(deps.readState(cycle, gate.key), heads, worktree, MERGE_GATE_E2E_DIRS)) {
+    return informe({ attempts: gate.attempts, status: "passed", shas, durationMs: 0, at: Date.now(), reason: "caché" }, "caché");
+  }
+
+  const inicio = Date.now();
+  const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
+  const fin = Date.now();
+  // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
+  const state: VerifyState = resultado.ok
+    ? { attempts: gate.attempts, status: "passed", shas, durationMs: fin - inicio, at: fin }
+    : { attempts: gate.attempts + 1, status: "failed", shas, durationMs: fin - inicio, at: fin };
+  return informe(state, resultado.output);
 }
 
 export interface DriverHandle {
@@ -172,5 +282,8 @@ export const realGateDeps = {
   provisionOf: readProvisionState,
   readState: readVerifyState,
   writeState: writeVerifyState,
-  run: (cmd: string, cwd: string) => runVerify(cmd, cwd, GATE_TIMEOUT_MS),
+  run: (cmd: string, cwd: string, opts: { timeoutMs: number; env: Record<string, string> }) => runVerify(cmd, cwd, opts.timeoutMs, opts.env),
+  heads: (worktree: string) => repoHeads(worktree, realGitPort),
+  cacheHit: (cached: VerifyState | null, heads: RepoHead[], worktree: string, e2eDirs: string[]) =>
+    cacheHit(cached, heads, realGitPort, worktree, e2eDirs),
 };

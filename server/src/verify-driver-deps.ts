@@ -1,4 +1,6 @@
+import { getRepoGate, type RepoGate } from "./repo-config.js";
 import { readLaunchRecord, readTmuxInventory } from "./sessions.js";
+import { readGateSettings, type GateSettings } from "./settings.js";
 import { cycleDirForSession, detectStage, readFlow } from "./stages.js";
 import { realGateDeps, type DriverDeps, type GateStage, type LaunchInfo } from "./verify-driver.js";
 import { resolveFlow } from "./workflow.js";
@@ -16,6 +18,19 @@ export interface VerifyDriverDepSources {
   resolveFlow(stageKeys: undefined, repo: string): { stages: GateStage[]; verifyAfter: string[] };
   cycleDirForSession(name: string): string;
   detectStage(cycle: string, order: string[]): string | null;
+  gateSettings(): GateSettings;
+  repoGate(repo: string): RepoGate;
+}
+
+/** Carpeta propia de reportes del gate de Ronin, relativa al worktree (la lee unit-gate.sh). */
+export const GATE_REPORTS_DIR = "reports/ronin-gate";
+
+/** Timeout y entorno del gate: el override del repo gana al global; xdist sólo si el repo lo declara. */
+export function gateConfigFrom(global: GateSettings, repo: RepoGate): { timeoutMs: number; env: Record<string, string> } {
+  return {
+    timeoutMs: (repo.timeoutMin ?? global.timeoutMin) * 60_000,
+    env: { UNIT_GATE_REPORTS_DIR: GATE_REPORTS_DIR, ...(repo.xdist ? { UNIT_GATE_XDIST: String(repo.xdist) } : {}) },
+  };
 }
 
 function launchInfo(raw: unknown): LaunchInfo | null {
@@ -46,6 +61,8 @@ export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverD
     cycleFor: sources.cycleDirForSession,
     detect: sources.detectStage,
     ...realGateDeps,
+    // Se lee en cada llamada: un cambio en settings.json o repo-config.json aplica sin reiniciar.
+    gateConfig: (repo) => gateConfigFrom(sources.gateSettings(), sources.repoGate(repo)),
     logError: (error) => console.error("[claude-cowork]", error),
   };
 }
@@ -57,4 +74,6 @@ export const realVerifyDriverDeps = createVerifyDriverDeps({
   resolveFlow,
   cycleDirForSession,
   detectStage,
+  gateSettings: () => readGateSettings(),
+  repoGate: getRepoGate,
 });

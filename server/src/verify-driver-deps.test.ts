@@ -10,6 +10,8 @@ function sources(overrides: Partial<VerifyDriverDepSources> = {}): VerifyDriverD
     resolveFlow: () => ({ stages: [], verifyAfter: [] }),
     cycleDirForSession: (name) => `/cycle/${name}`,
     detectStage: () => null,
+    gateSettings: () => ({ timeoutMin: 45, maxConcurrent: 2 }),
+    repoGate: () => ({}),
     ...overrides,
   };
 }
@@ -136,4 +138,24 @@ test("A4: flowFor cae al override por repo cuando flow.json está corrupto", () 
   }));
 
   assert.deepEqual(deps.flowFor("cowork-corrupt", "monorepo"), override);
+});
+
+test("gateConfig incluye UNIT_GATE_XDIST sólo si el repo lo declara", () => {
+  const sin = createVerifyDriverDeps(sources({ repoGate: () => ({}) }));
+  assert.deepEqual(sin.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate" });
+  const con = createVerifyDriverDeps(sources({ repoGate: (repo) => (repo === "api" ? { xdist: 4 } : {}) }));
+  assert.deepEqual(con.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_XDIST: "4" });
+  assert.deepEqual(con.gateConfig("otro").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate" });
+});
+
+test("gateConfig toma el timeout del repo o, si falta, el global (en ms), leído en cada llamada", () => {
+  let global = 45;
+  const deps = createVerifyDriverDeps(sources({
+    gateSettings: () => ({ timeoutMin: global, maxConcurrent: 2 }),
+    repoGate: (repo) => (repo === "lento" ? { timeoutMin: 120 } : {}),
+  }));
+  assert.equal(deps.gateConfig("lento").timeoutMs, 120 * 60_000);
+  assert.equal(deps.gateConfig("api").timeoutMs, 45 * 60_000);
+  global = 30;
+  assert.equal(deps.gateConfig("api").timeoutMs, 30 * 60_000);
 });

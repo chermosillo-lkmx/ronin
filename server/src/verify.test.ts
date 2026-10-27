@@ -42,6 +42,12 @@ test("runVerify: exit 0 → ok", async () => {
   assert.equal(r.code, 0);
 });
 
+test("runVerify: env se mezcla con process.env (no lo reemplaza)", async () => {
+  const r = await runVerify('printf "%s|%s" "$RONIN_TEST_VAR" "${PATH:+conpath}"', process.cwd(), 5000, { RONIN_TEST_VAR: "hola" });
+  assert.equal(r.ok, true);
+  assert.equal(r.output, "hola|conpath");
+});
+
 test("runVerify: non-zero exit → not ok, code captured", async () => {
   const r = await runVerify("exit 3", process.cwd());
   assert.equal(r.ok, false);

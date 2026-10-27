@@ -41,7 +41,8 @@ export function verifyRunDecision(busy: boolean, attempts: number, armed: boolea
 
 const truncateOutput = (s: string): string => (s.length > 8000 ? s.slice(0, 8000) + "\n…(truncado)" : s);
 
-export function runVerify(cmd: string, cwd: string, timeoutMs = 120000): Promise<VerifyResult> {
+/** `env` se mezcla SOBRE `process.env` (no lo reemplaza): el comando conserva PATH y compañía. */
+export function runVerify(cmd: string, cwd: string, timeoutMs = 120000, env: Record<string, string> = {}): Promise<VerifyResult> {
   return new Promise((resolve) => {
     let out = "";
     let done = false;
@@ -54,7 +55,7 @@ export function runVerify(cmd: string, cwd: string, timeoutMs = 120000): Promise
     let child;
     try {
       // detached:true → the shell becomes a process-group leader; kill(-pid) reaps its children.
-      child = spawn(cmd, { shell: true, cwd, detached: true });
+      child = spawn(cmd, { shell: true, cwd, detached: true, env: { ...process.env, ...env } });
     } catch (e) {
       return finish({ ok: false, code: null, output: String(e) });
     }
