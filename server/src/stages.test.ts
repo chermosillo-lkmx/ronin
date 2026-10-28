@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,11 +21,13 @@ import {
   readSentinelsTail,
   readVerifyState,
   removeCycleDir,
+  sentinelMtime,
   verifierSpawned,
   verifyPassed,
   writeModelsInfo,
   writeDriverInfo,
   writeVerifyState,
+  writeVerifyLog,
 } from "./stages.js";
 
 function freshCycle(): string {
@@ -278,5 +280,110 @@ test("readCycleRepo lee el repo de launch.json y, si falta o está roto, de adop
     assert.equal(readCycleRepo(dir), "acme-web");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("mergeGate sobrevive al congelado de flow.json", () => {
+  const cycle = freshCycle();
+  const flow = { stages: [{ key: "unit", label: "U", icon: "x", verifyCmd: "npm test", maxRetries: 2, mergeGate: true as const }], verifyAfter: [] };
+  writeFlow(cycle, flow);
+  const back = readFlow(cycle);
+  assert.equal(back?.stages[0].mergeGate, true);
+  assert.deepEqual(back, flow);
+});
+
+test("readVerifyState conserva shas, durationMs y notify", () => {
+  const cycle = mkdtempSync(join(tmpdir(), "verify-ext-"));
+  try {
+    const st = {
+      attempts: 2,
+      status: "passed" as const,
+      shas: { api: "abc".repeat(14).slice(0, 40) },
+      durationMs: 1234,
+      at: 99,
+      queued: false,
+      running: true,
+      notify: "sent" as const,
+      notifiedAt: 120,
+      reason: "ok",
+    };
+    writeVerifyState(cycle, "unit", st);
+    assert.deepEqual(readVerifyState(cycle, "unit"), st);
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("readVerifyState: campo con tipo incorrecto se ignora, el resto se lee", () => {
+  const cycle = mkdtempSync(join(tmpdir(), "verify-bad-"));
+  try {
+    writeFileSync(
+      join(cycle, "verify-unit.json"),
+      JSON.stringify({
+        attempts: 1,
+        status: "failed",
+        shas: { api: 5 },
+        durationMs: "x",
+        notify: "maybe",
+        notifiedAt: "ayer",
+        queued: "yes",
+        reason: "r",
+      }),
+    );
+    assert.deepEqual(readVerifyState(cycle, "unit"), { attempts: 1, status: "failed", reason: "r" });
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("readVerifyState: shas con valor no hex (HEAD) se descartan enteras", () => {
+  const cycle = mkdtempSync(join(tmpdir(), "verify-sha-"));
+  try {
+    writeFileSync(
+      join(cycle, "verify-unit.json"),
+      JSON.stringify({ attempts: 1, status: "passed", shas: { api: "a".repeat(40), web: "HEAD" } }),
+    );
+    assert.deepEqual(readVerifyState(cycle, "unit"), { attempts: 1, status: "passed" });
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("writeVerifyLog: deja la salida del gate en <cycle>/verify-<etapa>.log y la sobrescribe en cada corrida", () => {
+  const cycle = freshCycle();
+  try {
+    ensureCycleDir(cycle);
+    writeVerifyLog(cycle, "pre-merge", "primera");
+    writeVerifyLog(cycle, "pre-merge", "segunda");
+    assert.equal(readFileSync(join(cycle, "verify-pre-merge.log"), "utf8"), "segunda");
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("verify state: el marcador sin-gate sobrevive a releer y nunca cuenta como passed", () => {
+  const cycle = freshCycle();
+  try {
+    ensureCycleDir(cycle);
+    writeVerifyState(cycle, "pre-merge", { attempts: 0, status: "sin-gate", at: 1 });
+    assert.equal(readVerifyState(cycle, "pre-merge")?.status, "sin-gate");
+    assert.equal(verifyPassed(cycle, "pre-merge"), false);
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
+  }
+});
+
+test("sentinelMtime: mtime (ms) del sentinela de una etapa, null si no existe o es una carpeta", () => {
+  const cycle = mkdtempSync(join(tmpdir(), "ronin-sentinel-mtime-"));
+  try {
+    assert.equal(sentinelMtime(cycle, "pre-merge"), null);
+    writeFileSync(join(cycle, "pre-merge"), "");
+    const at = sentinelMtime(cycle, "pre-merge");
+    assert.equal(typeof at, "number");
+    assert.ok(at! <= Date.now() + 1000);
+    ensureCycleDir(cycle);
+    assert.equal(sentinelMtime(cycle, "evidence"), null);
+  } finally {
+    rmSync(cycle, { recursive: true, force: true });
   }
 });

@@ -36,8 +36,11 @@ const defaultPromptDeliveryDeps: PromptDeliveryDeps = {
  * cambie no puede bloquear la creación de una sesión para siempre. Si no aparece una señal de
  * CLI, se deja el motivo al operador y no se escribe: el peor caso es que el worker requiera el
  * botón del operador; entregar a ciegas puede ejecutar texto arbitrario dentro de un shell.
+ *
+ * Devuelve si el texto se llegó a escribir: false cuando la CLI nunca apareció. Quien necesite
+ * saberlo (el aviso del gate de merge) lo usa; los lanzamientos lo ignoran como antes.
  */
-export async function deliverPromptWhenReady(session: string, prompt: string, deps: PromptDeliveryDeps = defaultPromptDeliveryDeps): Promise<void> {
+export async function deliverPromptWhenReady(session: string, prompt: string, deps: PromptDeliveryDeps = defaultPromptDeliveryDeps): Promise<boolean> {
   let cliReady = false;
   for (let attempt = 0; attempt < TUI_READY_ATTEMPTS; attempt++) {
     const pane = await deps.capturePaneSafe(session);
@@ -49,7 +52,7 @@ export async function deliverPromptWhenReady(session: string, prompt: string, de
   }
   if (!cliReady) {
     deps.log(`COWORK_PROMPT_NOT_DELIVERED_NO_CLI:${session}:waited_ms=${TUI_READY_ATTEMPTS * TUI_READY_INTERVAL_MS}`);
-    return;
+    return false;
   }
 
   if (Buffer.byteLength(prompt, "utf8") > PASTE_THRESHOLD_BYTES) await deps.pastePrompt(session, prompt, true);
@@ -60,6 +63,7 @@ export async function deliverPromptWhenReady(session: string, prompt: string, de
     if (pane === null || !deps.promptPending(pane)) break;
     await deps.sendKeys(session, "Enter");
   }
+  return true;
 }
 
 /** Deliver an initial workflow request after the CLI is ready to receive it. */

@@ -10,6 +10,8 @@ export interface VerifyResult {
   ok: boolean;
   code: number | null;
   output: string;
+  /** Se cortó por timeout; `output` termina además en `[timeout]` (fuera del recorte). */
+  timedOut?: boolean;
 }
 
 /**
@@ -41,20 +43,22 @@ export function verifyRunDecision(busy: boolean, attempts: number, armed: boolea
 
 const truncateOutput = (s: string): string => (s.length > 8000 ? s.slice(0, 8000) + "\n…(truncado)" : s);
 
-export function runVerify(cmd: string, cwd: string, timeoutMs = 120000): Promise<VerifyResult> {
+/** `env` se mezcla SOBRE `process.env` (no lo reemplaza): el comando conserva PATH y compañía. */
+export function runVerify(cmd: string, cwd: string, timeoutMs = 120000, env: Record<string, string> = {}): Promise<VerifyResult> {
   return new Promise((resolve) => {
     let out = "";
     let done = false;
     const finish = (r: VerifyResult) => {
       if (done) return;
       done = true;
-      resolve({ ...r, output: truncateOutput(r.output) });
+      // La marca de timeout va DESPUÉS del recorte: con salida larga, recortar primero la borraba.
+      resolve({ ...r, output: truncateOutput(r.output) + (r.timedOut ? "\n[timeout]" : "") });
     };
 
     let child;
     try {
       // detached:true → the shell becomes a process-group leader; kill(-pid) reaps its children.
-      child = spawn(cmd, { shell: true, cwd, detached: true });
+      child = spawn(cmd, { shell: true, cwd, detached: true, env: { ...process.env, ...env } });
     } catch (e) {
       return finish({ ok: false, code: null, output: String(e) });
     }
@@ -65,7 +69,7 @@ export function runVerify(cmd: string, cwd: string, timeoutMs = 120000): Promise
       } catch {
         /* already gone */
       }
-      finish({ ok: false, code: null, output: out + "\n[timeout]" });
+      finish({ ok: false, code: null, output: out, timedOut: true });
     }, timeoutMs);
 
     // Cap accumulation (not just the final truncate) so a chatty command before a 120s timeout

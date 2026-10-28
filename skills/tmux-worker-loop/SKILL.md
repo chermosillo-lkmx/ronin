@@ -371,7 +371,16 @@ without losing a single check:
    phase — the plan is the contract and Main still reads it once, in full.)*
 2. **Never let a test run dump into context.** Redirect, then print only what you reason about:
    ```bash
-   cmd=$(awk -F= -v key=TEST_CMD_1 '$1 == key {sub(/^[^=]*=/, ""); print}' "$D/harness.$slot.env")
+   env="$D/harness.$slot.env"
+   base=$(awk -F= '$1 == "BASELINE_REF" {print $2}' "$env")
+   set -f; specs=(); for g in $(awk -F= '$1 == "TEST_GLOBS" {sub(/^[^=]*=/, ""); print}' "$env"); do specs+=(":(glob)**/$g"); done; set +f
+   [ "${#specs[@]}" -gt 0 ] || { echo "TEST_GLOBS vacío"; exit 1; }   # no pathspec would list every file
+   touched=$( { git -C "$worktree" diff --name-only --diff-filter=d "$base" -- "${specs[@]}"
+                git -C "$worktree" ls-files --others --exclude-standard -- "${specs[@]}"; } \
+              | sort -u | while IFS= read -r f; do printf '%q ' "$f"; done )
+   [ -n "$touched" ] || { echo "no hay tests tocados"; exit 1; }   # empty would run the full suite
+   cmd=$(awk -F= -v key=TEST_CMD_1 '$1 == key {sub(/^[^=]*=/, ""); print}' "$env")
+   cmd=${cmd//"{CHANGED_TESTS}"/"$touched"}
    (cd "$worktree" && sh -c "$cmd") > /tmp/run.txt 2>&1
    tail -2 /tmp/run.txt
    sed -n '/^## GATE/,$p' "$D/verify-rgr.md"   # only the verified summary reaches you
@@ -618,8 +627,10 @@ in the plan. On `===IMPL:READY===`:
 2. Run the Reviewer's **diff pass**, which consumes `verify-rgr.md` and includes the mandatory
    semantic RGR/refactor audit.
 3. Run your own `git diff --stat` against the plan's promised file list.
-4. **Run the declared `$TEST_CMD_*` suites yourself, but never into your context** — redirect their
-   raw output and compare the result with the anchored baseline and counts in `verify-rgr.md`.
+4. **Run the touched tests yourself, but never into your context** — each declared `$TEST_CMD_*`
+   with `{CHANGED_TESTS}` replaced by `$touched`, built and guarded as in the snippet under
+   context discipline (it refuses an empty list); redirect the raw output and compare the
+   result with the anchored baseline and counts in `verify-rgr.md`. Sólo los tests de los módulos tocados. La suite completa la corre Ronin en `pre-merge`; no la corras tú, ni como baseline.
 5. Read the diff report's `## VERDICT` block first; open the body for blockers only.
 6. Relay findings; loop until clean; then `IMPL APPROVED — proceed`.
 
@@ -637,8 +648,11 @@ status/log file before treating its output as a gate decision.
 ### 6. Final verification
 After `===IMPL:CYCLE-DONE===`:
 - Confirm the KB files actually mention the new flow (read them; don't trust the claim).
-- Re-run every `$TEST_CMD_*` declared in each `harness.<slot>.env`; report the format each stack
-  actually emits rather than assuming pytest.
+- Re-run the touched tests through the `$TEST_CMD_*` declared in each `harness.<slot>.env`
+  (`{CHANGED_TESTS}` replaced by the guarded `$touched` from the context-discipline snippet); report the format each stack actually
+  emits rather than assuming pytest. Sólo los tests de los módulos tocados. La suite completa la corre Ronin en `pre-merge`; no la corras tú, ni como baseline.
+- **Main never merges by itself.** The merge happens only in the workflow's `pr` stage, after
+  Ronin's `pre-merge` gate (the catalog orders `pre-merge` → `pr`), which runs the full suite once.
 - When `reportar_pruebas` is available, pass the requirement `ticket` and the current Ronin `session` so the saved run can be traced back to both.
 - Read `DEPS_OK` and `MISSING` from every slot contract. Missing affordances are declared limits,
   not silently successful checks.

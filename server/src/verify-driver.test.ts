@@ -2,9 +2,9 @@ import { strict as assert } from "node:assert";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
-import { DEFAULT_GATE_RETRIES, selectGate, tickOnce, type DriverDeps, type GateStage } from "./verify-driver.js";
-import type { VerifyState } from "./stages.js";
+import { mock, test } from "node:test";
+import { DEFAULT_GATE_RETRIES, selectGate, startVerifyDriver, tickOnce, verdictMessage, type DriverDeps, type GateReport, type GateSlots, type GateStage } from "./verify-driver.js";
+import { readVerifyState, writeVerifyState, type VerifyState } from "./stages.js";
 
 const STAGES: GateStage[] = [
   { key: "planning", label: "Plan" },
@@ -16,6 +16,15 @@ const STAGES: GateStage[] = [
 
 const sinEstado = () => null;
 
+/** Los desenlaces del gate de merge llevan `at` (reloj real): se comprueba que exista y se quita. */
+function sinAt<T extends { at?: number } | undefined>(state: T): Omit<NonNullable<T>, "at"> {
+  assert.equal(typeof state?.at, "number");
+  const { at: _at, ...resto } = state as NonNullable<T>;
+  return resto;
+}
+const SHA_A = "a".repeat(40);
+const SHA_B = "b".repeat(40);
+
 test("selectGate: sin etapa alcanzada no hay nada que ejecutar", () => {
   assert.equal(selectGate(STAGES, null, sinEstado), null);
 });
@@ -26,7 +35,7 @@ test("selectGate: una etapa anterior al gate no lo dispara", () => {
 
 test("selectGate: al alcanzar la etapa con verifyCmd, ése es el gate", () => {
   const gate = selectGate(STAGES, "tests", sinEstado);
-  assert.deepEqual(gate, { key: "tests", cmd: "correr-pruebas", maxRetries: 2, attempts: 0 });
+  assert.deepEqual(gate, { key: "tests", cmd: "correr-pruebas", maxRetries: 2, attempts: 0, mergeGate: false });
 });
 
 test("selectGate: el gate sigue vigente aunque el worker se haya adelantado", () => {
@@ -62,6 +71,20 @@ test("selectGate: sin maxRetries declarado usa el default del driver", () => {
 
 // ---- tickOnce: el bucle en sí ----
 
+/**
+ * Las pruebas de veredicto: un tick con cupo de sobra que espera a que terminen sus corridas y
+ * devuelve los informes. Las marcas de lanzamiento (`running: true`) no son veredicto — se filtran
+ * aquí y las cubren las pruebas de concurrencia.
+ */
+async function tick(d: DriverDeps, armed: Map<string, boolean>): Promise<GateReport[]> {
+  const informes: GateReport[] = [];
+  const slots: GateSlots = { max: 99, inFlight: new Map() };
+  const sinMarcas: DriverDeps = { ...d, writeState: (c, k, state) => { if (state.running !== true) d.writeState(c, k, state); } };
+  await tickOnce(sinMarcas, armed, slots, (r) => void informes.push(r));
+  await Promise.all([...slots.inFlight.values()]);
+  return informes;
+}
+
 function deps(over: Partial<DriverDeps> & { cycle: string }): DriverDeps {
   const escrito: VerifyState[] = [];
   return {
@@ -74,6 +97,9 @@ function deps(over: Partial<DriverDeps> & { cycle: string }): DriverDeps {
     writeState: (_c, _k, state) => void escrito.push(state),
     run: async () => ({ ok: true, code: 0, output: "verde" }),
     provisionOf: () => null,
+    heads: async () => [{ repo: "api", sha: SHA_A, dirty: false }],
+    cacheHit: async () => false,
+    gateConfig: () => ({ timeoutMs: 45 * 60_000, env: { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate" } }),
     ...over,
   };
 }
@@ -83,7 +109,7 @@ test("tickOnce: corre el gate en el WORKTREE de la sesión, no en la raíz del r
   try {
     const vistos: { cmd: string; cwd: string }[] = [];
     const d = deps({ cycle: dir, run: async (cmd, cwd) => { vistos.push({ cmd, cwd }); return { ok: true, code: 0, output: "" }; } });
-    const informes = await tickOnce(d, new Map());
+    const informes = await tick(d, new Map());
 
     assert.deepEqual(vistos, [{ cmd: "correr-pruebas", cwd: "/wt" }]);
     assert.deepEqual(informes.map((i) => [i.session, i.stageKey, i.status]), [["cowork-x", "tests", "passed"]]);
@@ -103,7 +129,7 @@ test("A4: tickOnce pide el flow congelado usando sesión y repo", async () => {
         return session === "cowork-x" ? STAGES : [];
       }) as DriverDeps["flowFor"],
     });
-    const informes = await tickOnce(d, new Map());
+    const informes = await tick(d, new Map());
 
     assert.deepEqual(llamadas, [["cowork-x", "api"]]);
     assert.deepEqual(informes.map((informe) => informe.stageKey), ["tests"]);
@@ -117,7 +143,7 @@ test("tickOnce: nunca corre mientras el worker está ocupado", async () => {
   try {
     let corridas = 0;
     const d = deps({ cycle: dir, listSessions: async () => [{ name: "cowork-x", busy: true }], run: async () => { corridas++; return { ok: true, code: 0, output: "" }; } });
-    assert.deepEqual(await tickOnce(d, new Map()), []);
+    assert.deepEqual(await tick(d, new Map()), []);
     assert.equal(corridas, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -133,7 +159,7 @@ test("tickOnce: un fallo con reintentos disponibles deja el gate pendiente, no f
       run: async () => ({ ok: false, code: 1, output: "177 fallos" }),
       writeState: (_c, _k, state) => void guardado.push(state),
     });
-    const [informe] = await tickOnce(d, new Map());
+    const [informe] = await tick(d, new Map());
 
     assert.equal(informe.status, "pending");
     assert.equal(informe.output, "177 fallos");
@@ -154,7 +180,7 @@ test("tickOnce: agotados los reintentos el gate queda failed y no se vuelve a in
       writeState: (_c, _k, state) => void guardado.push(state),
     });
     const armado = new Map([["cowork-x:tests", true]]);
-    const [informe] = await tickOnce(d, armado);
+    const [informe] = await tick(d, armado);
 
     assert.equal(informe.status, "failed");
     assert.deepEqual(guardado, [{ attempts: 2, status: "failed" }]);
@@ -172,7 +198,7 @@ test("tickOnce: un reintento espera a estar armado — un reinicio no quema los 
       readState: () => ({ attempts: 1, status: "pending" }),
       run: async () => { corridas++; return { ok: true, code: 0, output: "" }; },
     });
-    assert.deepEqual(await tickOnce(d, new Map()), []); // ocioso, con intentos, sin armar → se salta
+    assert.deepEqual(await tick(d, new Map()), []); // ocioso, con intentos, sin armar → se salta
     assert.equal(corridas, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -188,7 +214,7 @@ test("tickOnce: el worker ocupado ARMA el reintento para cuando vuelva a quedar 
       listSessions: async () => [{ name: "cowork-x", busy: true }],
       readState: () => ({ attempts: 1, status: "pending" }),
     });
-    await tickOnce(d, armado);
+    await tick(d, armado);
     assert.equal(armado.get("cowork-x:tests"), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -200,10 +226,10 @@ test("tickOnce: ignora terminales normales y sesiones sin lanzamiento gestionado
   try {
     let corridas = 0;
     const terminal = deps({ cycle: dir, launchOf: () => ({ mode: "terminal", repo: "api" }), run: async () => { corridas++; return { ok: true, code: 0, output: "" }; } });
-    assert.deepEqual(await tickOnce(terminal, new Map()), []);
+    assert.deepEqual(await tick(terminal, new Map()), []);
 
     const ajena = deps({ cycle: dir, launchOf: () => null, run: async () => { corridas++; return { ok: true, code: 0, output: "" }; } });
-    assert.deepEqual(await tickOnce(ajena, new Map()), []);
+    assert.deepEqual(await tick(ajena, new Map()), []);
     assert.equal(corridas, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -215,7 +241,7 @@ test("tickOnce: una sesión de workflow sin worktree no corre nada (no hay qué 
   try {
     let corridas = 0;
     const d = deps({ cycle: dir, launchOf: () => ({ mode: "workflow", repo: "api" }), run: async () => { corridas++; return { ok: true, code: 0, output: "" }; } });
-    assert.deepEqual(await tickOnce(d, new Map()), []);
+    assert.deepEqual(await tick(d, new Map()), []);
     assert.equal(corridas, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -233,7 +259,7 @@ test("tickOnce: un fallo del propio driver no tumba el resto de las sesiones", a
         return { mode: "workflow", repo: "api", worktree: "/wt" };
       },
     });
-    const informes = await tickOnce(d, new Map());
+    const informes = await tick(d, new Map());
     assert.deepEqual(informes.map((i) => i.session), ["cowork-x"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -255,7 +281,7 @@ test("tickOnce: no corre el gate mientras el entorno se está provisionando", as
       provisionOf: () => ({ status: "running", startedAt: 1 }),
       run: async () => { corridas++; return { ok: true, code: 0, output: "" }; },
     });
-    assert.deepEqual(await tickOnce(d, new Map()), []);
+    assert.deepEqual(await tick(d, new Map()), []);
     assert.equal(corridas, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -273,7 +299,7 @@ test("tickOnce: con la provisión fallida se salta el gate y no se le toca el es
       run: async () => { corridas++; return { ok: false, code: 1, output: "" }; },
       writeState: (_c, _k, state) => void escrito.push(state),
     });
-    assert.deepEqual(await tickOnce(d, new Map()), []);
+    assert.deepEqual(await tick(d, new Map()), []);
     assert.equal(corridas, 0);
     assert.deepEqual(escrito, []);
   } finally {
@@ -285,9 +311,1361 @@ test("tickOnce: con la provisión lista el gate corre normal", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
   try {
     const d = deps({ cycle: dir, provisionOf: () => ({ status: "ok", startedAt: 1, finishedAt: 2 }) });
-    const informes = await tickOnce(d, new Map());
+    const informes = await tick(d, new Map());
     assert.deepEqual(informes.map((i) => i.status), ["passed"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- mergeGate: árbol limpio, caché por SHA, re-arme por commit nuevo ----
+
+const MERGE: GateStage[] = [
+  { key: "implementing", label: "Impl" },
+  { key: "pre-merge", label: "Gate pre-merge", verifyCmd: "unit-gate", maxRetries: 3, mergeGate: true },
+  { key: "pr", label: "PR" },
+];
+const limpio = (sha: string) => [{ repo: "api", sha, dirty: false }];
+
+function mergeDeps(over: Partial<DriverDeps> & { cycle: string }): { d: DriverDeps; escrito: VerifyState[]; corridas: { cmd: string; cwd: string; opts: unknown }[] } {
+  const escrito: VerifyState[] = [];
+  const corridas: { cmd: string; cwd: string; opts: unknown }[] = [];
+  const d = deps({
+    flowFor: () => MERGE,
+    detect: () => "pre-merge",
+    writeState: (_c, _k, state) => void escrito.push(state),
+    run: async (cmd, cwd, opts) => { corridas.push({ cmd, cwd, opts }); return { ok: true, code: 0, output: "verde" }; },
+    heads: async () => limpio(SHA_A),
+    ...over,
+  });
+  return { d, escrito, corridas };
+}
+
+test("selectGate: mergeGate failed se re-arma cuando cambia el SHA", () => {
+  const failed = (): VerifyState => ({ attempts: 1, status: "failed", shas: { api: SHA_A } });
+  assert.equal(selectGate(MERGE, "pre-merge", failed, () => limpio(SHA_B))?.key, "pre-merge");
+  assert.equal(selectGate(MERGE, "pre-merge", failed, () => limpio(SHA_B))?.mergeGate, true);
+});
+
+test("selectGate: mergeGate failed con el mismo SHA no vuelve a correr", () => {
+  const failed = (): VerifyState => ({ attempts: 1, status: "failed", shas: { api: SHA_A } });
+  assert.equal(selectGate(MERGE, "pre-merge", failed, () => limpio(SHA_A)), null);
+});
+
+test("selectGate: mergeGate failed sin headsFor conserva el comportamiento de antes (se salta)", () => {
+  const failed = (): VerifyState => ({ attempts: 1, status: "failed", shas: { api: SHA_A } });
+  assert.equal(selectGate(MERGE, "pre-merge", failed), null);
+});
+
+test("selectGate: mergeGate failed por árbol sucio (sin shas) se re-arma en cuanto el árbol está limpio", () => {
+  const sucio = (): VerifyState => ({ attempts: 0, status: "failed", reason: "hay cambios sin commitear" });
+  assert.equal(selectGate(MERGE, "pre-merge", sucio, () => limpio(SHA_A))?.key, "pre-merge");
+  // Con el árbol todavía sucio no se re-arma: no hay nada nuevo que probar.
+  assert.equal(selectGate(MERGE, "pre-merge", sucio, () => [{ repo: "api", sha: SHA_A, dirty: true }]), null);
+});
+
+test("selectGate: mergeGate failed no se re-arma si los HEADs no se pueden leer", () => {
+  const failed = (): VerifyState => ({ attempts: 1, status: "failed", shas: { api: SHA_A } });
+  assert.equal(selectGate(MERGE, "pre-merge", failed, () => null), null);
+  assert.equal(selectGate(MERGE, "pre-merge", failed, () => []), null);
+});
+
+test("selectGate: mergeGate con los reintentos agotados (commits distintos) queda failed aunque cambie el SHA", () => {
+  const agotado = (): VerifyState => ({ attempts: 3, status: "failed", shas: { api: SHA_A } });
+  assert.equal(selectGate(MERGE, "pre-merge", agotado, () => limpio(SHA_B)), null);
+});
+
+test("selectGate: mergeGate passed se vuelve a considerar con un commit nuevo (la caché decide si corre)", () => {
+  const passed = (): VerifyState => ({ attempts: 0, status: "passed", shas: { api: SHA_A } });
+  assert.equal(selectGate(MERGE, "pre-merge", passed, () => limpio(SHA_A)), null);
+  assert.equal(selectGate(MERGE, "pre-merge", passed, () => limpio(SHA_B))?.key, "pre-merge");
+  assert.equal(selectGate(MERGE, "pre-merge", passed, () => [{ repo: "api", sha: SHA_B, dirty: true }]), null);
+  assert.equal(selectGate(MERGE, "pre-merge", passed), null);
+});
+
+test("selectGate: un gate sin mergeGate failed no se re-arma aunque cambie el SHA", () => {
+  const failed = (): VerifyState => ({ attempts: 2, status: "failed", shas: { api: SHA_A } });
+  assert.equal(selectGate(STAGES, "curl", failed, () => limpio(SHA_B)), null);
+});
+
+test("tickOnce: mergeGate con árbol sucio: failed con reason y sin llamar a run", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let cache = 0;
+    const { d, escrito, corridas } = mergeDeps({
+      cycle: dir,
+      heads: async () => [{ repo: "api", sha: SHA_A, dirty: true }],
+      readState: () => ({ attempts: 1, status: "pending" }),
+      cacheHit: async () => { cache++; return true; },
+    });
+    const informes = await tick(d, new Map());
+    assert.equal(corridas.length, 0);
+    assert.equal(cache, 0);
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "hay cambios sin commitear", attempts: 1 }]);
+    assert.deepEqual(informes.map((i) => i.status), ["failed"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate sucio con SHAs de un PASS cacheado sigue siendo failed, nunca passed", async () => {
+  // cacheHit ignora `dirty`: el driver tiene que mirar la suciedad ANTES de consultar la caché.
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const { d, escrito, corridas } = mergeDeps({
+      cycle: dir,
+      heads: async () => [{ repo: "api", sha: SHA_A, dirty: true }],
+      readState: () => null,
+      cacheHit: async () => true,
+    });
+    await tick(d, new Map());
+    assert.equal(corridas.length, 0);
+    assert.equal(escrito.length, 1);
+    assert.equal(escrito[0].status, "failed");
+    assert.equal(escrito[0].reason, "hay cambios sin commitear");
+    assert.equal(escrito[0].shas, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate con cacheHit: passed sin llamar a run", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const previo: VerifyState = { attempts: 0, status: "passed", shas: { api: SHA_A } };
+    const vistos: unknown[][] = [];
+    const { d, escrito, corridas } = mergeDeps({
+      cycle: dir,
+      heads: async () => limpio(SHA_B),
+      readState: () => previo,
+      cacheHit: async (...args) => { vistos.push(args); return true; },
+    });
+    const informes = await tick(d, new Map());
+    assert.equal(corridas.length, 0);
+    assert.deepEqual(vistos, [[previo, limpio(SHA_B), "/wt", ["e2e_dev/"]]]);
+    assert.equal(escrito.length, 1);
+    const { at, ...resto } = escrito[0];
+    assert.equal(typeof at, "number");
+    assert.deepEqual(resto, { attempts: 0, status: "passed", shas: { api: SHA_B }, durationMs: 0, reason: "caché" });
+    assert.deepEqual(informes.map((i) => i.status), ["passed"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate: PASS se guarda con los SHAs leídos ANTES de correr", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const llamadas: string[] = [];
+    const { d, escrito } = mergeDeps({
+      cycle: dir,
+      heads: async () => { llamadas.push("heads"); return limpio(SHA_A); },
+      run: async () => { llamadas.push("run"); return { ok: true, code: 0, output: "verde" }; },
+    });
+    await tick(d, new Map());
+    assert.equal(llamadas[0], "heads"); // la foto de HEADs se toma antes de correr
+    assert.equal(escrito.length, 1);
+    assert.equal(escrito[0].status, "passed");
+    assert.deepEqual(escrito[0].shas, { api: SHA_A });
+    assert.equal(typeof escrito[0].durationMs, "number");
+    assert.equal(typeof escrito[0].at, "number");
+    assert.equal(escrito[0].reason, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate: un commit durante la corrida no deja passed (ni con los SHAs viejos ni con los nuevos)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let commiteado = false;
+    const { d, escrito } = mergeDeps({
+      cycle: dir,
+      readState: () => ({ attempts: 1, status: "pending" }),
+      heads: async () => (commiteado ? limpio(SHA_B) : limpio(SHA_A)),
+      run: async () => { commiteado = true; return { ok: true, code: 0, output: "verde" }; },
+    });
+    await tick(d, new Map());
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "el árbol cambió durante la corrida", attempts: 1 }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate: árbol limpio antes y sucio después de un PASS → no passed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let corrio = false;
+    const { d, escrito } = mergeDeps({
+      cycle: dir,
+      heads: async () => (corrio ? [{ repo: "api", sha: SHA_A, dirty: true }] : limpio(SHA_A)),
+      run: async () => { corrio = true; return { ok: true, code: 0, output: "verde" }; },
+    });
+    await tick(d, new Map());
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "el árbol cambió durante la corrida", attempts: 0 }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate: HEADs ilegibles después de un PASS → no passed", async () => {
+  for (const despues of [null, []]) {
+    const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+    try {
+      let corrio = false;
+      const { d, escrito } = mergeDeps({
+        cycle: dir,
+        heads: async () => (corrio ? despues : limpio(SHA_A)),
+        run: async () => { corrio = true; return { ok: true, code: 0, output: "verde" }; },
+      });
+      await tick(d, new Map());
+      assert.equal(escrito.length, 1);
+      assert.equal(escrito[0].status, "failed");
+      assert.equal(escrito[0].shas, undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("tickOnce: mergeGate un FAIL no vuelve a leer los HEADs (sólo un PASS se re-valida)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let lecturas = 0;
+    const { d, escrito } = mergeDeps({
+      cycle: dir,
+      heads: async () => { lecturas++; return limpio(SHA_A); },
+      run: async () => ({ ok: false, code: 1, output: "rojo" }),
+    });
+    await tick(d, new Map());
+    assert.equal(lecturas, 1);
+    assert.equal(escrito[0].status, "failed");
+    assert.deepEqual(escrito[0].shas, { api: SHA_A });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate heads null → failed con reason, sin gastar intento, sin run", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const errores: unknown[] = [];
+    const { d, escrito, corridas } = mergeDeps({
+      cycle: dir,
+      readState: () => ({ attempts: 1, status: "pending" }),
+      heads: async () => null,
+      logError: (e) => void errores.push(e),
+    });
+    const informes = await tick(d, new Map());
+    assert.equal(corridas.length, 0);
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "no se pudieron leer los HEADs del worktree", attempts: 1 }]);
+    assert.deepEqual(informes.map((i) => i.status), ["failed"]);
+    assert.equal(errores.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate heads vacío → failed con reason", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const { d, escrito, corridas } = mergeDeps({ cycle: dir, heads: async () => [], logError: () => {} });
+    await tick(d, new Map());
+    assert.equal(corridas.length, 0);
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "no encontré repos con tests en el worktree", attempts: 0 }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate HEADs ilegibles no repite logError ni reescribe en ticks sucesivos; legibles después → se re-arma y corre", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const errores: unknown[] = [];
+    let estado: VerifyState | null = null;
+    let heads: Awaited<ReturnType<DriverDeps["heads"]>> = null;
+    const { d, escrito, corridas } = mergeDeps({
+      cycle: dir,
+      heads: async () => heads,
+      readState: () => estado,
+      writeState: (_c, _k, state) => { estado = state; escrito.push(state); },
+      logError: (e) => void errores.push(e),
+    });
+    await tick(d, new Map());
+    await tick(d, new Map());
+    await tick(d, new Map());
+    assert.equal(errores.length, 1);
+    assert.equal(escrito.length, 1);
+    assert.equal(corridas.length, 0);
+
+    heads = limpio(SHA_A);
+    await tick(d, new Map());
+    assert.equal(corridas.length, 1);
+    assert.equal(escrito.length, 2);
+    assert.equal(escrito[1].status, "passed");
+    assert.deepEqual(escrito[1].shas, { api: SHA_A });
+    assert.equal(errores.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: con el worker en una etapa anterior al gate de merge no se leen HEADs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let lecturas = 0;
+    const { d, corridas } = mergeDeps({ cycle: dir, detect: () => "implementing", heads: async () => { lecturas++; return limpio(SHA_A); } });
+    assert.deepEqual(await tick(d, new Map()), []);
+    assert.equal(lecturas, 0);
+    assert.equal(corridas.length, 0);
+    // Sin etapa alcanzada tampoco.
+    const { d: d2 } = mergeDeps({ cycle: dir, detect: () => null, heads: async () => { lecturas++; return limpio(SHA_A); } });
+    await tick(d2, new Map());
+    assert.equal(lecturas, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate passed en A → commit B limpio no-e2e → corre → FAIL: failed, attempts+1, shas B", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const { d, escrito, corridas } = mergeDeps({
+      cycle: dir,
+      readState: () => ({ attempts: 1, status: "passed", shas: { api: SHA_A } }),
+      heads: async () => limpio(SHA_B),
+      cacheHit: async () => false, // el diff A→B toca código de producto
+      run: async (cmd, cwd, opts) => { corridas.push({ cmd, cwd, opts }); return { ok: false, code: 1, output: "rojo" }; },
+    });
+    await tick(d, new Map());
+    assert.equal(corridas.length, 1);
+    assert.equal(escrito.length, 1);
+    assert.equal(escrito[0].status, "failed");
+    assert.equal(escrito[0].attempts, 2);
+    assert.deepEqual(escrito[0].shas, { api: SHA_B });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate FAIL queda failed con sus SHAs y gasta un intento (maxRetries cuenta commits)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const { d, escrito } = mergeDeps({ cycle: dir, run: async () => ({ ok: false, code: 1, output: "rojo" }) });
+    await tick(d, new Map());
+    assert.equal(escrito.length, 1);
+    assert.equal(escrito[0].status, "failed");
+    assert.equal(escrito[0].attempts, 1);
+    assert.deepEqual(escrito[0].shas, { api: SHA_A });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate failed con el mismo SHA no vuelve a correr", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const { d, escrito, corridas } = mergeDeps({
+      cycle: dir,
+      readState: () => ({ attempts: 1, status: "failed", shas: { api: SHA_A } }),
+    });
+    assert.deepEqual(await tick(d, new Map()), []);
+    assert.equal(corridas.length, 0);
+    assert.deepEqual(escrito, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate failed se re-arma cuando cambia el SHA (sin esperar al armado en memoria)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const { d, escrito, corridas } = mergeDeps({
+      cycle: dir,
+      heads: async () => limpio(SHA_B),
+      readState: () => ({ attempts: 1, status: "failed", shas: { api: SHA_A } }),
+    });
+    await tick(d, new Map());
+    assert.equal(corridas.length, 1);
+    assert.equal(escrito[0].status, "passed");
+    assert.equal(escrito[0].attempts, 1);
+    assert.deepEqual(escrito[0].shas, { api: SHA_B });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: mergeGate nunca corre con el worker ocupado", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const { d, escrito, corridas } = mergeDeps({ cycle: dir, listSessions: async () => [{ name: "cowork-x", busy: true }] });
+    assert.deepEqual(await tick(d, new Map()), []);
+    assert.equal(corridas.length, 0);
+    assert.deepEqual(escrito, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: run recibe timeoutMs del repo o, si falta, el global, y env con UNIT_GATE_REPORTS_DIR", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const repos: string[] = [];
+    const config = { timeoutMs: 90 * 60_000, env: { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_XDIST: "4" } };
+    // Merge gate y gate normal: los dos toman el timeout y el entorno de gateConfig(repo).
+    for (const stages of [MERGE, STAGES]) {
+      const { d, corridas } = mergeDeps({
+        cycle: dir,
+        flowFor: () => stages,
+        detect: () => (stages === MERGE ? "pre-merge" : "tests"),
+        gateConfig: (repo) => { repos.push(repo); return config; },
+      });
+      await tick(d, new Map());
+      assert.deepEqual(corridas.map((c) => c.opts), [config]);
+    }
+    assert.deepEqual(repos, ["api", "api"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tickOnce: un gate sin mergeGate no lee HEADs ni consulta la caché", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let git = 0;
+    const d = deps({
+      cycle: dir,
+      heads: async () => { git++; return limpio(SHA_A); },
+      cacheHit: async () => { git++; return true; },
+    });
+    const informes = await tick(d, new Map());
+    assert.equal(git, 0);
+    assert.deepEqual(informes.map((i) => i.status), ["passed"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- concurrencia: un cupo global de corridas y una cola visible ----
+
+function diferido<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+type Resultado = Awaited<ReturnType<DriverDeps["run"]>>;
+
+/**
+ * Varias sesiones de workflow sin disco: el estado vive en un Map por `ciclo:etapa` (el ciclo es el
+ * nombre de la sesión) y cada corrida queda colgada en un diferido hasta que la prueba la suelta.
+ */
+function flota(over: Partial<DriverDeps> & { sesiones: string[] }) {
+  const estados = new Map<string, VerifyState>();
+  const escrituras: Array<[string, VerifyState]> = [];
+  const corridas = new Map<string, ReturnType<typeof diferido<Resultado>>>();
+  const lanzadas: string[] = [];
+  const informes: GateReport[] = [];
+  let sesiones = over.sesiones;
+  const d = deps({
+    cycle: "",
+    listSessions: async () => sesiones.map((name) => ({ name, busy: false })),
+    launchOf: (s) => ({ mode: "workflow", repo: "api", worktree: `/wt/${s}` }),
+    cycleFor: (s) => s,
+    readState: (c, k) => estados.get(`${c}:${k}`) ?? null,
+    writeState: (c, k, state) => { estados.set(`${c}:${k}`, state); escrituras.push([c, state]); },
+    run: (_cmd, cwd) => {
+      const s = cwd.replace("/wt/", "");
+      lanzadas.push(s);
+      const x = diferido<Resultado>();
+      corridas.set(s, x);
+      return x.promise;
+    },
+    ...over,
+  });
+  const slots: GateSlots = { max: 2, inFlight: new Map() };
+  return {
+    d,
+    slots,
+    estados,
+    escrituras,
+    corridas,
+    lanzadas,
+    informes,
+    estado: (s: string, k = "tests") => estados.get(`${s}:${k}`),
+    setSesiones: (xs: string[]) => { sesiones = xs; },
+    tick: (armed = new Map<string, boolean>()) => tickOnce(d, armed, slots, (r) => void informes.push(r)),
+    /** Suelta la corrida de `s` y espera a que su desenlace quede escrito. */
+    terminar: async (s: string, ok = true, k = "tests") => {
+      const enVuelo = slots.inFlight.get(`${s}:${k}`);
+      corridas.get(s)!.resolve({ ok, code: ok ? 0 : 1, output: ok ? "verde" : "rojo" });
+      await enVuelo;
+    },
+  };
+}
+
+test("concurrencia: con max 2 y 3 sesiones listas, corren 2 y la tercera queda queued", async () => {
+  const f = flota({ sesiones: ["s1", "s2", "s3"] });
+  await f.tick(); // no espera a las corridas: vuelve con dos colgadas
+  assert.deepEqual(f.lanzadas, ["s1", "s2"]);
+  assert.deepEqual([...f.slots.inFlight.keys()], ["s1:tests", "s2:tests"]);
+  assert.deepEqual(f.estado("s1"), { attempts: 0, status: "pending", running: true, queued: false });
+  assert.deepEqual(f.estado("s2"), { attempts: 0, status: "pending", running: true, queued: false });
+  assert.deepEqual(f.estado("s3"), { attempts: 0, status: "pending", queued: true });
+  assert.deepEqual(f.informes, []);
+
+  // Otro tick con los cupos llenos: nada nuevo corre y la cola no se reescribe.
+  const antes = f.escrituras.length;
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1", "s2"]);
+  assert.equal(f.escrituras.length, antes);
+});
+
+test("concurrencia: al terminar una, el siguiente tick lanza la encolada", async () => {
+  const f = flota({ sesiones: ["s1", "s2", "s3"] });
+  await f.tick();
+  await f.terminar("s1");
+
+  // El desenlace limpia `running` y se informa una vez, con la misma forma de siempre.
+  assert.deepEqual(f.estado("s1"), { attempts: 0, status: "passed" });
+  assert.deepEqual(f.informes, [{ session: "s1", stageKey: "tests", status: "passed", attempts: 0, output: "verde" }]);
+  assert.equal(f.slots.inFlight.has("s1:tests"), false);
+
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1", "s2", "s3"]);
+  assert.deepEqual(f.estado("s3"), { attempts: 0, status: "pending", running: true, queued: false });
+});
+
+test("concurrencia: una sesión ya en vuelo no se lanza dos veces", async () => {
+  const f = flota({ sesiones: ["s1"] });
+  await f.tick();
+  const antes = f.escrituras.length;
+  await f.tick();
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.equal(f.escrituras.length, antes); // en vuelo: ni se relanza ni se reescribe
+  assert.deepEqual(f.estado("s1"), { attempts: 0, status: "pending", running: true, queued: false });
+});
+
+test("concurrencia: el desenlace se calcula contra el estado del lanzamiento, no contra uno más nuevo", async () => {
+  const f = flota({ sesiones: ["s1"] });
+  await f.tick();
+  // Algo reescribe el estado a media corrida: el desenlace no lo vuelve a leer ni cuenta doble.
+  f.estados.set("s1:tests", { attempts: 5, status: "pending", running: true });
+  await f.terminar("s1", false);
+  assert.deepEqual(f.estado("s1"), { attempts: 1, status: "pending" });
+  assert.deepEqual(f.informes.map((i) => [i.status, i.attempts]), [["pending", 1]]);
+});
+
+test("concurrencia: sesión que desaparece del inventario sale de la cola sin consumir cupo", async () => {
+  const f = flota({ sesiones: ["s1", "s2", "s3"] });
+  await f.tick();
+  assert.equal(f.estado("s3")?.queued, true);
+
+  f.setSesiones(["s1", "s2"]);
+  await f.tick();
+  assert.notEqual(f.estado("s3")?.queued, true); // ya no está en la cola
+  assert.equal(f.estado("s3")?.running, undefined);
+
+  // Con un cupo libre no se lanza a la desaparecida.
+  await f.terminar("s1");
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1", "s2"]);
+  assert.equal(f.slots.inFlight.size, 1);
+});
+
+test("concurrencia: una sesión que deja de ser de workflow también sale de la cola", async () => {
+  let terminal = false;
+  const f = flota({
+    sesiones: ["s1", "s2"],
+    launchOf: (s) => (s === "s2" && terminal ? { mode: "terminal", repo: "api" } : { mode: "workflow", repo: "api", worktree: `/wt/${s}` }),
+  });
+  f.slots.max = 1;
+  await f.tick();
+  assert.equal(f.estado("s2")?.queued, true);
+  terminal = true;
+  await f.tick();
+  assert.notEqual(f.estado("s2")?.queued, true);
+});
+
+test("concurrencia: una corrida huérfana (running sin proceso) se vuelve a encolar sin gastar intento", async () => {
+  // Ronin se reinició a media corrida: en disco quedó `running: true` y nadie la tiene en vuelo.
+  // Aunque sea un reintento (attempts 1) no espera al armado: la corrida ya estaba autorizada.
+  const f = flota({ sesiones: ["s1", "s2"] });
+  f.estados.set("s1:tests", { attempts: 1, status: "pending", running: true, queued: false });
+  f.estados.set("s2:tests", { attempts: 1, status: "pending", running: true, queued: false });
+  f.slots.max = 1;
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.deepEqual(f.estado("s1"), { attempts: 1, status: "pending", running: true, queued: false });
+  // Sin cupo, la otra huérfana queda en la cola (no "corriendo" sin proceso).
+  assert.deepEqual(f.estado("s2"), { attempts: 1, status: "pending", queued: true });
+
+  await f.terminar("s1", false);
+  assert.deepEqual(f.estado("s1"), { attempts: 2, status: "failed" }); // un solo intento gastado
+});
+
+test("concurrencia: una huérfana que ya no puede correr (worker ocupado) pierde la marca running", async () => {
+  const f = flota({ sesiones: ["s1"], listSessions: async () => [{ name: "s1", busy: true }] });
+  f.estados.set("s1:tests", { attempts: 0, status: "pending", running: true });
+  await f.tick();
+  assert.deepEqual(f.lanzadas, []);
+  assert.deepEqual(f.estado("s1"), { attempts: 0, status: "pending" });
+});
+
+test("concurrencia: caché y árbol sucio del gate de merge no esperan cupo", async () => {
+  // Decidir no gasta cupo: sólo una corrida real lo hace.
+  const f = flota({
+    sesiones: ["s1", "s2", "m-cache", "m-sucio"],
+    flowFor: (s) => (s.startsWith("m-") ? MERGE : STAGES),
+    detect: (c) => (c.startsWith("m-") ? "pre-merge" : "tests"),
+    heads: async (wt) => (wt.endsWith("sucio") ? [{ repo: "api", sha: SHA_A, dirty: true }] : limpio(SHA_A)),
+    cacheHit: async () => true,
+  });
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1", "s2"]);
+  assert.equal(f.estado("m-cache", "pre-merge")?.status, "passed");
+  assert.equal(f.estado("m-cache", "pre-merge")?.queued, undefined);
+  assert.equal(f.estado("m-sucio", "pre-merge")?.status, "failed");
+  assert.equal(f.estado("m-sucio", "pre-merge")?.queued, undefined);
+  assert.deepEqual(f.informes.map((i) => i.session).sort(), ["m-cache", "m-sucio"]);
+});
+
+test("concurrencia: gate de merge y gate normal comparten el mismo cupo; el merge re-valida HEADs al terminar", async () => {
+  let commiteado = false;
+  const f = flota({
+    sesiones: ["s1", "m1"],
+    flowFor: (s) => (s.startsWith("m") ? MERGE : STAGES),
+    detect: (c) => (c.startsWith("m") ? "pre-merge" : "tests"),
+    heads: async () => (commiteado ? limpio(SHA_B) : limpio(SHA_A)),
+  });
+  f.slots.max = 1;
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.equal(f.estado("m1", "pre-merge")?.queued, true);
+
+  await f.terminar("s1");
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1", "m1"]);
+  commiteado = true; // un commit a media corrida
+  await f.terminar("m1", true, "pre-merge");
+  assert.deepEqual(sinAt(f.estado("m1", "pre-merge")), { status: "failed", reason: "el árbol cambió durante la corrida", attempts: 0 });
+});
+
+test("concurrencia: un run que lanza no tumba el driver, se registra y libera el cupo", async () => {
+  const errores: unknown[] = [];
+  const f = flota({ sesiones: ["s1"], run: async () => { throw new Error("spawn falló"); }, logError: (e) => void errores.push(e) });
+  await f.tick();
+  await Promise.all([...f.slots.inFlight.values()]);
+  assert.equal(f.slots.inFlight.size, 0);
+  assert.equal(errores.length, 1);
+  assert.equal(f.estado("s1")?.running, undefined);
+  assert.deepEqual(f.informes, []);
+});
+
+test("startVerifyDriver: el cupo se lee en cada tick (maxConcurrent sin reiniciar)", async () => {
+  mock.timers.enable({ apis: ["setInterval"] });
+  try {
+    let max = 1;
+    const f = flota({ sesiones: ["s1", "s2", "s3"], maxConcurrent: () => max });
+    const handle = startVerifyDriver(f.d, 1000);
+    // Drena hasta que el tick termine (las tres sesiones decididas), con tope: no depende de
+    // cuántos `await` tenga el tick.
+    const hasta = async (listo: () => boolean) => {
+      for (let i = 0; i < 1000 && !listo(); i++) await new Promise((r) => setImmediate(r));
+      assert.ok(listo(), "el tick no terminó");
+    };
+    mock.timers.tick(1000);
+    await hasta(() => f.estado("s3")?.queued === true);
+    assert.deepEqual(f.lanzadas, ["s1"]);
+    max = 3;
+    mock.timers.tick(1000);
+    await hasta(() => f.lanzadas.length === 3);
+    assert.deepEqual(f.lanzadas, ["s1", "s2", "s3"]);
+    handle.stop();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("concurrencia: un gate de merge passed que sale de la cola sin correr queda como estaba", async () => {
+  let ocupado = false;
+  const f = flota({
+    sesiones: ["s1", "m1"],
+    listSessions: async () => [{ name: "s1", busy: false }, { name: "m1", busy: ocupado }],
+    flowFor: (s) => (s.startsWith("m") ? MERGE : STAGES),
+    detect: (c) => (c.startsWith("m") ? "pre-merge" : "tests"),
+    heads: async () => limpio(SHA_B),
+  });
+  const passedA: VerifyState = { attempts: 0, status: "passed", shas: { api: SHA_A }, durationMs: 5, at: 1 };
+  f.estados.set("m1:pre-merge", passedA);
+  f.slots.max = 1;
+  await f.tick();
+  assert.deepEqual(f.estado("m1", "pre-merge"), { ...passedA, queued: true });
+  ocupado = true;
+  await f.tick();
+  assert.deepEqual(f.estado("m1", "pre-merge"), passedA);
+});
+
+test("concurrencia: una huérfana encolada conserva su autorización y corre en cuanto hay cupo", async () => {
+  const f = flota({ sesiones: ["s1", "s2"] });
+  f.estados.set("s1:tests", { attempts: 1, status: "pending", running: true });
+  f.estados.set("s2:tests", { attempts: 1, status: "pending", running: true });
+  f.slots.max = 1;
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.equal(f.estado("s2")?.queued, true);
+  await f.terminar("s1");
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1", "s2"]);
+});
+
+test("concurrencia: un reintento armado que espera en la cola corre en cuanto hay cupo, también tras un reinicio", async () => {
+  const f = flota({ sesiones: ["s1", "s2"] });
+  f.estados.set("s2:tests", { attempts: 1, status: "pending" });
+  f.slots.max = 1;
+  await f.tick(new Map([["s2:tests", true]]));
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.equal(f.estado("s2")?.queued, true);
+  await f.terminar("s1");
+  // Armado en memoria vacío (como tras un reinicio): `queued` en disco basta.
+  await f.tick(new Map());
+  assert.deepEqual(f.lanzadas, ["s1", "s2"]);
+});
+
+test("concurrencia: dos gates de la misma sesión nunca corren a la vez en el mismo worktree", async () => {
+  // B (normal, más temprano) corre; mientras, el gate de merge A —con el worker en él— se re-arma
+  // por un commit nuevo. A no se lanza hasta que B termine.
+  const FLUJO: GateStage[] = [
+    { key: "tests", label: "Pruebas", verifyCmd: "correr-pruebas" },
+    { key: "pre-merge", label: "Gate", verifyCmd: "unit-gate", mergeGate: true },
+  ];
+  let heads = limpio(SHA_A);
+  const f = flota({ sesiones: ["s1"], flowFor: () => FLUJO, detect: () => "pre-merge", heads: async () => heads });
+  f.estados.set("s1:pre-merge", { attempts: 0, status: "passed", shas: { api: SHA_A } });
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.ok(f.slots.inFlight.has("s1:tests"));
+
+  heads = limpio(SHA_B);
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1"]);
+  assert.equal(f.estado("s1", "pre-merge")?.running, undefined);
+
+  await f.terminar("s1");
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["s1", "s1"]);
+  assert.ok(f.slots.inFlight.has("s1:pre-merge"));
+});
+
+test("concurrencia: un logError que lanza en el rechazo de una corrida no deja una promesa rechazada", async () => {
+  const f = flota({ sesiones: ["s1"], run: async () => { throw new Error("spawn falló"); }, logError: () => { throw new Error("log roto"); } });
+  await f.tick();
+  const enVuelo = [...f.slots.inFlight.values()];
+  assert.equal(enVuelo.length, 1);
+  await enVuelo[0]; // rechazaría si el error del log se escapara
+  assert.equal(f.slots.inFlight.size, 0);
+});
+
+// ---- Task 7: Ronin le entrega al worker el veredicto del gate de merge ----
+
+test("verdictMessage PASS: sha corto del primer sub-repo, minutos y la etapa siguiente", () => {
+  const state: VerifyState = { attempts: 0, status: "passed", shas: { api: SHA_A, web: SHA_B }, durationMs: 4 * 60_000 + 10_000, at: 1 };
+  assert.equal(verdictMessage("pre-merge", state, "/ciclo", "pr"), "UNIT-GATE: PASS (aaaaaaa, 4 min) — continúa con pr");
+});
+
+test("verdictMessage PASS por caché: dice (caché) en lugar de la duración", () => {
+  const state: VerifyState = { attempts: 0, status: "passed", shas: { api: SHA_B }, durationMs: 0, at: 1, reason: "caché" };
+  assert.equal(verdictMessage("pre-merge", state, "/ciclo", "pr"), "UNIT-GATE: PASS (bbbbbbb, caché) — continúa con pr");
+});
+
+test("verdictMessage PASS sin etapa siguiente: continúa con la siguiente etapa", () => {
+  const state: VerifyState = { attempts: 0, status: "passed", shas: { api: SHA_A }, durationMs: 20_000, at: 1 };
+  assert.equal(verdictMessage("pre-merge", state, "/ciclo", null), "UNIT-GATE: PASS (aaaaaaa, 1 min) — continúa con la siguiente etapa");
+});
+
+test("verdictMessage FAIL con reason: apunta al verify json del ciclo y al log del gate", () => {
+  const state: VerifyState = { attempts: 0, status: "failed", reason: "hay cambios sin commitear" };
+  assert.equal(
+    verdictMessage("pre-merge", state, "/ciclo", "pr", "/wt"),
+    "UNIT-GATE: FAIL — hay cambios sin commitear — lee /ciclo/verify-pre-merge.log (salida del gate), /ciclo/verify-pre-merge.json y unit-gate.log en /wt/<sub-repo>/reports/ronin-gate/; arregla con tests dirigidos, commitea y vuelve a tocar el sentinela",
+  );
+});
+
+test("verdictMessage FAIL sin reason: sin el tramo de la razón", () => {
+  const state: VerifyState = { attempts: 1, status: "failed", shas: { api: SHA_A } };
+  assert.equal(
+    verdictMessage("pre-merge", state, "/ciclo", "pr", "/wt"),
+    "UNIT-GATE: FAIL — lee /ciclo/verify-pre-merge.log (salida del gate), /ciclo/verify-pre-merge.json y unit-gate.log en /wt/<sub-repo>/reports/ronin-gate/; arregla con tests dirigidos, commitea y vuelve a tocar el sentinela",
+  );
+});
+
+/**
+ * Una sesión con gate de merge y estado en memoria. `notify` responde con lo que diga `entrega`
+ * (true, false o lanzar). `tick` espera corridas Y entregas: así las pruebas no duermen.
+ */
+function avisos(over: Partial<DriverDeps> & { entrega?: () => Promise<boolean>; cycle?: string } = {}) {
+  let estado: VerifyState | null = null;
+  const escritos: VerifyState[] = [];
+  const mensajes: Array<[string, string]> = [];
+  const { entrega = async () => true, ...resto } = over;
+  const { d, corridas } = mergeDeps({
+    cycle: "/ciclo",
+    readState: () => estado,
+    writeState: (_c, _k, state) => { estado = state; escritos.push(state); },
+    notify: (session, text) => { mensajes.push([session, text]); return entrega(); },
+    ...resto,
+  });
+  const slots: GateSlots = { max: 99, inFlight: new Map() };
+  return {
+    d,
+    slots,
+    escritos,
+    mensajes,
+    corridas,
+    estado: () => estado,
+    setEstado: (s: VerifyState | null) => { estado = s; },
+    tick: async () => {
+      await tickOnce(d, new Map(), slots);
+      await Promise.all([...slots.inFlight.values()]);
+      await Promise.all([...(slots.entregas ?? [])]);
+    },
+  };
+}
+
+test("notify: mergeGate passed → notify se llama una vez y el estado queda notify:\"sent\"", async () => {
+  const a = avisos();
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  assert.equal(a.mensajes[0][0], "cowork-x");
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: PASS \(aaaaaaa, \d+ min\) — continúa con pr$/);
+  assert.equal(a.estado()?.status, "passed");
+  assert.equal(a.estado()?.notify, "sent");
+});
+
+test("notify: un segundo tick no vuelve a notificar", async () => {
+  const a = avisos();
+  await a.tick();
+  await a.tick();
+  await a.tick();
+  assert.equal(a.corridas.length, 1);
+  assert.equal(a.mensajes.length, 1);
+});
+
+test("notify: entrega fallida → notify:\"failed\" y no se reintenta en el siguiente tick", async () => {
+  const a = avisos({ entrega: async () => false });
+  await a.tick();
+  assert.equal(a.estado()?.notify, "failed");
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  assert.equal(a.estado()?.notify, "failed");
+});
+
+test("notify: una entrega que lanza cuenta como fallida y nunca sale del tick", async () => {
+  const a = avisos({ entrega: async () => { throw new Error("tmux murió"); }, logError: () => {} });
+  await a.tick();
+  assert.equal(a.estado()?.notify, "failed");
+});
+
+test("notify: un notify que lanza de forma síncrona también cuenta como fallido", async () => {
+  const a = avisos({ entrega: () => { throw new Error("síncrono"); }, logError: () => {} });
+  await a.tick();
+  assert.equal(a.estado()?.notify, "failed");
+});
+
+test("notify: la entrega no bloquea el tick (el desenlace queda escrito antes de que se entregue)", async () => {
+  const x = diferido<boolean>();
+  const a = avisos({ entrega: () => x.promise, cacheHit: async () => true });
+  await tickOnce(a.d, new Map(), a.slots); // si esperara la entrega, esto no volvería nunca
+  assert.equal(a.estado()?.status, "passed");
+  assert.equal(a.estado()?.notify, undefined);
+  x.resolve(true);
+  await Promise.all([...(a.slots.entregas ?? [])]);
+  assert.equal(a.estado()?.notify, "sent");
+});
+
+test("notify: PASS por caché, árbol sucio y FAIL de corrida notifican con su texto", async () => {
+  const cache = avisos({ cacheHit: async () => true });
+  await cache.tick();
+  assert.deepEqual(cache.mensajes.map(([, t]) => t), ["UNIT-GATE: PASS (aaaaaaa, caché) — continúa con pr"]);
+
+  const sucio = avisos({ heads: async () => [{ repo: "api", sha: SHA_A, dirty: true }] });
+  await sucio.tick();
+  await sucio.tick();
+  assert.equal(sucio.mensajes.length, 1);
+  assert.match(sucio.mensajes[0][1], /^UNIT-GATE: FAIL — hay cambios sin commitear — lee \/ciclo\/verify-pre-merge\.log/);
+  assert.equal(sucio.estado()?.notify, "sent");
+
+  const rojo = avisos({ run: async () => ({ ok: false, code: 1, output: "rojo" }) });
+  await rojo.tick();
+  await rojo.tick();
+  assert.equal(rojo.mensajes.length, 1);
+  assert.match(rojo.mensajes[0][1], /^UNIT-GATE: FAIL — lee \/ciclo\/verify-pre-merge\.log \(salida del gate\), \/ciclo\/verify-pre-merge\.json y unit-gate\.log en \/wt\//);
+});
+
+test("notify: HEADs ilegibles avisan una sola vez aunque pasen varios ticks", async () => {
+  const a = avisos({ heads: async () => null, logError: () => {} });
+  await a.tick();
+  await a.tick();
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — no se pudieron leer los HEADs del worktree — /);
+});
+
+test("notify: el árbol cambió durante la corrida → se avisa el FAIL", async () => {
+  let n = 0;
+  const a = avisos({ heads: async () => (n++ === 0 ? limpio(SHA_A) : limpio(SHA_B)) });
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — el árbol cambió durante la corrida — /);
+});
+
+test("notify: un desenlace nuevo tras re-armar (SHA nuevo) vuelve a notificar", async () => {
+  let heads = limpio(SHA_A);
+  let corridas = 0;
+  const a = avisos({ heads: async () => heads, run: async () => { corridas++; return { ok: false, code: 1, output: "rojo" }; } });
+  await a.tick();
+  heads = limpio(SHA_B);
+  await a.tick();
+  assert.equal(corridas, 2);
+  assert.equal(a.mensajes.length, 2);
+  assert.deepEqual(a.estado()?.shas, { api: SHA_B });
+  assert.equal(a.estado()?.notify, "sent");
+});
+
+test("notify: una entrega que llega tarde no marca un desenlace más nuevo", async () => {
+  const x = diferido<boolean>();
+  const a = avisos({ entrega: () => x.promise, cacheHit: async () => true });
+  await tickOnce(a.d, new Map(), a.slots);
+  // Mientras la entrega espera, el gate se re-arma y escribe otro desenlace.
+  a.setEstado({ attempts: 1, status: "failed", shas: { api: SHA_B }, at: 99 });
+  x.resolve(true);
+  await Promise.all([...(a.slots.entregas ?? [])]);
+  assert.equal(a.estado()?.notify, undefined);
+});
+
+test("notify: gate sin mergeGate no notifica", async () => {
+  const mensajes: string[] = [];
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const d = deps({ cycle: dir, notify: async (_s, t) => { mensajes.push(t); return true; } });
+    const slots: GateSlots = { max: 99, inFlight: new Map() };
+    await tickOnce(d, new Map(), slots);
+    await Promise.all([...slots.inFlight.values()]);
+    await Promise.all([...(slots.entregas ?? [])]);
+    assert.deepEqual(mensajes, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("notify: con el estado real en disco (otro orden de claves al releer) también queda marcado", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-notify-"));
+  try {
+    const a = avisos({
+      cycle: dir,
+      readState: readVerifyState,
+      writeState: writeVerifyState,
+      heads: async () => [{ repo: "api", sha: SHA_A, dirty: true }],
+    });
+    await a.tick();
+    assert.equal(a.mensajes.length, 1);
+    assert.equal(readVerifyState(dir, "pre-merge")?.notify, "sent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- Task 7, ronda 1: entregas perdidas por reinicio ----
+
+test("notify: un desenlace viejo sin notify (entrega perdida en un reinicio) queda notify:\"failed\" sin reenviar", async () => {
+  const a = avisos({ now: () => 10 * 60_000 + 1_000 });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, durationMs: 5, at: 1_000 });
+  await a.tick();
+  assert.equal(a.mensajes.length, 0);
+  assert.equal(a.estado()?.notify, "failed");
+  assert.equal(a.estado()?.status, "passed");
+  await a.tick();
+  assert.equal(a.escritos.length, 1); // se marca una sola vez
+});
+
+test("notify: un desenlace reciente sin notify no se marca (su entrega puede seguir en curso en otro proceso)", async () => {
+  const a = avisos({ now: () => 30_000 });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, durationMs: 5, at: 1_000 });
+  await a.tick();
+  assert.equal(a.estado()?.notify, undefined);
+  assert.equal(a.escritos.length, 0);
+});
+
+test("notify: una entrega en curso en este proceso no se da por perdida aunque pase el plazo", async () => {
+  const x = diferido<boolean>();
+  let ahora = Date.now();
+  const a = avisos({ entrega: () => x.promise, cacheHit: async () => true, now: () => ahora });
+  await tickOnce(a.d, new Map(), a.slots);
+  ahora += 60 * 60_000;
+  await tickOnce(a.d, new Map(), a.slots);
+  assert.equal(a.estado()?.notify, undefined);
+  x.resolve(true);
+  await Promise.all([...(a.slots.entregas ?? [])]);
+  assert.equal(a.estado()?.notify, "sent");
+});
+
+test("notify: los desenlaces sin corrida (sucio, HEADs ilegibles, árbol cambiado) también llevan `at`", async () => {
+  const sucio = avisos({ heads: async () => [{ repo: "api", sha: SHA_A, dirty: true }] });
+  await sucio.tick();
+  assert.equal(typeof sucio.estado()?.at, "number");
+  const ilegible = avisos({ heads: async () => null, logError: () => {} });
+  await ilegible.tick();
+  assert.equal(typeof ilegible.estado()?.at, "number");
+  let n = 0;
+  const cambiado = avisos({ heads: async () => (n++ === 0 ? limpio(SHA_A) : limpio(SHA_B)) });
+  await cambiado.tick();
+  assert.equal(cambiado.estado()?.reason, "el árbol cambió durante la corrida");
+  assert.equal(typeof cambiado.estado()?.at, "number");
+});
+
+test("notify: un gate normal viejo sin notify no se marca (sólo el de merge avisa)", async () => {
+  const escritos: VerifyState[] = [];
+  const d = deps({
+    cycle: "/c",
+    detect: () => "curl",
+    now: () => 10 ** 9,
+    readState: () => ({ attempts: 0, status: "passed", at: 1 }),
+    writeState: (_c, _k, s) => void escritos.push(s),
+  });
+  await tickOnce(d, new Map(), { max: 99, inFlight: new Map() });
+  assert.deepEqual(escritos, []);
+});
+
+// ---- Revisión final: SIN-GATE, intentos agotados, log del gate, re-arme tras el merge, provisión ----
+
+const SIN_GATE: GateStage[] = [
+  { key: "implementing", label: "Impl" },
+  { key: "pre-merge", label: "Gate pre-merge" },
+  { key: "pr", label: "PR" },
+];
+
+test("SIN-GATE: pre-merge sin verifyCmd → avisa una vez SIN-GATE con la etapa siguiente, sin correr ni leer HEADs", async () => {
+  let lecturas = 0;
+  const a = avisos({ flowFor: () => SIN_GATE, heads: async () => { lecturas++; return limpio(SHA_A); } });
+  await a.tick();
+  await a.tick();
+  assert.deepEqual(a.mensajes.map(([, t]) => t), ["UNIT-GATE: SIN-GATE — este flujo no tiene gate de unitarias configurado; continúa con pr"]);
+  assert.equal(a.corridas.length, 0);
+  assert.equal(lecturas, 0);
+  assert.equal(a.estado()?.status, "sin-gate");
+  assert.notEqual(a.estado()?.status, "passed");
+  assert.equal(a.estado()?.notify, "sent");
+});
+
+test("SIN-GATE: ni con el worker ocupado, ni antes de pre-merge, ni después de pasarla", async () => {
+  const ocupado = avisos({ flowFor: () => SIN_GATE, listSessions: async () => [{ name: "cowork-x", busy: true }] });
+  await ocupado.tick();
+  const antes = avisos({ flowFor: () => SIN_GATE, detect: () => "implementing" });
+  await antes.tick();
+  const despues = avisos({ flowFor: () => SIN_GATE, detect: () => "pr" });
+  await despues.tick();
+  for (const a of [ocupado, antes, despues]) {
+    assert.deepEqual(a.mensajes, []);
+    assert.deepEqual(a.escritos, []);
+  }
+});
+
+test("SIN-GATE: una entrega fallida queda notify:\"failed\" y no se reintenta", async () => {
+  const a = avisos({ flowFor: () => SIN_GATE, entrega: async () => false });
+  await a.tick();
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  assert.equal(a.estado()?.notify, "failed");
+});
+
+test("verdictMessage FAIL con los intentos agotados pide intervención humana (prefijo intacto)", () => {
+  const state: VerifyState = { attempts: 3, status: "failed", shas: { api: SHA_A } };
+  const msg = verdictMessage("pre-merge", state, "/ciclo", "pr", "/wt", 3);
+  assert.match(msg, /^UNIT-GATE: FAIL — intentos agotados \(3\/3\); pide intervención humana/);
+  assert.doesNotMatch(msg, /vuelve a tocar el sentinela/);
+});
+
+test("intentos agotados: el último FAIL de corrida avisa intentos agotados", async () => {
+  const a = avisos({ run: async () => ({ ok: false, code: 1, output: "rojo" }) });
+  a.setEstado({ attempts: 2, status: "failed", shas: { api: SHA_B } });
+  await a.tick();
+  assert.equal(a.estado()?.attempts, 3);
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — intentos agotados \(3\/3\); pide intervención humana/);
+});
+
+test("log del gate: la salida de la corrida se guarda en verify-<etapa>.log y el FAIL apunta a él", async () => {
+  const logs: Array<[string, string, string]> = [];
+  const a = avisos({ run: async () => ({ ok: false, code: 1, output: "FAILED test_x" }), writeLog: (c, k, out) => void logs.push([c, k, out]) });
+  await a.tick();
+  assert.deepEqual(logs, [["/ciclo", "pre-merge", "FAILED test_x"]]);
+  assert.match(a.mensajes[0][1], /\/ciclo\/verify-pre-merge\.log/);
+  assert.match(a.mensajes[0][1], /\/ciclo\/verify-pre-merge\.json/);
+});
+
+test("log del gate: un timeout queda con reason \"timeout\" y gasta intento", async () => {
+  const a = avisos({ run: async () => ({ ok: false, code: null, output: "corriendo…\n[timeout]" }) });
+  await a.tick();
+  assert.equal(a.estado()?.status, "failed");
+  assert.equal(a.estado()?.reason, "timeout");
+  assert.equal(a.estado()?.attempts, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — timeout — /);
+});
+
+test("log del gate: también se guarda la salida de un gate normal", async () => {
+  const logs: string[] = [];
+  const d = deps({ cycle: "/c", writeLog: (_c, k, out) => void logs.push(`${k}:${out}`) });
+  await tick(d, new Map());
+  assert.deepEqual(logs, ["tests:verde"]);
+});
+
+test("selectGate: un gate de merge resuelto no se re-arma cuando el worker ya pasó a la etapa siguiente", () => {
+  const passed = (): VerifyState => ({ attempts: 0, status: "passed", shas: { api: SHA_A } });
+  const failed = (): VerifyState => ({ attempts: 1, status: "failed", shas: { api: SHA_A } });
+  assert.equal(selectGate(MERGE, "pr", passed, () => limpio(SHA_B)), null);
+  assert.equal(selectGate(MERGE, "pr", failed, () => limpio(SHA_B)), null);
+  assert.equal(selectGate(MERGE, "pre-merge", passed, () => limpio(SHA_B))?.key, "pre-merge");
+});
+
+test("tras el merge: worker en la etapa siguiente con SHA nuevo → no lee HEADs, no corre, no avisa", async () => {
+  let lecturas = 0;
+  const a = avisos({ detect: () => "pr", heads: async () => { lecturas++; return limpio(SHA_B); } });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: Date.now(), notify: "sent" });
+  await a.tick();
+  assert.equal(lecturas, 0);
+  assert.equal(a.corridas.length, 0);
+  assert.deepEqual(a.mensajes, []);
+  assert.deepEqual(a.escritos, []);
+});
+
+test("tras el merge: un gate de merge sin resolver sigue debiéndose aunque el worker se haya adelantado", async () => {
+  const a = avisos({ detect: () => "pr" });
+  await a.tick();
+  assert.equal(a.corridas.length, 1);
+  assert.equal(a.estado()?.status, "passed");
+});
+
+test("provisión fallida en el gate de merge → failed con reason, sin gastar intento, avisa y registra una vez", async () => {
+  const errores: unknown[] = [];
+  const a = avisos({
+    provisionOf: () => ({ status: "failed", startedAt: 1, finishedAt: 2, output: "pip falló" }),
+    logError: (e) => void errores.push(e),
+  });
+  await a.tick();
+  await a.tick();
+  assert.equal(a.corridas.length, 0);
+  assert.equal(a.estado()?.status, "failed");
+  assert.equal(a.estado()?.reason, "el entorno del worktree no se pudo preparar");
+  assert.equal(a.estado()?.attempts, 0);
+  assert.equal(a.estado()?.shas, undefined);
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — el entorno del worktree no se pudo preparar — /);
+  assert.equal(errores.length, 1);
+});
+
+test("provisión fallida: antes de alcanzar el gate de merge no se escribe nada", async () => {
+  const a = avisos({ detect: () => "implementing", provisionOf: () => ({ status: "failed", startedAt: 1, finishedAt: 2, output: "x" }) });
+  await a.tick();
+  assert.deepEqual(a.escritos, []);
+  assert.deepEqual(a.mensajes, []);
+});
+
+// ---- Vuelta a pre-merge desde pr/merge: el sentinela re-tocado re-habilita el gate ----
+
+const MERGE_CURL: GateStage[] = [...MERGE, { key: "curl", label: "Curl" }];
+/** mtimes de sentinelas por etapa (ms); ausente = sentinela sin tocar. */
+const tocados = (m: Record<string, number>) => (_c: string, k: string): number | null => m[k] ?? null;
+
+test("selectGate: con enGate, un gate de merge resuelto se re-arma aunque la etapa más lejana sea otra", () => {
+  const passed = (): VerifyState => ({ attempts: 0, status: "passed", shas: { api: SHA_A } });
+  const enPreMerge = (k: string) => k === "pre-merge";
+  assert.equal(selectGate(MERGE, "pr", passed, () => limpio(SHA_B), enPreMerge)?.key, "pre-merge");
+  assert.equal(selectGate(MERGE, "pr", passed, () => limpio(SHA_A), enPreMerge), null);
+  assert.equal(selectGate(MERGE, "pr", passed, () => limpio(SHA_B), () => false), null);
+});
+
+test("vuelve a pre-merge desde pr con SHA nuevo → corre y notifica", async () => {
+  let lecturas = 0;
+  const a = avisos({
+    detect: () => "pr",
+    heads: async () => { lecturas++; return limpio(SHA_B); },
+    sentinelAt: tocados({ implementing: 100, "pre-merge": 300, pr: 200 }),
+  });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await a.tick();
+  assert.ok(lecturas >= 1);
+  assert.equal(a.corridas.length, 1);
+  assert.equal(a.estado()?.status, "passed");
+  assert.deepEqual(a.estado()?.shas, { api: SHA_B });
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: PASS \(bbbbbbb, /);
+});
+
+test("vuelve a pre-merge desde pr con el mismo SHA aprobado → no corre pero re-entrega una vez el veredicto vigente", async () => {
+  const ahora = 10 * 60_000;
+  const a = avisos({
+    detect: () => "pr",
+    heads: async () => limpio(SHA_A),
+    sentinelAt: tocados({ implementing: 100, "pre-merge": 300, pr: 200 }),
+    now: () => ahora,
+  });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, durationMs: 60_000, at: 150, notify: "sent" });
+  await a.tick();
+  assert.equal(a.corridas.length, 0);
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: PASS \(aaaaaaa, 1 min\) — continúa con pr$/);
+  assert.equal(a.estado()?.status, "passed");
+  assert.deepEqual(a.estado()?.shas, { api: SHA_A });
+  assert.equal(a.estado()?.notify, "sent");
+  assert.equal(a.estado()?.notifiedAt, ahora);
+  // Una sola vez: el re-toque ya quedó respondido.
+  await a.tick();
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  assert.equal(a.corridas.length, 0);
+});
+
+test("re-entrega: con intentos agotados y SHA nuevo responde intentos agotados, sin correr", async () => {
+  const a = avisos({
+    detect: () => "pr",
+    heads: async () => limpio(SHA_B),
+    sentinelAt: tocados({ "pre-merge": 300, pr: 200 }),
+    now: () => 1000,
+  });
+  a.setEstado({ attempts: 3, status: "failed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await a.tick();
+  assert.equal(a.corridas.length, 0);
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — intentos agotados \(3\/3\)/);
+});
+
+test("re-entrega: no se repite si el sentinela es anterior al último aviso, ni con el worker ocupado", async () => {
+  const viejo = avisos({ detect: () => "pr", heads: async () => limpio(SHA_A), sentinelAt: tocados({ "pre-merge": 300, pr: 200 }) });
+  viejo.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notifiedAt: 400, notify: "sent" });
+  await viejo.tick();
+  assert.deepEqual(viejo.mensajes, []);
+
+  const ocupado = avisos({ listSessions: async () => [{ name: "cowork-x", busy: true }], detect: () => "pr", sentinelAt: tocados({ "pre-merge": 300, pr: 200 }) });
+  ocupado.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await ocupado.tick();
+  assert.deepEqual(ocupado.mensajes, []);
+});
+
+test("en curl con SHA nuevo y pre-merge sin re-tocar → no corre, no lee HEADs, no avisa", async () => {
+  let lecturas = 0;
+  const a = avisos({
+    flowFor: () => MERGE_CURL,
+    detect: () => "curl",
+    heads: async () => { lecturas++; return limpio(SHA_B); },
+    sentinelAt: tocados({ implementing: 100, "pre-merge": 200, pr: 300, curl: 400 }),
+  });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 250, notify: "sent" });
+  await a.tick();
+  assert.equal(lecturas, 0);
+  assert.equal(a.corridas.length, 0);
+  assert.deepEqual(a.mensajes, []);
+  assert.deepEqual(a.escritos, []);
+});
+
+test("re-tocar pre-merge y luego una etapa posterior (pr, curl…) vuelve a la regla normal", async () => {
+  for (const marcas of [{ "pre-merge": 300, pr: 350 }, { "pre-merge": 300, pr: 200, curl: 350 }]) {
+    let lecturas = 0;
+    const a = avisos({
+      flowFor: () => MERGE_CURL,
+      detect: () => ("curl" in marcas ? "curl" : "pr"),
+      heads: async () => { lecturas++; return limpio(SHA_B); },
+      sentinelAt: tocados(marcas),
+    });
+    a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+    await a.tick();
+    assert.equal(lecturas, 0);
+    assert.equal(a.corridas.length, 0);
+    assert.deepEqual(a.mensajes, []);
+  }
+});
+
+test("re-entrega: una re-entrega reciente sin notify (reinicio a media entrega) no se da por perdida usando el `at` viejo", async () => {
+  const a = avisos({ detect: () => "pr", heads: async () => limpio(SHA_A), now: () => 10 * 60_000 });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notifiedAt: 10 * 60_000 - 1000 });
+  await a.tick();
+  assert.equal(a.estado()?.notify, undefined);
+});
+
+test("vuelve a pre-merge con árbol sucio → recibe UNIT-GATE: FAIL — hay cambios sin commitear, una sola vez", async () => {
+  for (const previo of [
+    { attempts: 1, status: "passed" as const, shas: { api: SHA_A }, at: 150, notify: "sent" as const },
+    { attempts: 1, status: "failed" as const, reason: "hay cambios sin commitear", at: 150, notify: "sent" as const },
+  ]) {
+    const a = avisos({
+      detect: () => "pr",
+      heads: async () => [{ repo: "api", sha: SHA_B, dirty: true }],
+      sentinelAt: tocados({ "pre-merge": 300, pr: 200 }),
+      now: () => 1000,
+    });
+    a.setEstado(previo);
+    await a.tick();
+    await a.tick();
+    await a.tick();
+    assert.equal(a.corridas.length, 0);
+    assert.equal(a.mensajes.length, 1, previo.status);
+    assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — hay cambios sin commitear — /);
+    const st = a.estado();
+    assert.equal(st?.status, "failed");
+    assert.equal(st?.reason, "hay cambios sin commitear");
+    assert.equal(st?.attempts, 1);
+    assert.equal(st?.shas, undefined);
+    assert.equal(st?.notifiedAt, 1000);
+    assert.equal(st?.notify, "sent");
+  }
+});
+
+test("vuelve a pre-merge sucio, luego limpia y vuelve a tocar → corre normal", async () => {
+  let sucio = true;
+  const marcas: Record<string, number> = { "pre-merge": 300, pr: 200 };
+  const a = avisos({
+    detect: () => "pr",
+    heads: async () => [{ repo: "api", sha: SHA_B, dirty: sucio }],
+    sentinelAt: tocados(marcas),
+    now: () => 1000,
+  });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  sucio = false;
+  marcas["pre-merge"] = 2000;
+  await a.tick();
+  assert.equal(a.corridas.length, 1);
+  assert.equal(a.estado()?.status, "passed");
+  assert.deepEqual(a.estado()?.shas, { api: SHA_B });
+  assert.equal(a.mensajes.length, 2);
+  assert.match(a.mensajes[1][1], /^UNIT-GATE: PASS \(bbbbbbb, /);
+});
+
+test("tras el merge con árbol sucio y pre-merge sin re-tocar → no escribe ni avisa", async () => {
+  const a = avisos({
+    flowFor: () => MERGE_CURL,
+    detect: () => "curl",
+    heads: async () => [{ repo: "api", sha: SHA_B, dirty: true }],
+    sentinelAt: tocados({ "pre-merge": 200, pr: 300, curl: 400 }),
+  });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 250, notify: "sent" });
+  await a.tick();
+  assert.deepEqual(a.escritos, []);
+  assert.deepEqual(a.mensajes, []);
+});
+
+test("vuelve a pre-merge sucio con intentos agotados → se re-entrega el agotado tal cual, sin pisar el estado", async () => {
+  const a = avisos({
+    detect: () => "pr",
+    heads: async () => [{ repo: "api", sha: SHA_B, dirty: true }],
+    sentinelAt: tocados({ "pre-merge": 300, pr: 200 }),
+    now: () => 1000,
+  });
+  a.setEstado({ attempts: 3, status: "failed", shas: { api: SHA_A }, at: 150, notify: "sent" });
+  await a.tick();
+  await a.tick();
+  assert.equal(a.mensajes.length, 1);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — intentos agotados \(3\/3\)/);
+  assert.deepEqual(a.estado()?.shas, { api: SHA_A });
 });

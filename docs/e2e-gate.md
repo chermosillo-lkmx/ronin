@@ -17,6 +17,14 @@ Default‑deny: sin `merge-base`, sin evidencia, evidencia ilegible o vieja → 
 sin DEV**: el gate sólo lee git, el junit y el XML (tampoco hace `git fetch`: refresca
 `origin/main` tú si hace falta).
 
+## Relación con el gate de unitarias
+
+Un PR que sólo toca `e2e_dev/` (el PR de seguimiento que piden `curl`/`pruebas-dev`) **ya no exige
+`unit-gate.sh`**: el gate de unitarias lo reconoce como «sólo e2e — suite unitaria no requerida»
+(ver «Atajo sólo-e2e» en `docs/unit-gate.md`) y las instrucciones de esas etapas ya no dicen
+«(con su unit-gate)». Lo mismo vale para commits de e2e empujados al PR después de `pre-merge`: el
+PASS se conserva si el diff desde el SHA aprobado toca exclusivamente rutas e2e.
+
 ## Qué comprueba (por cada sub‑repo con cambios respecto a `E2E_GATE_BASE`)
 
 Sub‑repos: los directorios git inmediatos de DIR (o DIR mismo si es un repo); `*-base`,

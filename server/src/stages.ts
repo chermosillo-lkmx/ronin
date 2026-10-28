@@ -241,22 +241,72 @@ export function lastSentinelAt(cycle: string, order: string[]): number | null {
   return newest;
 }
 
+/**
+ * mtime (ms) del sentinela de UNA etapa, o null si no existe (o no es un archivo). El driver lo usa
+ * para ver que el worker volvió a una etapa anterior: las plantillas tocan el sentinela al empezar
+ * cada etapa, así que un `pre-merge` re-tocado después de `pr` es más nuevo que éste.
+ */
+export function sentinelMtime(cycle: string, key: string): number | null {
+  try {
+    const st = statSync(join(cycle, key));
+    return st.isFile() ? st.mtimeMs : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---- P2: per-stage verifyCmd gate state (persisted in the cycle dir → survives restart, so a
 // restart can't reset the retry counter and loop the command forever). ----
 
-export type VerifyStatus = "pending" | "passed" | "failed";
+/**
+ * `sin-gate`: la etapa `pre-merge` de un flujo sin gate de unitarias configurado. Sólo marca que a
+ * Ronin ya le avisó al worker que siga (`UNIT-GATE: SIN-GATE`); NO es un verde y nada lo cuenta así.
+ */
+export type VerifyStatus = "pending" | "passed" | "failed" | "sin-gate";
 export interface VerifyState {
   attempts: number;
   status: VerifyStatus;
+  // Caché del gate de pruebas (opcionales; sólo los escribe el driver de verificación).
+  /** sub-repo → SHA probado. */
+  shas?: Record<string, string>;
+  durationMs?: number;
+  at?: number;
+  queued?: boolean;
+  running?: boolean;
+  notify?: "sent" | "failed";
+  /** Cuándo se re-entregó el veredicto vigente al worker que volvió al gate (ver verify-driver). */
+  notifiedAt?: number;
+  reason?: string;
 }
 // stage keys are slugs ([a-z0-9-]) so they're safe as a filename component.
 const verifyFile = (stageKey: string): string => `verify-${stageKey}.json`;
+
+// Los campos opcionales con tipo incorrecto se descartan uno a uno; no invalidan el archivo.
+function parseVerifyState(raw: Record<string, unknown>): VerifyState {
+  const st: VerifyState = { attempts: raw.attempts as number, status: raw.status as VerifyStatus };
+  const shas = raw.shas;
+  if (
+    shas &&
+    typeof shas === "object" &&
+    !Array.isArray(shas) &&
+    Object.values(shas).every((v) => typeof v === "string" && /^[0-9a-f]{40,64}$/.test(v))
+  )
+    st.shas = shas as Record<string, string>;
+  if (typeof raw.durationMs === "number") st.durationMs = raw.durationMs;
+  if (typeof raw.at === "number") st.at = raw.at;
+  if (typeof raw.queued === "boolean") st.queued = raw.queued;
+  if (typeof raw.running === "boolean") st.running = raw.running;
+  if (raw.notify === "sent" || raw.notify === "failed") st.notify = raw.notify;
+  if (typeof raw.notifiedAt === "number") st.notifiedAt = raw.notifiedAt;
+  if (typeof raw.reason === "string") st.reason = raw.reason;
+  return st;
+}
 
 export function readVerifyState(cycle: string, stageKey: string): VerifyState | null {
   try {
     const raw = JSON.parse(readFileSync(join(cycle, verifyFile(stageKey)), "utf8"));
     if (raw && typeof raw.attempts === "number" && typeof raw.status === "string")
-      return { attempts: raw.attempts, status: raw.status as VerifyStatus };
+      return parseVerifyState(raw);
   } catch {
     /* absent */
   }
@@ -266,6 +316,18 @@ export function readVerifyState(cycle: string, stageKey: string): VerifyState | 
 export function writeVerifyState(cycle: string, stageKey: string, state: VerifyState): void {
   try {
     writeFileSync(join(cycle, verifyFile(stageKey)), JSON.stringify(state));
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Salida (ya recortada por `runVerify`) de la última corrida del gate, en `<cycle>/verify-<etapa>.log`.
+ * Se sobrescribe en cada desenlace: es lo que el worker lee para saber por qué falló. Best-effort.
+ */
+export function writeVerifyLog(cycle: string, stageKey: string, output: string): void {
+  try {
+    writeFileSync(join(cycle, `verify-${stageKey}.log`), output);
   } catch {
     /* best-effort */
   }

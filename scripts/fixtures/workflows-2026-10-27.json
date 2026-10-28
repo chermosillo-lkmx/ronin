@@ -1,0 +1,281 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "wf-9b0679a503fd44979e",
+      "name": "tmux-worker-loop",
+      "config": {
+        "stages": [
+          {
+            "key": "planning",
+            "label": "Plan (Brain)",
+            "icon": "🧠",
+            "instruction": "Arranca /tmux-worker-loop (4 panes: Main, Brain=Opus, Reviewer=Opus, Implementer=Sonnet). El Brain escribe {cycle}/plan.md a partir del ticket: pasos, archivos a tocar, tests a agregar y criterios de aceptación con los curl exactos que se correrán en DEV. Espera ===BRAIN:PLAN-READY=== y LEE el plan tú mismo."
+          },
+          {
+            "key": "plan-review",
+            "label": "Revisión plan",
+            "icon": "🔍",
+            "instruction": "Pasa el plan por el Reviewer (plan pass) y por codex:codex-rescue como segundo motor; verifica las afirmaciones que sostienen el plan leyendo el código citado. Relaya hallazgos al Brain con prefijo REVIEW: hasta ===BRAIN:PLAN-UPDATED=== limpio. Escala al usuario cualquier decisión de alcance. Envía PLAN APPROVED."
+          },
+          {
+            "key": "implementing",
+            "label": "Impl (Sonnet)",
+            "icon": "⌨️",
+            "instruction": "Manda el prompt del Implementer: implementa {cycle}/plan.md en ciclos estrictos RED→GREEN→REFACTOR registrando cada ciclo en {cycle}/rgr.log. Ante ===IMPL:QUESTION=== relaya al Brain (y anota la pregunta: es un defecto del plan). Commits en Conventional Commits. Espera ===IMPL:READY===.",
+            "role": "impl"
+          },
+          {
+            "key": "diff-review",
+            "label": "Revisión diff",
+            "icon": "🧪",
+            "instruction": "Comprueba que {cycle}/rgr.log existe y cuadra con git diff --stat. Reviewer: diff pass + auditoría RGR (cada ciclo con veredicto; REFACTOR: NONE repetido es bandera roja). codex como segundo motor, verificando el job por su log, no por 'task started'. Loop hasta limpio y IMPL APPROVED."
+          },
+          {
+            "key": "i18n",
+            "label": "Mensajes i18n",
+            "icon": "🌎",
+            "instruction": "Mensajes de error al usuario. Todo 4xx nuevo de un servicio de Liebre nace con su código del catálogo de ant-ms-i18n, nunca con un literal: si no, el mensaje se queda en inglés para siempre y nada se pone rojo. Corre `~/code/claude-cowork/scripts/i18n-gate.sh {cycle}` y no avances sin `I18N-GATE: PASS`; guarda su salida en {ev}/i18n.md. Literal nuevo → levántalo con AppError(error_code=..., http_status=<el de hoy>, params=<TODOS los placeholders de la plantilla>, default_message=<el literal EXACTO de hoy>) y siembra el código en una migración de ant-ms-i18n en ESTE mismo ciclo. Antes de REUSAR un código existente, abre su plantilla sembrada y compara sus placeholders contra tu literal: cuatro reusos de los lotes 9-12 habrían borrado el rol, la lista de cuentas o el id en cuanto ms-i18n respondiera. Si migraste algo del inventario de `tests/contracts/test_no_new_error_literals.py`, baja su número (o borra la línea) para que el trinquete quede apretado. Si el ciclo no toca ningún error de usuario, el gate sale verde solo y la etapa es un sello.",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/i18n-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "tests",
+            "label": "Tests",
+            "icon": "✅",
+            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos. REGLA DE PRUEBAS UNITARIAS (obligatoria antes de cualquier merge): todo cambio en src/ trae sus pruebas unitarias en el mismo PR, las pruebas nuevas se ejecutan y pasan, y la suite completa del repo queda en 0 failed. Ronin lo comprueba con el gate `/Users/cesarhermosillo/code/claude-cowork/scripts/unit-gate.sh` (verifyCmd de esta etapa, corre en el worktree de la sesión): córrelo tú también y pega su salida en {ev}/tests.md; si dice UNIT-GATE: FAIL no avances ni abras/mergees PR hasta dejarlo en PASS. No se «arregla» un gate quitando, saltando (skip/xfail) o debilitando pruebas.",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/unit-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "curl",
+            "label": "Curl DEV",
+            "icon": "🌐",
+            "instruction": "Pruebas CURL contra DEV: `source {cycle}/curl.env` (te da $DEV_URL, $TOKEN, $ACCOUNTING_FIRM; no los pidas). Ejecuta un curl por cada criterio de aceptación del plan (preferentemente sólo lectura) y guarda comando + request + response en {ev}/curl.md. Ingesta al backup-tester: curl -X POST $BACKUP_TESTER_URL/api/test-coverage/ingest -H \"Authorization: Bearer $BACKUP_TESTER_INGEST_TOKEN\" -F project={repo} -F suite=curl -F junit=@<junit.xml>.\n\nREGLA E2E (todos los proyectos): cada criterio que verificaste aquí contra DEV también queda como prueba automatizada en el `e2e_dev/` del repo afectado (hoy existe en ant-liebre-api, ant-ms-cfdis y ant-ms-permissions; en otros repos anótalo como pendiente en la evidencia). Sigue el README de esa suite: sólo los negocios E2E permitidos, marcador `E2E-`, limpieza en `finally`, sin skip/xfail/mocks; si el camino feliz es peligroso (Syncfy usa la llave de PROD, sidecars de respaldos, email real), cubre la GUARDA: la petición que se rechaza antes de cualquier efecto. Corre los archivos que tocaste con `--junitxml` y `--route-coverage-xml` (ant-liebre-api: `reports/junit-e2e-dev.xml` y `reports/route-coverage-e2e.xml`; ant-ms-*: `.e2e_history/junit.xml` y `.e2e_history/route-coverage.xml`; token con `LIEBRE_DEV_TOKEN_FILE=~/.liebre-dev-token`) y repórtalo a Ronin con mcp__ronin__reportar_pruebas (suite `e2e`, junit + cobertura). Si el ciclo agregó o cambió un endpoint, su ruta debe quedar ejercitada en esa cobertura; una ruta que de verdad no se puede cubrir va en `e2e_dev/.e2e-gate-skip` con el porqué. Las pruebas van en el PR del ciclo si sigue abierto, o en un PR de seguimiento sólo con `e2e_dev/` (con su unit-gate). El gate `e2e-gate.sh` lo verifica: sin `E2E-GATE: PASS` no avances (si tu PR ya está mergeado, córrelo con `E2E_GATE_BASE=<padre del merge>` para que vea las rutas que cambiaste).",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork-gates/scripts/e2e-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "done",
+            "label": "Evidencia",
+            "icon": "✓",
+            "instruction": "Escribe EVIDENCIA-<ticket>-dev.md en la raíz del repo con: Veredicto, Cadena completa (archivo:línea), Qué se cambió (archivos + tests + ciclos RGR), Resultado de suites, Curl en DEV por criterio, Limpieza pendiente en dev, Pendientes. OBLIGATORIO — COMENTA la evidencia resumida EN EL TICKET de ClickUp (clickup_create_task_comment; si hay varios tickets, uno en cada uno): no basta con dejarla en un archivo. El comentario EMPIEZA con `## Evidencia (DEV)` e incluye veredicto, causa (archivo:línea), PR/merge y versión desplegada, resultado de suites/gates, tabla de pruebas en DEV por criterio con veredicto (y qué NO fue verificable), residuos que dejaste en dev y pendientes. Guarda ese mismo texto en {ev}/summary.md y el comment_id en {ev}/ticket.md. El gate `ticket-evidence-gate.sh` lo comprueba contra ClickUp (comentario posterior al arranque del ciclo, con «Evidencia» y ≥300 caracteres): sin `TICKET-EVIDENCE-GATE: PASS` el ciclo NO está terminado. REGLA (todos los proyectos): la evidencia NUNCA se versiona — no hagas `git add`/commit de EVIDENCIA-*.md, de {ev}/ ni de ningún archivo del cycle dir, y déjalos fuera del PR; si el repo no ignora `EVIDENCIA-*.md`, agrégalo a .gitignore en el mismo PR.",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/ticket-evidence-gate.sh",
+            "maxRetries": 3
+          }
+        ],
+        "verifyAfter": [
+          "curl"
+        ]
+      },
+      "updatedAt": 1790869543610
+    },
+    {
+      "id": "wf-8cf0382b46dd436798",
+      "name": "claude-plan-codex-impl",
+      "config": {
+        "stages": [
+          {
+            "key": "planning",
+            "label": "Plan",
+            "icon": "📋",
+            "instruction": "Si hay ticket ({ticket}), ponlo en progreso antes de empezar. Escribes {cycle}/plan.md: contexto, causa raíz si es bug (cita archivo:línea), pasos concretos, archivos a tocar, tests a agregar/reparar y criterios de aceptación con la prueba exacta que los verificará en DEV. Si una premisa no se sostiene, dilo en el plan antes de tocar código. No implementes.",
+            "executor": "claude"
+          },
+          {
+            "key": "implementing",
+            "label": "Impl",
+            "icon": "🤖",
+            "instruction": "Usa {cycle}/plan.md como contrato: TDD (test que falla primero, fix mínimo, refactor) y RGR (Red Green Refactor), commits Conventional Commits. Si la herramienta está limitada, impleméntalo tú y déjalo dicho en la evidencia. Revisa el diff contra la lista de archivos prometida en el plan.",
+            "role": "impl",
+            "executor": "codex"
+          },
+          {
+            "key": "i18n",
+            "label": "Mensajes i18n",
+            "icon": "🌎",
+            "instruction": "Mensajes de error al usuario. Todo 4xx nuevo de un servicio de Liebre nace con su código del catálogo de ant-ms-i18n, nunca con un literal: si no, el mensaje se queda en inglés para siempre y nada se pone rojo. Corre `~/code/claude-cowork/scripts/i18n-gate.sh {cycle}` y no avances sin `I18N-GATE: PASS`; guarda su salida en {ev}/i18n.md. Literal nuevo → levántalo con AppError(error_code=..., http_status=<el de hoy>, params=<TODOS los placeholders de la plantilla>, default_message=<el literal EXACTO de hoy>) y siembra el código en una migración de ant-ms-i18n en ESTE mismo ciclo. Antes de REUSAR un código existente, abre su plantilla sembrada y compara sus placeholders contra tu literal: cuatro reusos de los lotes 9-12 habrían borrado el rol, la lista de cuentas o el id en cuanto ms-i18n respondiera. Si migraste algo del inventario de `tests/contracts/test_no_new_error_literals.py`, baja su número (o borra la línea) para que el trinquete quede apretado. Si el ciclo no toca ningún error de usuario, el gate sale verde solo y la etapa es un sello.",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/i18n-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "tests",
+            "label": "Pruebas",
+            "icon": "✅",
+            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos. REGLA DE PRUEBAS UNITARIAS (obligatoria antes de cualquier merge): todo cambio en src/ trae sus pruebas unitarias en el mismo PR, las pruebas nuevas se ejecutan y pasan, y la suite completa del repo queda en 0 failed. Ronin lo comprueba con el gate `/Users/cesarhermosillo/code/claude-cowork/scripts/unit-gate.sh` (verifyCmd de esta etapa, corre en el worktree de la sesión): córrelo tú también y pega su salida en {ev}/tests.md; si dice UNIT-GATE: FAIL no avances ni abras/mergees PR hasta dejarlo en PASS. No se «arregla» un gate quitando, saltando (skip/xfail) o debilitando pruebas.",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/unit-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "pr",
+            "label": "PR y merge",
+            "icon": "⤵️",
+            "instruction": "Abre el PR con un cuerpo que explique el porqué, no sólo el qué, y enlaza el ticket. Espera a que los checks terminen. Haz el merge SÓLO si está mergeable de verdad; si no, arregla lo que falte antes. Nunca fuerces el merge. Antes de mergear vuelve a correr el gate de pruebas unitarias (`/Users/cesarhermosillo/code/claude-cowork/scripts/unit-gate.sh`) sobre el estado final de la rama: sin UNIT-GATE: PASS no hay merge, aunque los checks de GitHub estén en verde.",
+            "executor": "claude"
+          },
+          {
+            "key": "curl",
+            "label": "Pruebas en DEV",
+            "icon": "🌐",
+            "instruction": "Prueba en DEV cada criterio de aceptación del plan con el comando exacto. Guarda comando, request y response con veredicto por criterio en {ev}/curl.md. Sólo lectura salvo que el criterio exija escribir; si escribes, anota qué dejaste creado.\n\nREGLA E2E (todos los proyectos): cada criterio que verificaste aquí contra DEV también queda como prueba automatizada en el `e2e_dev/` del repo afectado (hoy existe en ant-liebre-api, ant-ms-cfdis y ant-ms-permissions; en otros repos anótalo como pendiente en la evidencia). Sigue el README de esa suite: sólo los negocios E2E permitidos, marcador `E2E-`, limpieza en `finally`, sin skip/xfail/mocks; si el camino feliz es peligroso (Syncfy usa la llave de PROD, sidecars de respaldos, email real), cubre la GUARDA: la petición que se rechaza antes de cualquier efecto. Corre los archivos que tocaste con `--junitxml` y `--route-coverage-xml` (ant-liebre-api: `reports/junit-e2e-dev.xml` y `reports/route-coverage-e2e.xml`; ant-ms-*: `.e2e_history/junit.xml` y `.e2e_history/route-coverage.xml`; token con `LIEBRE_DEV_TOKEN_FILE=~/.liebre-dev-token`) y repórtalo a Ronin con mcp__ronin__reportar_pruebas (suite `e2e`, junit + cobertura). Si el ciclo agregó o cambió un endpoint, su ruta debe quedar ejercitada en esa cobertura; una ruta que de verdad no se puede cubrir va en `e2e_dev/.e2e-gate-skip` con el porqué. Las pruebas van en el PR del ciclo si sigue abierto, o en un PR de seguimiento sólo con `e2e_dev/` (con su unit-gate). El gate `e2e-gate.sh` lo verifica: sin `E2E-GATE: PASS` no avances (si tu PR ya está mergeado, córrelo con `E2E_GATE_BASE=<padre del merge>` para que vea las rutas que cambiaste).",
+            "executor": "claude",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork-gates/scripts/e2e-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "done",
+            "label": "Evidencia",
+            "icon": "✓",
+            "instruction": "Escribe EVIDENCIA-{ticket}-dev.md en la raíz: veredicto, causa y cadena con archivo:línea, cambios y tests, resultado de las suites, pruebas en DEV por criterio, limpieza pendiente y pendientes. Después pasa el ticket a «ready for testing» y pega en {ev}/ticket.md la confirmación del cambio; si no pudiste moverlo, dilo ahí. OBLIGATORIO — COMENTA la evidencia resumida EN EL TICKET de ClickUp (clickup_create_task_comment; si hay varios tickets, uno en cada uno): no basta con dejarla en un archivo. El comentario EMPIEZA con `## Evidencia (DEV)` e incluye veredicto, causa (archivo:línea), PR/merge y versión desplegada, resultado de suites/gates, tabla de pruebas en DEV por criterio con veredicto (y qué NO fue verificable), residuos que dejaste en dev y pendientes. Guarda ese mismo texto en {ev}/summary.md y el comment_id en {ev}/ticket.md. El gate `ticket-evidence-gate.sh` lo comprueba contra ClickUp (comentario posterior al arranque del ciclo, con «Evidencia» y ≥300 caracteres): sin `TICKET-EVIDENCE-GATE: PASS` el ciclo NO está terminado. REGLA (todos los proyectos): la evidencia NUNCA se versiona — no hagas `git add`/commit de EVIDENCIA-*.md, de {ev}/ ni de ningún archivo del cycle dir, y déjalos fuera del PR; si el repo no ignora `EVIDENCIA-*.md`, agrégalo a .gitignore en el mismo PR.",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/ticket-evidence-gate.sh",
+            "maxRetries": 3
+          }
+        ],
+        "verifyAfter": [
+          "curl"
+        ],
+        "inputs": [
+          {
+            "key": "ticket",
+            "label": "Ticket (opcional)",
+            "placeholder": "86e30zdgd"
+          }
+        ]
+      },
+      "updatedAt": 1790869543614
+    },
+    {
+      "id": "wf-b41400b6f3714d13bb",
+      "name": "hotfix-verificado",
+      "config": {
+        "stages": [
+          {
+            "key": "implementing",
+            "label": "Fix + test",
+            "icon": "🔥",
+            "instruction": "Bug acotado: escribe primero el test que pinnea el comportamiento esperado y confirma que falla; aplica el fix mínimo (cita archivo:línea de la causa); commit fix(scope): … con el ticket. Sin refactors colaterales.",
+            "role": "impl"
+          },
+          {
+            "key": "i18n",
+            "label": "Mensajes i18n",
+            "icon": "🌎",
+            "instruction": "Mensajes de error al usuario. Todo 4xx nuevo de un servicio de Liebre nace con su código del catálogo de ant-ms-i18n, nunca con un literal: si no, el mensaje se queda en inglés para siempre y nada se pone rojo. Corre `~/code/claude-cowork/scripts/i18n-gate.sh {cycle}` y no avances sin `I18N-GATE: PASS`; guarda su salida en {ev}/i18n.md. Literal nuevo → levántalo con AppError(error_code=..., http_status=<el de hoy>, params=<TODOS los placeholders de la plantilla>, default_message=<el literal EXACTO de hoy>) y siembra el código en una migración de ant-ms-i18n en ESTE mismo ciclo. Antes de REUSAR un código existente, abre su plantilla sembrada y compara sus placeholders contra tu literal: cuatro reusos de los lotes 9-12 habrían borrado el rol, la lista de cuentas o el id en cuanto ms-i18n respondiera. Si migraste algo del inventario de `tests/contracts/test_no_new_error_literals.py`, baja su número (o borra la línea) para que el trinquete quede apretado. Si el ciclo no toca ningún error de usuario, el gate sale verde solo y la etapa es un sello.",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/i18n-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "tests",
+            "label": "Pruebas",
+            "icon": "✅",
+            "instruction": "Repara fixtures rotos antes de escribir tests nuevos. Corre la suite del servicio generando JUnit: pytest -q --junitxml=reports/junit.xml --cov=src --cov-report=xml:reports/coverage.xml (o vitest run --reporter=junit --outputFile=reports/junit.xml). Repórtala a Ronin con mcp__ronin__reportar_pruebas pasando repo, suite y la ruta ABSOLUTA del junit.xml (y del coverage.xml si lo hay): los conteos los extrae Ronin del artefacto, no de tu resumen, así que no los transcribas. Guarda además el resumen exacto (passed/failed/cobertura) en {ev}/tests.md; no avances con fallos nuevos. REGLA DE PRUEBAS UNITARIAS (obligatoria antes de cualquier merge): todo cambio en src/ trae sus pruebas unitarias en el mismo PR, las pruebas nuevas se ejecutan y pasan, y la suite completa del repo queda en 0 failed. Ronin lo comprueba con el gate `/Users/cesarhermosillo/code/claude-cowork/scripts/unit-gate.sh` (verifyCmd de esta etapa, corre en el worktree de la sesión): córrelo tú también y pega su salida en {ev}/tests.md; si dice UNIT-GATE: FAIL no avances ni abras/mergees PR hasta dejarlo en PASS. No se «arregla» un gate quitando, saltando (skip/xfail) o debilitando pruebas.",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/unit-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "curl",
+            "label": "Curl DEV",
+            "icon": "🌐",
+            "instruction": "`source {cycle}/curl.env`; reproduce el bug por curl contra DEV (antes: falla / después del deploy: pasa) y guarda comando + request + response en {ev}/curl.md.\n\nREGLA E2E (todos los proyectos): cada criterio que verificaste aquí contra DEV también queda como prueba automatizada en el `e2e_dev/` del repo afectado (hoy existe en ant-liebre-api, ant-ms-cfdis y ant-ms-permissions; en otros repos anótalo como pendiente en la evidencia). Sigue el README de esa suite: sólo los negocios E2E permitidos, marcador `E2E-`, limpieza en `finally`, sin skip/xfail/mocks; si el camino feliz es peligroso (Syncfy usa la llave de PROD, sidecars de respaldos, email real), cubre la GUARDA: la petición que se rechaza antes de cualquier efecto. Corre los archivos que tocaste con `--junitxml` y `--route-coverage-xml` (ant-liebre-api: `reports/junit-e2e-dev.xml` y `reports/route-coverage-e2e.xml`; ant-ms-*: `.e2e_history/junit.xml` y `.e2e_history/route-coverage.xml`; token con `LIEBRE_DEV_TOKEN_FILE=~/.liebre-dev-token`) y repórtalo a Ronin con mcp__ronin__reportar_pruebas (suite `e2e`, junit + cobertura). Si el ciclo agregó o cambió un endpoint, su ruta debe quedar ejercitada en esa cobertura; una ruta que de verdad no se puede cubrir va en `e2e_dev/.e2e-gate-skip` con el porqué. Las pruebas van en el PR del ciclo si sigue abierto, o en un PR de seguimiento sólo con `e2e_dev/` (con su unit-gate). El gate `e2e-gate.sh` lo verifica: sin `E2E-GATE: PASS` no avances (si tu PR ya está mergeado, córrelo con `E2E_GATE_BASE=<padre del merge>` para que vea las rutas que cambiaste).",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork-gates/scripts/e2e-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "done",
+            "label": "Evidencia",
+            "icon": "✓",
+            "instruction": "EVIDENCIA-<ticket>-dev.md: Veredicto, causa (archivo:línea), fix, test que lo pinnea, curl antes/después, pendientes. OBLIGATORIO — COMENTA la evidencia resumida EN EL TICKET de ClickUp (clickup_create_task_comment; si hay varios tickets, uno en cada uno): no basta con dejarla en un archivo. El comentario EMPIEZA con `## Evidencia (DEV)` e incluye veredicto, causa (archivo:línea), PR/merge y versión desplegada, resultado de suites/gates, tabla de pruebas en DEV por criterio con veredicto (y qué NO fue verificable), residuos que dejaste en dev y pendientes. Guarda ese mismo texto en {ev}/summary.md y el comment_id en {ev}/ticket.md. El gate `ticket-evidence-gate.sh` lo comprueba contra ClickUp (comentario posterior al arranque del ciclo, con «Evidencia» y ≥300 caracteres): sin `TICKET-EVIDENCE-GATE: PASS` el ciclo NO está terminado. REGLA (todos los proyectos): la evidencia NUNCA se versiona — no hagas `git add`/commit de EVIDENCIA-*.md, de {ev}/ ni de ningún archivo del cycle dir, y déjalos fuera del PR; si el repo no ignora `EVIDENCIA-*.md`, agrégalo a .gitignore en el mismo PR.",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/ticket-evidence-gate.sh",
+            "maxRetries": 3
+          }
+        ],
+        "verifyAfter": [
+          "curl"
+        ]
+      },
+      "updatedAt": 1790869543615
+    },
+    {
+      "id": "wf-3eddac9791304051a4",
+      "name": "pr-review-merge-dev",
+      "config": {
+        "stages": [
+          {
+            "key": "revisar",
+            "label": "Revisar",
+            "icon": "🔍",
+            "instruction": "Pon el ticket {ticket} en progreso. Lee el ticket y el PR {pr} y verifica criterio por criterio si el PR cumple lo pedido: que el diff parezca razonable no es que cumpla. Escribe el veredicto por criterio en {ev}/revision.md citando archivo:línea del PR. Si una premisa del ticket no se sostiene, dilo aquí antes de tocar nada.",
+            "executor": "claude"
+          },
+          {
+            "key": "arreglar",
+            "label": "Arreglar",
+            "icon": "🤖",
+            "instruction": "Sólo si la revisión encontró hallazgos. Arréglalos sobre la rama del PR con TDD (test que falla primero, fix mínimo) y commits Conventional Commits; no reescribas lo que ya estaba bien. Si la revisión no encontró nada, marca la etapa y sigue sin tocar código. Deja en {ev}/arreglos.md qué cambiaste y por qué. REGLA DE PRUEBAS UNITARIAS (obligatoria antes de cualquier merge): todo cambio en src/ trae sus pruebas unitarias en el mismo PR, las pruebas nuevas se ejecutan y pasan, y la suite completa del repo queda en 0 failed. Ronin lo comprueba con el gate `/Users/cesarhermosillo/code/claude-cowork/scripts/unit-gate.sh` (verifyCmd de esta etapa, corre en el worktree de la sesión): córrelo tú también y pega su salida en {ev}/tests.md; si dice UNIT-GATE: FAIL no avances ni abras/mergees PR hasta dejarlo en PASS. No se «arregla» un gate quitando, saltando (skip/xfail) o debilitando pruebas.",
+            "executor": "codex",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/unit-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "i18n",
+            "label": "Mensajes i18n",
+            "icon": "🌎",
+            "instruction": "Mensajes de error al usuario. Todo 4xx nuevo de un servicio de Liebre nace con su código del catálogo de ant-ms-i18n, nunca con un literal: si no, el mensaje se queda en inglés para siempre y nada se pone rojo. Corre `~/code/claude-cowork/scripts/i18n-gate.sh {cycle}` y no avances sin `I18N-GATE: PASS`; guarda su salida en {ev}/i18n.md. Literal nuevo → levántalo con AppError(error_code=..., http_status=<el de hoy>, params=<TODOS los placeholders de la plantilla>, default_message=<el literal EXACTO de hoy>) y siembra el código en una migración de ant-ms-i18n en ESTE mismo ciclo. Antes de REUSAR un código existente, abre su plantilla sembrada y compara sus placeholders contra tu literal: cuatro reusos de los lotes 9-12 habrían borrado el rol, la lista de cuentas o el id en cuanto ms-i18n respondiera. Si migraste algo del inventario de `tests/contracts/test_no_new_error_literals.py`, baja su número (o borra la línea) para que el trinquete quede apretado. Si el ciclo no toca ningún error de usuario, el gate sale verde solo y la etapa es un sello.",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/i18n-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "merge",
+            "label": "Merge a dev",
+            "icon": "⤵️",
+            "instruction": "Comprueba que el PR sea mergeable de verdad —checks en verde, sin conflictos, base correcta— y haz el merge a dev. Si NO es mergeable, para aquí y explica por qué en {ev}/merge.md: nunca fuerces un merge ni cambies la base para esquivar un conflicto. Antes de mergear vuelve a correr el gate de pruebas unitarias (`/Users/cesarhermosillo/code/claude-cowork/scripts/unit-gate.sh`) sobre el estado final de la rama: sin UNIT-GATE: PASS no hay merge, aunque los checks de GitHub estén en verde.",
+            "executor": "claude"
+          },
+          {
+            "key": "deploy",
+            "label": "Deploy",
+            "icon": "🚀",
+            "instruction": "Monitorea el despliegue a dev hasta que llegue a un estado final. Anota en {ev}/deploy.md el resultado y, si falló, el error exacto. Un deploy en curso no es un deploy exitoso.",
+            "executor": "claude"
+          },
+          {
+            "key": "pruebas-dev",
+            "label": "Pruebas en DEV",
+            "icon": "🌐",
+            "instruction": "Prueba en DEV cada criterio de aceptación del ticket {ticket} con el comando exacto. Guarda comando, request y response con veredicto por criterio en {ev}/curl.md. Sólo lectura salvo que el criterio exija escribir; si escribes, anota qué dejaste creado.\n\nREGLA E2E (todos los proyectos): cada criterio que verificaste aquí contra DEV también queda como prueba automatizada en el `e2e_dev/` del repo afectado (hoy existe en ant-liebre-api, ant-ms-cfdis y ant-ms-permissions; en otros repos anótalo como pendiente en la evidencia). Sigue el README de esa suite: sólo los negocios E2E permitidos, marcador `E2E-`, limpieza en `finally`, sin skip/xfail/mocks; si el camino feliz es peligroso (Syncfy usa la llave de PROD, sidecars de respaldos, email real), cubre la GUARDA: la petición que se rechaza antes de cualquier efecto. Corre los archivos que tocaste con `--junitxml` y `--route-coverage-xml` (ant-liebre-api: `reports/junit-e2e-dev.xml` y `reports/route-coverage-e2e.xml`; ant-ms-*: `.e2e_history/junit.xml` y `.e2e_history/route-coverage.xml`; token con `LIEBRE_DEV_TOKEN_FILE=~/.liebre-dev-token`) y repórtalo a Ronin con mcp__ronin__reportar_pruebas (suite `e2e`, junit + cobertura). Si el ciclo agregó o cambió un endpoint, su ruta debe quedar ejercitada en esa cobertura; una ruta que de verdad no se puede cubrir va en `e2e_dev/.e2e-gate-skip` con el porqué. Las pruebas van en el PR del ciclo si sigue abierto, o en un PR de seguimiento sólo con `e2e_dev/` (con su unit-gate). El gate `e2e-gate.sh` lo verifica: sin `E2E-GATE: PASS` no avances (si tu PR ya está mergeado, córrelo con `E2E_GATE_BASE=<padre del merge>` para que vea las rutas que cambiaste).",
+            "executor": "claude",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork-gates/scripts/e2e-gate.sh",
+            "maxRetries": 2
+          },
+          {
+            "key": "done",
+            "label": "Cerrar ticket",
+            "icon": "✓",
+            "instruction": "Escribe EVIDENCIA-{ticket}-dev.md en la raíz del repo: veredicto, qué se revisó del PR {pr}, qué se arregló, resultado del merge y del deploy, y las pruebas en DEV por criterio. Después pasa el ticket {ticket} a «ready for owner approval» y PEGA en {ev}/ticket.md la confirmación del cambio de estado; si no pudiste moverlo, dilo ahí en vez de darlo por hecho. OBLIGATORIO — COMENTA la evidencia resumida EN EL TICKET de ClickUp (clickup_create_task_comment; si hay varios tickets, uno en cada uno): no basta con dejarla en un archivo. El comentario EMPIEZA con `## Evidencia (DEV)` e incluye veredicto, causa (archivo:línea), PR/merge y versión desplegada, resultado de suites/gates, tabla de pruebas en DEV por criterio con veredicto (y qué NO fue verificable), residuos que dejaste en dev y pendientes. Guarda ese mismo texto en {ev}/summary.md y el comment_id en {ev}/ticket.md. El gate `ticket-evidence-gate.sh` lo comprueba contra ClickUp (comentario posterior al arranque del ciclo, con «Evidencia» y ≥300 caracteres): sin `TICKET-EVIDENCE-GATE: PASS` el ciclo NO está terminado. REGLA (todos los proyectos): la evidencia NUNCA se versiona — no hagas `git add`/commit de EVIDENCIA-*.md, de {ev}/ ni de ningún archivo del cycle dir, y déjalos fuera del PR; si el repo no ignora `EVIDENCIA-*.md`, agrégalo a .gitignore en el mismo PR.",
+            "executor": "claude",
+            "verifyCmd": "/Users/cesarhermosillo/code/claude-cowork/scripts/ticket-evidence-gate.sh",
+            "maxRetries": 3
+          }
+        ],
+        "verifyAfter": [
+          "pruebas-dev"
+        ],
+        "inputs": [
+          {
+            "key": "pr",
+            "label": "URL del PR",
+            "placeholder": "https://github.com/org/repo/pull/2014",
+            "required": true
+          },
+          {
+            "key": "ticket",
+            "label": "Ticket",
+            "placeholder": "86e34yyck",
+            "required": true
+          }
+        ]
+      },
+      "updatedAt": 1790869543616
+    }
+  ]
+}

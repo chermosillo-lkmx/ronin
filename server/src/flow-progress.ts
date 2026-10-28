@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { readFlow, readVerifyState } from "./stages.js";
+import { readFlow, readVerifyState, type VerifyState } from "./stages.js";
+import { DEFAULT_GATE_RETRIES } from "./verify-driver.js";
 import type { SessionFlow, FlowStageProgress } from "./types.js";
 
 /**
@@ -11,6 +12,8 @@ import type { SessionFlow, FlowStageProgress } from "./types.js";
  *  · las cumplidas               → el archivo centinela que el agente toca al cerrar cada etapa
  *  · el reloj                    → el mtime de ese centinela
  *  · la verificación fallida     → verify-<etapa>.json (P2)
+ *  · el veredicto sin entregar   → verify-<etapa>.json con notify "failed" (gate de merge)
+ *  · el gate de merge            → en cola / corriendo / fallido (y agotado) aunque su centinela exista
  *
  * Se llama en el mismo barrido que ya arma el inventario, así que es de sólo lectura, síncrono y
  * nunca lanza: un ciclo a medio escribir devuelve null y el inspector se queda como estaba.
@@ -40,11 +43,21 @@ export function readFlowProgress(cycle: string): SessionFlow | null {
     const at = cumplidas[i] ? mtimeOf(cycle, stage.key) : i === enCurso ? previa : null;
     if (cumplidas[i] && at !== null) previa = at;
 
-    const verify = i === enCurso ? readVerifyState(cycle, stage.key) : null;
-    const status: FlowStageProgress["status"] = cumplidas[i]
-      ? "done"
+    // El estado de verificación se lee en todas las etapas: el gate de merge corre cuando su
+    // centinela ya está tocado, así que su aviso fallido puede estar en una etapa `done`.
+    const estado = readVerifyState(cycle, stage.key);
+    const verify = i === enCurso ? estado : null;
+    // El gate de merge corre DESPUÉS de que el worker toca su centinela: sin esto la etapa saldría
+    // `done` y la UI/MCP nunca verían que está en cola, corriendo o en rojo.
+    const esMerge = stage.mergeGate === true && !!stage.verifyCmd?.trim();
+    const gate = esMerge && estado ? gateDeMerge(estado) : null;
+    const fallo = gate === "failed" ? estado : verify?.status === "failed" ? verify : null;
+    const status: FlowStageProgress["status"] = fallo
+      ? "failed"
+      : cumplidas[i] ? "done"
       : i !== enCurso ? "pending"
-      : verify?.status === "failed" ? "failed" : "current";
+      : "current";
+    const agotado = gate === "failed" && estado!.attempts >= (stage.maxRetries ?? DEFAULT_GATE_RETRIES);
 
     return {
       key: stage.key,
@@ -53,7 +66,14 @@ export function readFlowProgress(cycle: string): SessionFlow | null {
       ...(stage.executor ? { executor: stage.executor } : {}),
       status,
       ...(at !== null ? { at } : {}),
-      ...(status === "failed" && verify ? { attempts: verify.attempts } : {}),
+      ...(fallo ? { attempts: fallo.attempts } : {}),
+      ...(gate ? { gate } : {}),
+      ...(gate === "failed" && estado?.reason ? { reason: estado.reason } : {}),
+      // Agotado pide intervención humana pase lo que pase después. El aviso sin entregar, sólo
+      // mientras el worker no haya pasado de esa etapa: un centinela posterior dice que siguió.
+      ...(agotado
+        ? { attention: "gate-agotado" as const }
+        : estado?.notify === "failed" && cumplidas.indexOf(true, i + 1) === -1 ? { attention: "gate-sin-entregar" as const } : {}),
     };
   });
 
@@ -64,6 +84,13 @@ export function readFlowProgress(cycle: string): SessionFlow | null {
     total: stages.length,
     stages,
   };
+}
+
+/** Lo que hace el gate de merge según su estado: corriendo gana a en cola, y ésta a fallido. */
+function gateDeMerge(estado: VerifyState): FlowStageProgress["gate"] | null {
+  if (estado.running === true) return "running";
+  if (estado.queued === true) return "queued";
+  return estado.status === "failed" ? "failed" : null;
 }
 
 function mtimeOf(cycle: string, key: string): number | null {

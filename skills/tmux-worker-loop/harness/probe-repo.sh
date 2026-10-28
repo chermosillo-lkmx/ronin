@@ -102,7 +102,7 @@ if [ -f "$worktree/pytest.ini" ] || [ -f "$worktree/pyproject.toml" ] || [ -f "$
     printf '%s\n' \
       'STACK=python' \
       'TEST_CMD_N=1' \
-      'TEST_CMD_1=pytest' \
+      'TEST_CMD_1=pytest {CHANGED_TESTS}' \
       'TEST_ONE_CMD=pytest' \
       'TEST_GLOBS=test_*.py *_test.py' \
       'DOC_GLOBS=README.md docs/**' \
@@ -153,7 +153,7 @@ else
     exit 1
   fi
   test_cmd_n=1
-  test_cmd_1='npm test'
+  test_cmd_1='npm test -- {CHANGED_TESTS}'
   test_cmd_2=''
   test_cmd_3=''
 fi

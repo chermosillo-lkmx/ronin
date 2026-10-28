@@ -202,6 +202,20 @@ while [ "$declaration_alias_warning_index" -lt "${#declaration_alias_warnings[@]
   declaration_alias_warning_index=$((declaration_alias_warning_index + 1))
 done
 
+# A TEST_CMD without {CHANGED_TESTS} reruns the full suite on every RGR phase.
+# The full suite belongs to Ronin's pre-merge gate, but an untargeted command
+# still produces valid evidence, so it is reported as a warning, not a violation.
+untargeted_suites=$(
+  while IFS='=' read -r untargeted_slot _; do
+    [ -n "$untargeted_slot" ] && [ -f "$CYCLE_DIR/harness.$untargeted_slot.env" ] || continue
+    awk -F= '$1 ~ /^TEST_CMD_[0-9]+$/ && index(substr($0, length($1) + 2), "{CHANGED_TESTS}") == 0 { print $1 }' \
+      "$CYCLE_DIR/harness.$untargeted_slot.env"
+  done < "$worktrees_file" | LC_ALL=C sort -u
+)
+for untargeted_suite in $untargeted_suites; do
+  warn "WARN suite-completa: $untargeted_suite no está dirigido"
+done
+
 outside_scope_slots=()
 outside_scope_intervals=()
 outside_scope_to_trees=()

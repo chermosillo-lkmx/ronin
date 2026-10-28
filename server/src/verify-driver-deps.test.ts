@@ -10,6 +10,9 @@ function sources(overrides: Partial<VerifyDriverDepSources> = {}): VerifyDriverD
     resolveFlow: () => ({ stages: [], verifyAfter: [] }),
     cycleDirForSession: (name) => `/cycle/${name}`,
     detectStage: () => null,
+    gateSettings: () => ({ timeoutMin: 45, maxConcurrent: 2 }),
+    repoGate: () => ({}),
+    deliverPrompt: async () => true,
     ...overrides,
   };
 }
@@ -136,4 +139,106 @@ test("A4: flowFor cae al override por repo cuando flow.json está corrupto", () 
   }));
 
   assert.deepEqual(deps.flowFor("cowork-corrupt", "monorepo"), override);
+});
+
+test("gateConfig incluye UNIT_GATE_XDIST sólo si el repo lo declara", () => {
+  const sin = createVerifyDriverDeps(sources({ repoGate: () => ({}) }));
+  assert.deepEqual(sin.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate" });
+  const con = createVerifyDriverDeps(sources({ repoGate: (repo) => (repo === "api" ? { xdist: 4 } : {}) }));
+  assert.deepEqual(con.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_XDIST: "4" });
+  assert.deepEqual(con.gateConfig("otro").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate" });
+});
+
+test("gateConfig toma el timeout del repo o, si falta, el global (en ms), leído en cada llamada", () => {
+  let global = 45;
+  const deps = createVerifyDriverDeps(sources({
+    gateSettings: () => ({ timeoutMin: global, maxConcurrent: 2 }),
+    repoGate: (repo) => (repo === "lento" ? { timeoutMin: 120 } : {}),
+  }));
+  assert.equal(deps.gateConfig("lento").timeoutMs, 120 * 60_000);
+  assert.equal(deps.gateConfig("api").timeoutMs, 45 * 60_000);
+  global = 30;
+  assert.equal(deps.gateConfig("api").timeoutMs, 30 * 60_000);
+});
+
+test("maxConcurrent sale de gate.maxConcurrent de settings, leído en cada llamada", () => {
+  let max = 2;
+  const deps = createVerifyDriverDeps(sources({ gateSettings: () => ({ timeoutMin: 45, maxConcurrent: max }) }));
+  assert.equal(deps.maxConcurrent?.(), 2);
+  max = 4;
+  assert.equal(deps.maxConcurrent?.(), 4);
+});
+
+/** Una sesión de workflow: ventana 0 = el conductor (%3); la 1 la abrió para delegar y es la ACTIVA (%7). */
+const conVentanas = (panes: Array<{ id: string; windowIndex: number; role: string | null }>) => async () => ({
+  diagnostic: null,
+  sessions: [{ name: "cowork-x", kind: "managed" as const, attention: { level: "idle" }, panes }],
+});
+
+test("notify: true si la entrega llegó; false si deliverPrompt dice que no o lanza", async () => {
+  const vistos: Array<[string, string]> = [];
+  const inventario = conVentanas([{ id: "%3", windowIndex: 0, role: "conductor" }]);
+  const ok = createVerifyDriverDeps(sources({ readTmuxInventory: inventario, deliverPrompt: async (s, t) => { vistos.push([s, t]); return true; } }));
+  assert.equal(await ok.notify!("cowork-x", "UNIT-GATE: PASS"), true);
+  assert.deepEqual(vistos, [["%3", "UNIT-GATE: PASS"]]);
+
+  const sinCli = createVerifyDriverDeps(sources({ readTmuxInventory: inventario, deliverPrompt: async () => false }));
+  assert.equal(await sinCli.notify!("cowork-x", "t"), false);
+
+  const lanza = createVerifyDriverDeps(sources({ readTmuxInventory: inventario, deliverPrompt: async () => { throw new Error("tmux"); } }));
+  assert.equal(await lanza.notify!("cowork-x", "t"), false);
+});
+
+test("notify: entrega al pane conductor (%N de la ventana 0), nunca al pane activo de la sesión", async () => {
+  const vistos: string[] = [];
+  const deps = createVerifyDriverDeps(sources({
+    readTmuxInventory: conVentanas([
+      { id: "%3", windowIndex: 0, role: "conductor" },
+      { id: "%7", windowIndex: 1, role: "ejecutor" },
+    ]),
+    deliverPrompt: async (target) => { vistos.push(target); return true; },
+  }));
+  assert.equal(await deps.notify!("cowork-x", "UNIT-GATE: PASS"), true);
+  assert.deepEqual(vistos, ["%3"]);
+});
+
+test("notify: en el arreglo de 4 panes entrega al pane driver", async () => {
+  const vistos: string[] = [];
+  const deps = createVerifyDriverDeps(sources({
+    readTmuxInventory: conVentanas([
+      { id: "%1", windowIndex: 0, role: "driver" },
+      { id: "%2", windowIndex: 0, role: "worker" },
+      { id: "%4", windowIndex: 0, role: "review" },
+    ]),
+    deliverPrompt: async (target) => { vistos.push(target); return true; },
+  }));
+  assert.equal(await deps.notify!("cowork-x", "t"), true);
+  assert.deepEqual(vistos, ["%1"]);
+});
+
+test("notify: sin un conductor inequívoco devuelve false y no escribe en ningún pane", async () => {
+  let llamadas = 0;
+  const entregar = async () => { llamadas++; return true; };
+  const ambiguo = createVerifyDriverDeps(sources({
+    readTmuxInventory: conVentanas([
+      { id: "%1", windowIndex: 0, role: "conductor" },
+      { id: "%2", windowIndex: 0, role: "conductor" },
+    ]),
+    deliverPrompt: entregar,
+  }));
+  const ausente = createVerifyDriverDeps(sources({ readTmuxInventory: conVentanas([{ id: "%7", windowIndex: 1, role: "ejecutor" }]), deliverPrompt: entregar }));
+  const otra = createVerifyDriverDeps(sources({ readTmuxInventory: async () => ({ diagnostic: null, sessions: [] }), deliverPrompt: entregar }));
+  const diagnostico = createVerifyDriverDeps(sources({
+    readTmuxInventory: async () => ({ diagnostic: { kind: "x" }, sessions: [] }),
+    deliverPrompt: entregar,
+  }));
+  const lanza = createVerifyDriverDeps(sources({ readTmuxInventory: async () => { throw new Error("tmux"); }, deliverPrompt: entregar }));
+  for (const d of [ambiguo, ausente, otra, diagnostico, lanza]) assert.equal(await d.notify!("cowork-x", "t"), false);
+  assert.equal(llamadas, 0);
+});
+
+test("el driver real lee el mtime de los sentinelas (vuelta a pre-merge desde pr/merge)", () => {
+  const deps = createVerifyDriverDeps(sources({}));
+  assert.equal(typeof deps.sentinelAt, "function");
+  assert.equal(deps.sentinelAt!("/no/existe/ronin-ciclo", "pre-merge"), null);
 });

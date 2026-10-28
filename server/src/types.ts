@@ -195,6 +195,18 @@ export interface FlowStageProgress {
   at?: number;
   /** Intentos gastados de verifyCmd; sólo viaja con `failed`. */
   attempts?: number;
+  /**
+   * `gate-sin-entregar`: el veredicto del gate de merge no se le pudo entregar al worker (verify
+   * notify "failed"). `gate-agotado`: el gate de merge falló con todos sus intentos gastados.
+   */
+  attention?: "gate-sin-entregar" | "gate-agotado";
+  /**
+   * Sólo en etapas con gate de merge: lo que el gate está haciendo aunque el centinela de la etapa
+   * ya exista (el worker lo toca ANTES de que el gate corra). `failed` va con `status: "failed"`.
+   */
+  gate?: "queued" | "running" | "failed";
+  /** Razón del FAIL del gate de merge (sucio, timeout, entorno…); sólo con `gate: "failed"`. */
+  reason?: string;
 }
 
 export interface SessionFlow {

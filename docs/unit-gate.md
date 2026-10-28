@@ -5,18 +5,35 @@ Regla que hace cumplir en **todos los workflows** de Ronin para el monorepo Lieb
 > Ningún PR se mergea sin pruebas unitarias que cubran sus líneas nuevas, sin la suite del
 > servicio en verde y sin respetar el piso de cobertura del repo.
 
-El gate es un `verifyCmd` de etapa (P2): Ronin lo corre en el **worktree de la sesión** cuando el
-worker toca el sentinela de la etapa y está ocioso; `maxRetries: 2`; el veredicto queda en
-`<cycle>/verify-<stage>.json` y en el medidor del Harness. Ronin observa, no ejecuta: la
-instrucción de la etapa le pide al worker correr el mismo script y no avanzar/mergear sin
-`UNIT-GATE: PASS`. Como `verifyCmd` sólo se honra en fuentes gitignored, vive en:
+El gate es un `verifyCmd` de la etapa **`pre-merge`** (`mergeGate: true`, `maxRetries: 3`), que va
+inmediatamente antes de la etapa que mergea (`pr` o `merge`). Se corre **una sola vez por ciclo**:
+el worker no corre la suite ni `unit-gate.sh` en ninguna etapa; en `tests` sólo hace tests
+dirigidos y los reporta con `reportar_pruebas`. Cuando el worker commitea, toca el sentinela de
+`pre-merge` y termina su turno, Ronin corre el gate en el **worktree de la sesión**, deja el
+veredicto en `<cycle>/verify-pre-merge.json` (la salida de la corrida, recortada, en
+`<cycle>/verify-pre-merge.log`; un timeout queda con `reason: "timeout"`) y en el medidor del
+Harness, y le escribe al worker `UNIT-GATE: PASS` o `UNIT-GATE: FAIL` (con PASS sigue a la siguiente
+etapa; con FAIL lee el `.log`, arregla con tests dirigidos, commitea y toca el sentinela otra vez).
+`maxRetries` cuenta commits distintos: el FAIL que gasta el último dice
+`UNIT-GATE: FAIL — intentos agotados (n/max); pide intervención humana` y la sesión pide atención
+(`gate-agotado`). El gate sólo se re-arma mientras el worker sigue en `pre-merge`: tocado el
+sentinela de la etapa siguiente, actualizar la rama ya no vuelve a correr la suite. Una etapa
+`pre-merge` **sin** `verifyCmd` (catálogo empaquetado) recibe una vez `UNIT-GATE: SIN-GATE` y el
+worker sigue. Antes de mergear, `pr`/`merge` exigen `status: "passed"` **y** que el HEAD sea el de
+`shas` (un FAIL también guarda `shas`); si el HEAD cambió y el diff no es sólo `e2e_dev/`, mandan
+volver a `pre-merge`. Como `verifyCmd` sólo se honra en fuentes gitignored, vive en:
 
 | dónde | etapa con gate | notas |
 |---|---|---|
-| `workflows.json` (catálogo): `tmux-worker-loop`, `claude-plan-codex-impl`, `hotfix-verificado` | `tests` | además `pr` pide re‑correrlo antes del merge |
-| `workflows.json`: `pr-review-merge-dev` | `arreglar` (antes de `merge`) | `merge` pide re‑correrlo sobre el estado final |
-| `repo-config.json` → `monorepo.workflow` (default cuando no se elige del catálogo) | `tests` | |
+| `workflows.json` (catálogo): `tmux-worker-loop`, `claude-plan-codex-impl`, `hotfix-verificado` | `pre-merge` (entre `tests` y `pr`) | `tmux-worker-loop` y `hotfix-verificado` ganan una etapa `pr` explícita; `tests` ya no lleva gate |
+| `workflows.json`: `pr-review-merge-dev` | `pre-merge` (antes de `merge`) | `arreglar` ya no lleva gate; `merge` sólo confirma que el HEAD sea el aprobado |
+| `repo-config.json` → `monorepo.workflow` (default cuando no se elige del catálogo) | — | ya no existe en el `repo-config.json` vigente; no se recrea |
 | `workflow.json` (global legacy, git-tracked) | — | sólo el texto de la regla; `verifyCmd` se ignora ahí por diseño (B3) |
+
+El catálogo empaquetado (`server/data/workflows.json`) lleva los mismos textos y etapas pero sin
+`verifyCmd` ni `mergeGate`. Para llevar un catálogo vivo a este esquema:
+`node scripts/migrate-pre-merge.mjs <workflows.json>` (deja `<archivo>.bak-<YYYYMMDD-HHMMSS>`; es
+idempotente: una segunda corrida no cambia nada).
 
 Las sesiones ya creadas conservan su `flow.json` congelado: el gate aplica a sesiones nuevas.
 
@@ -81,8 +98,19 @@ Sub‑repos sin cambios se omiten; `*-base` (checkouts de control) se ignoran.
 ~/code/claude-cowork/scripts/unit-gate.sh /ruta/al/worktree     # default: cwd
 UNIT_GATE_SKIP_SUITE=1 …   # sólo reglas 1‑2; salta suite y cobertura (reglas 3‑4)
 UNIT_GATE_BASE=origin/main # base de comparación
+UNIT_GATE_E2E_DIRS=a:b …   # rutas e2e extra (además de e2e_dev/) para el atajo sólo-e2e
+UNIT_GATE_XDIST=…          # paralelismo de pytest (xdist) en la suite
+UNIT_GATE_REPORTS_DIR=…    # carpeta (relativa al repo) de los reportes del gate; default reports
+UNIT_GATE_MAIN_ROOT=…      # de dónde toma el .venv si el worktree no tiene (default ~/code/lkmx/liebre)
 UNIT_GATE_EXTRA_JUNIT=a.xml:b.xml … # junits extra para la regla 2 (ver abajo)
 ```
+
+### Atajo sólo-e2e
+
+Si el diff contra la base de un sub-repo sólo toca rutas e2e (`e2e_dev/` y las de
+`UNIT_GATE_E2E_DIRS`, comparadas por prefijo de directorio), ese sub-repo se omite con
+`✅ <repo>: sólo e2e — suite unitaria no requerida`. Un PR (o el PR de seguimiento con sólo
+`e2e_dev/`) no exige entonces la suite unitaria. Si el diff contra la base falla, no hay atajo.
 
 ### Evidencia extra para la regla 2: `UNIT_GATE_EXTRA_JUNIT`
 
@@ -119,7 +147,10 @@ Salida: una línea `✅/❌` por regla y repo, cola de `reports/unit-gate.log` c
 y al final `UNIT-GATE: PASS` o `UNIT-GATE: FAIL` (exit 0 / 1). El log completo de la suite queda
 en `<repo>/reports/unit-gate.log`, el junit en `<repo>/reports/junit-gate.xml` y Cobertura en
 `<repo>/reports/coverage-gate.xml` (Python) o
-`<repo>/reports/coverage-gate/cobertura-coverage.xml` (Node).
+`<repo>/reports/coverage-gate/cobertura-coverage.xml` (Node). En Python el `.coverage` de
+`pytest --cov` también va ahí (`COVERAGE_FILE=<repo>/reports/.coverage`), no a la raíz del sub-repo:
+en repos que no lo ignoran dejaba el árbol sucio. Con `UNIT_GATE_REPORTS_DIR` todo esto cambia de
+`reports/` a esa carpeta.
 
 ## Qué NO es
 

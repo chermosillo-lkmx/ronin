@@ -35,6 +35,8 @@ export interface WfStage {
   verifyCmd?: string;   // P2: shell cmd (exit 0 = pass) gating advancement past this stage. ONLY honored
                         // from the gitignored per-repo override (stripped everywhere git-tracked — RCE guard).
   maxRetries?: number;  // P2: max verify attempts before the stage is marked failed (default 2).
+  mergeGate?: true;     // Marca el gate de unit previo al merge. Igual que verifyCmd: sólo se honra desde el
+                        // override por-repo (gitignored) y únicamente si la etapa trae verifyCmd.
 }
 
 /** Entrada declarada de un workflow; habilita lanzamientos estructurados sin petición libre. */
@@ -71,11 +73,11 @@ export class WorkflowValidationError extends Error {
 }
 
 /**
- * Drop the executable verifyCmd/maxRetries from a stage — single source for the "git-tracked path
+ * Drop the executable verifyCmd/maxRetries (and its mergeGate flag) from a stage — single source for the "git-tracked path
  * strips verifyCmd" rule (B3). Used by the global workflow load; actions strip via validateStages.
  */
-export function stripVerifyFields<T extends object>(stage: T): Omit<T, "verifyCmd" | "maxRetries"> {
-  const { verifyCmd, maxRetries, ...rest } = stage as any;
+export function stripVerifyFields<T extends object>(stage: T): Omit<T, "verifyCmd" | "maxRetries" | "mergeGate"> {
+  const { verifyCmd, maxRetries, mergeGate, ...rest } = stage as any;
   return rest;
 }
 
@@ -220,6 +222,14 @@ function assertStrict(rawStages: any[], verifyAfterRaw: unknown, allowVerifyCmd:
         "verifyCmd sólo se honra en el override por-repo (gitignored); este archivo es git-tracked y un verifyCmd committeado ejecutaría shell arbitrario en el próximo git pull + lanzamiento"
       );
     }
+    // mergeGate cuelga de verifyCmd: misma regla de fuente git-tracked, mismo código (no hay uno aparte).
+    if (s?.mergeGate === true && !allowVerifyCmd) {
+      throw new WorkflowValidationError(
+        `${path}.mergeGate`,
+        "VERIFY_CMD_NOT_ALLOWED",
+        "mergeGate sólo se honra en el override por-repo (gitignored), igual que verifyCmd; este archivo es git-tracked"
+      );
+    }
   }
   if (verifyAfterRaw !== undefined && verifyAfterRaw !== null && typeof verifyAfterRaw !== "string" && !Array.isArray(verifyAfterRaw)) {
     throw new WorkflowValidationError("verifyAfter", "VERIFY_AFTER_TYPE", "verifyAfter debe ser una lista de keys, una key legado o null");
@@ -270,6 +280,8 @@ export function validateStages(input: WorkflowConfigInput, options: ValidateStag
       const maxRetries = verifyCmd
         ? Number.isFinite(s?.maxRetries) ? Math.min(Math.max(0, Math.floor(s!.maxRetries as number)), 10) : 2
         : undefined;
+      // mergeGate: sólo el booleano true, y sólo si la etapa conserva un verifyCmd (si no, no hay gate que marcar).
+      const mergeGate = verifyCmd && s?.mergeGate === true ? (true as const) : undefined;
       const executor = s?.executor === "claude" || s?.executor === "codex" || s?.executor === "agy" ? s.executor : undefined;
       const model = sanitizeModel(typeof s?.model === "string" ? s.model : "");
       return {
@@ -282,6 +294,7 @@ export function validateStages(input: WorkflowConfigInput, options: ValidateStag
         ...(model ? { model } : {}),
         ...(verifyCmd ? { verifyCmd } : {}),
         ...(maxRetries !== undefined ? { maxRetries } : {}),
+        ...(mergeGate ? { mergeGate } : {}),
       };
     })
     .filter((s) => s.key && !seen.has(s.key) && (seen.add(s.key), true));
