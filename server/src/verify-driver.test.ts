@@ -528,7 +528,7 @@ test("tickOnce: mergeGate: HEADs ilegibles después de un PASS → no passed", a
   }
 });
 
-test("tickOnce: mergeGate un FAIL no vuelve a leer los HEADs (sólo un PASS se re-valida)", async () => {
+test("tickOnce: mergeGate un FAIL también re-lee los HEADs; si no cambiaron, gasta el intento con sus SHAs", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
   try {
     let lecturas = 0;
@@ -538,8 +538,9 @@ test("tickOnce: mergeGate un FAIL no vuelve a leer los HEADs (sólo un PASS se r
       run: async () => ({ ok: false, code: 1, output: "rojo" }),
     });
     await tick(d, new Map());
-    assert.equal(lecturas, 1);
+    assert.equal(lecturas, 2);
     assert.equal(escrito[0].status, "failed");
+    assert.equal(escrito[0].attempts, 1);
     assert.deepEqual(escrito[0].shas, { api: SHA_A });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1668,4 +1669,76 @@ test("vuelve a pre-merge sucio con intentos agotados → se re-entrega el agotad
   assert.equal(a.mensajes.length, 1);
   assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — intentos agotados \(3\/3\)/);
   assert.deepEqual(a.estado()?.shas, { api: SHA_A });
+});
+
+// ---- Re-arme del gate de merge sólo con el sentinela re-tocado (2026-11-03) ----
+// Con «cualquier commit limpio re-arma», un worker que commitea un arreglo a medias, rebasa (cada
+// commit intermedio del rebase es un SHA limpio) o espera otra cosa en pre-merge gastaba intentos
+// sin pedirlos: 1dfkggwffra agotó 3/3 con UN solo toque de pre-merge (intento 2 = commit del
+// arreglo, intento 3 = commit intermedio de un rebase, 10 s antes del HEAD final).
+
+test("re-arme: failed + commit nuevo SIN re-tocar pre-merge tras la foto → no corre", async () => {
+  const a = avisos({ heads: async () => limpio(SHA_B), sentinelAt: tocados({ "pre-merge": 100 }) });
+  a.setEstado({ attempts: 1, status: "failed", shas: { api: SHA_A }, at: 200, durationMs: 50, notify: "sent" });
+  await a.tick();
+  assert.equal(a.corridas.length, 0);
+  assert.equal(a.estado()?.attempts, 1);
+});
+
+test("re-arme: failed + commit nuevo con pre-merge re-tocado después del veredicto → corre", async () => {
+  const a = avisos({ heads: async () => limpio(SHA_B), sentinelAt: tocados({ "pre-merge": 300 }) });
+  a.setEstado({ attempts: 1, status: "failed", shas: { api: SHA_A }, at: 200, durationMs: 50, notify: "sent" });
+  await a.tick();
+  assert.equal(a.corridas.length, 1);
+  assert.equal(a.estado()?.status, "passed");
+  assert.deepEqual(a.estado()?.shas, { api: SHA_B });
+});
+
+test("re-arme: un toque DURANTE la corrida (después de la foto) también la pide", async () => {
+  const a = avisos({ heads: async () => limpio(SHA_B), sentinelAt: tocados({ "pre-merge": 170 }) });
+  a.setEstado({ attempts: 1, status: "failed", shas: { api: SHA_A }, at: 200, durationMs: 50, notify: "sent" });
+  await a.tick();
+  assert.equal(a.corridas.length, 1);
+});
+
+test("re-arme: passed + commit nuevo SIN re-tocar → no corre (la etapa pr compara SHAs)", async () => {
+  const a = avisos({ heads: async () => limpio(SHA_B), sentinelAt: tocados({ "pre-merge": 100 }) });
+  a.setEstado({ attempts: 0, status: "passed", shas: { api: SHA_A }, at: 200, durationMs: 50, notify: "sent" });
+  await a.tick();
+  assert.equal(a.corridas.length, 0);
+});
+
+test("re-arme: failed por árbol sucio → commit limpio sin re-tocar no corre; re-tocado sí", async () => {
+  const sucio = (): VerifyState => ({ attempts: 0, status: "failed", reason: "hay cambios sin commitear", at: 200, notify: "sent" });
+  const sin = avisos({ heads: async () => limpio(SHA_A), sentinelAt: tocados({ "pre-merge": 150 }) });
+  sin.setEstado(sucio());
+  await sin.tick();
+  assert.equal(sin.corridas.length, 0);
+  const con = avisos({ heads: async () => limpio(SHA_A), sentinelAt: tocados({ "pre-merge": 250 }) });
+  con.setEstado(sucio());
+  await con.tick();
+  assert.equal(con.corridas.length, 1);
+});
+
+test("selectGate: con retocado=false un gate de merge resuelto no se re-arma aunque cambie el SHA", () => {
+  const failed = (): VerifyState => ({ attempts: 1, status: "failed", shas: { api: SHA_A } });
+  assert.equal(selectGate(MERGE, "pre-merge", failed, () => limpio(SHA_B), undefined, () => false), null);
+  assert.equal(selectGate(MERGE, "pre-merge", failed, () => limpio(SHA_B), undefined, () => true)?.key, "pre-merge");
+});
+
+test("tickOnce: mergeGate FAIL con el árbol cambiado a media corrida no gasta intento ni guarda SHAs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let corrio = false;
+    const { d, escrito } = mergeDeps({
+      cycle: dir,
+      readState: () => ({ attempts: 2, status: "pending" }),
+      heads: async () => (corrio ? limpio(SHA_B) : limpio(SHA_A)),
+      run: async () => { corrio = true; return { ok: false, code: 1, output: "rojo" }; },
+    });
+    await tick(d, new Map());
+    assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "el árbol cambió durante la corrida", attempts: 2 }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
