@@ -84,6 +84,15 @@ async function bindGroup(message: TelegramMessage, code: string, store: Telegram
     groupExpiresAt: undefined,
     ...(sameChat ? {} : { topics: {}, disabledTopics: undefined, activatedAt: undefined }),
   });
+  if (!sameChat) {
+    // Los IDs de mensaje son por chat: una pregunta o propuesta del grupo anterior podría coincidir con una respuesta del nuevo.
+    store.updateState((state) => {
+      state.proposals = {};
+      state.drafts = {};
+      state.questions = {};
+      state.sessions = {};
+    });
+  }
   await reply(api, message.chat.id, "Grupo vinculado a Ronin. Vuelve a la app para elegir los repos.");
   return true;
 }

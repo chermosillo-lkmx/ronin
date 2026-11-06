@@ -20,6 +20,7 @@ export const LAST_ERROR_TEXT = {
   noUser: "Primero vincula tu usuario.",
   userLinked: "Ya hay un usuario vinculado. Reinicia la vinculación desde Ronin para cambiarlo.",
   noGroup: "Primero vincula el grupo.",
+  changed: "La configuración de Telegram cambió mientras se creaban los temas; no se guardó nada más. Revisa el estado e inténtalo de nuevo.",
   unknownRepo: "Hay repos que Ronin no conoce.",
   badRepos: "Se esperaba una lista de repos.",
   topics: "No pude crear el tema de algunos repos.",
@@ -211,7 +212,7 @@ export function createTelegramRouter(deps: TelegramRouterDeps): Router {
     const run = reposQueue.then(async () => {
       const config = store.readConfig();
       const api = runtime.getApi();
-      if (config.chatId === undefined || !api) return { status: 409 as const, failed: [] as string[] };
+      if (config.chatId === undefined || !api) return { status: 409 as const, changed: false, failed: [] as string[] };
 
       // Desmarcar quita el repo de `topics` (nada lo enruta ni lo sigue) pero guarda su hilo; marcarlo lo restaura.
       const topics = { ...config.topics };
@@ -229,16 +230,25 @@ export function createTelegramRouter(deps: TelegramRouterDeps): Router {
       }
       store.updateConfig({ topics, disabledTopics: Object.keys(disabled).length > 0 ? disabled : undefined });
 
+      // Durante un await la configuración puede cambiar (DELETE /, token nuevo, otro grupo): si el grupo o el
+      // bot ya no son los de este PUT, no se escribe nada más ni se sigue creando temas con el API anterior.
+      const chatId = config.chatId;
+      const token = store.readToken();
+      const stale = (): boolean => store.readConfig().chatId !== chatId || store.readToken() !== token;
       const failed: string[] = [];
       for (const repo of desired) {
         if (topics[repo] !== undefined) continue;
+        if (stale()) return { status: 409 as const, changed: true, failed };
+        let threadId: number | undefined;
         try {
-          const created = await api.createForumTopic(config.chatId, repo);
-          topics[repo] = created.message_thread_id;
-          store.updateConfig({ topics: { ...store.readConfig().topics, [repo]: created.message_thread_id } });
+          threadId = (await api.createForumTopic(chatId, repo)).message_thread_id;
         } catch {
           failed.push(repo);
         }
+        if (stale()) return { status: 409 as const, changed: true, failed };
+        if (threadId === undefined) continue;
+        topics[repo] = threadId;
+        store.updateConfig({ topics: { ...store.readConfig().topics, [repo]: threadId } });
       }
       const current = store.readConfig();
       if (current.activatedAt === undefined && Object.keys(current.topics).length > 0) {
@@ -249,7 +259,7 @@ export function createTelegramRouter(deps: TelegramRouterDeps): Router {
     reposQueue = run.catch(() => undefined);
     const result = await run;
 
-    if (result.status === 409) return fail(res, 409, LAST_ERROR_TEXT.noGroup);
+    if (result.status === 409) return fail(res, 409, result.changed ? LAST_ERROR_TEXT.changed : LAST_ERROR_TEXT.noGroup);
     const rows = repoRows(store.readConfig());
     if (result.status === 502) return fail(res, 502, LAST_ERROR_TEXT.topics, { failed: result.failed, repos: rows });
     res.json({ repos: rows });

@@ -114,6 +114,29 @@ test("vincular un grupo distinto descarta los temas del anterior", async () => {
   assert.equal(config.activatedAt, undefined);
 });
 
+test("vincular un grupo distinto limpia propuestas, borradores, preguntas y sesiones pero conserva el offset", async () => {
+  const { store, api } = rig({ userId: 7, chatId: -5, groupCode: "g1", groupExpiresAt: NOW + 1000 });
+  store.updateState((s) => {
+    s.offset = 42;
+    s.proposals.p = { id: "p", repo: "a", instruction: "x", createdAt: 1, editMessageId: 3 };
+    s.drafts.d = { id: "d", repo: "a", comment: "c", text: "t", createdAt: 1, editMessageId: 4 };
+    s.questions.q = { session: "s", questionId: "q", messageId: 9, options: [], createdAt: "x" };
+    s.sessions.s = { session: "s", repo: "a" };
+    s.summaries.k = { session: "s", createdAt: 1 };
+  });
+  assert.equal(await handleSetupUpdate(msg("/start g1", 7, group), store, api, () => NOW), true);
+  const state = store.readState();
+  assert.equal(state.offset, 42);
+  for (const key of ["proposals", "drafts", "questions", "sessions"] as const) assert.deepEqual(state[key], {}, key);
+});
+
+test("re-vincular el mismo grupo no toca el estado", async () => {
+  const { store, api } = rig({ userId: 7, chatId: -100, groupCode: "g1", groupExpiresAt: NOW + 1000 });
+  store.updateState((s) => { s.sessions.s = { session: "s", repo: "a" }; });
+  assert.equal(await handleSetupUpdate(msg("/start g1", 7, group), store, api, () => NOW), true);
+  assert.ok(store.readState().sessions.s);
+});
+
 test("el grupo no se vincula si otro usuario manda el código", async () => {
   const { store, api } = rig({ userId: 7, groupCode: "g1", groupExpiresAt: NOW + 1000 });
   assert.equal(await handleSetupUpdate(msg("/start@ronin_bot g1", 99, group), store, api, () => NOW), false);

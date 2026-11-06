@@ -368,6 +368,66 @@ test("PUT /repos sin ningún tema creado no fija activatedAt", async () => {
   assert.equal(r.store.readConfig().activatedAt, undefined);
 });
 
+function pendingTopics() {
+  const started: string[] = [];
+  let release!: (id: number) => void;
+  const gate = new Promise<number>((resolve) => { release = resolve; });
+  const api = {
+    createForumTopic: async (_chat: number, name: string) => {
+      started.push(name);
+      const id = await gate;
+      return { message_thread_id: id, name };
+    },
+  };
+  return { api, started, release };
+}
+const until = async (cond: () => boolean) => { for (let i = 0; i < 200 && !cond(); i += 1) await new Promise((r) => setTimeout(r, 5)); };
+
+test("DELETE / durante un createForumTopic pendiente: el PUT /repos no reescribe nada y responde 409", async () => {
+  const pending = pendingTopics();
+  const r = rig({ api: pending.api });
+  r.store.updateConfig(ready);
+  const put = r.call("PUT", "/repos", { repos: ["repoA", "repoB"] });
+  await until(() => pending.started.length > 0);
+  await r.call("DELETE", "/");
+  pending.release(5);
+  const response = await put;
+  assert.equal(response.status, 409);
+  assert.deepEqual(r.store.readConfig(), { topics: {} });
+  assert.deepEqual(pending.started, ["repoA"], "no sigue creando temas con el API anterior");
+});
+
+test("re-vincular otro grupo durante un createForumTopic pendiente: los hilos viejos no entran al grupo nuevo", async () => {
+  const pending = pendingTopics();
+  const r = rig({ api: pending.api });
+  r.store.updateConfig(ready);
+  const put = r.call("PUT", "/repos", { repos: ["repoA", "repoB"] });
+  await until(() => pending.started.length > 0);
+  r.store.updateConfig({ chatId: -999, topics: {}, disabledTopics: undefined, activatedAt: undefined });
+  pending.release(5);
+  const response = await put;
+  assert.equal(response.status, 409);
+  const config = r.store.readConfig();
+  assert.equal(config.chatId, -999);
+  assert.deepEqual(config.topics, {});
+  assert.equal(config.activatedAt, undefined);
+  assert.deepEqual(pending.started, ["repoA"]);
+});
+
+test("PUT /token durante un createForumTopic pendiente tampoco recibe el hilo del bot anterior", async () => {
+  const pending = pendingTopics();
+  const r = rig({ api: pending.api });
+  r.store.updateConfig(ready);
+  const put = r.call("PUT", "/repos", { repos: ["repoA"] });
+  await until(() => pending.started.length > 0);
+  assert.equal((await r.call("PUT", "/token", { token: NEW_TOKEN })).status, 200);
+  pending.release(5);
+  assert.equal((await put).status, 409);
+  const config = r.store.readConfig();
+  assert.deepEqual(config.topics, {});
+  assert.equal(config.activatedAt, undefined);
+});
+
 test("DELETE / borra token, configuración y estado, y recarga", async () => {
   const r = rig();
   r.store.updateConfig({ ...ready, topics: { repoA: 5 } });
