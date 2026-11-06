@@ -12,6 +12,8 @@ export const WATCH_INTERVAL_MS = 15_000;
 const MAX_INLINE_CHARS = 3800;
 const MAX_BUTTON_LABEL_CHARS = 60;
 const MAX_LOGGED_ERROR_CHARS = 200;
+/** Pasado esto, una pregunta enviada se olvida: su botón deja de valer y Responder es una orden nueva. */
+export const QUESTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Ticks seguidos que hacen falta para dar por real un idle o un shell. */
 const CONFIRM_TICKS = 2;
 
@@ -248,9 +250,23 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
     store.updateState((state) => { delete state.sessions[entry.session]; });
   }
 
+  function pruneQuestions(): void {
+    const stale = (createdAt: string): boolean => !(now() - Date.parse(createdAt) <= QUESTION_TTL_MS);
+    try {
+      // Sin nada que podar no se escribe: esto corre en cada tick.
+      if (!Object.values(store.readState().questions).some((q) => stale(q.createdAt))) return;
+      store.updateState((state) => {
+        for (const [key, q] of Object.entries(state.questions)) if (stale(q.createdAt)) delete state.questions[key];
+      });
+    } catch (error) {
+      logFailure("no pude podar las preguntas", error);
+    }
+  }
+
   async function runTick(): Promise<void> {
     const config = store.readConfig();
     if (typeof config.chatId !== "number") return;
+    pruneQuestions();
     let statuses: McpSessionStatus[];
     try {
       statuses = await port.status();

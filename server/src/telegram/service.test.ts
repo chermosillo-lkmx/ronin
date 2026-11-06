@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { TelegramApiError, type TelegramApi, type Update } from "./api.js";
-import type { ConversationDeps } from "./conversation.js";
+import { createConversation, type ConversationDeps } from "./conversation.js";
 import { createTelegramRuntime, type TelegramRuntimeDeps } from "./service.js";
 import { createTelegramStore } from "./store.js";
 
@@ -234,6 +234,86 @@ test("al arrancar libera los reclamos que dejó un cierre brusco", async () => {
   assert.equal(state.questions.q.claimed, undefined);
   assert.ok(state.proposals.b);
   await stop();
+});
+
+/** Conversación real sobre el store del rig: lo único simulado es el exterior. */
+function realConversation(r: ReturnType<typeof rig>, reply: (name: string, body: string, id?: string) => Promise<void>) {
+  const notices: string[] = [];
+  const conversation = createConversation({
+    store: r.store,
+    outbound: {
+      send: async (msg) => { notices.push(msg.text); return { message_id: 1, chat: { id: -100, type: "supergroup" } }; },
+      sendLong: async () => {},
+    },
+    answerCallback: async () => {},
+    port: { catalog: async () => ({ repos: [], workflows: [] }), reply },
+    launch: async () => ({ name: "x" }),
+    reports: {} as never,
+    status: async () => [],
+    isFollowed: () => true,
+    summaryFor: () => null,
+    secrets: () => [],
+    interpret: async () => { throw new Error("no debe interpretarse"); },
+    now: () => 1,
+    log: () => {},
+  });
+  return { conversation, notices };
+}
+const tapOn = (id: number, data: string): Update => ({
+  update_id: id,
+  callback_query: { id: `cb-${id}`, from: { id: 7 }, data, message: { message_id: 42, chat: { id: -100, type: "supergroup" }, message_thread_id: 11 } },
+});
+const replyOn = (id: number, messageId: number, text: string): Update => ({
+  update_id: id,
+  message: { message_id: 1000 + id, from: { id: 7 }, chat: { id: -100, type: "supergroup" }, message_thread_id: 11, text, reply_to_message: { message_id: messageId } },
+});
+const restart = async (r: ReturnType<typeof rig>): Promise<void> => { await r.runtime.start()(); };
+
+test("una pregunta contestada no revive tras un reinicio, ni por botón ni por Responder", async () => {
+  const r = rig({ token: null });
+  r.store.updateConfig({ userId: 7, chatId: -100, topics: { api: 11 } });
+  r.store.updateState((s) => {
+    s.questions.a = { session: "s", questionId: "same", messageId: 901, options: ["Sí", "No"], createdAt: "t" };
+    s.questions.b = { session: "s", questionId: "same", messageId: 902, options: [], createdAt: "t" };
+  });
+  const replies: string[] = [];
+  const { conversation } = realConversation(r, async (_n, body) => { replies.push(body); });
+  await conversation.handle(tapOn(1, "q:a:1"));
+  await conversation.handle(replyOn(2, 902, "hazlo"));
+  assert.deepEqual(replies, ["1", "hazlo"]);
+
+  await restart(r);
+
+  const after = realConversation(r, async (_n, body) => { replies.push(body); });
+  await after.conversation.handle(tapOn(3, "q:a:1"));
+  await after.conversation.handle(replyOn(4, 902, "otra vez"));
+  assert.deepEqual(replies, ["1", "hazlo"], "nada nuevo llega al agente");
+  assert.equal(after.notices.length, 2);
+  for (const notice of after.notices) assert.match(notice, /ya tiene una respuesta/i);
+  assert.equal(r.store.readState().questions.a.answered, true);
+  assert.equal(r.store.readState().questions.b.answered, true);
+
+  await restart(r);
+  await after.conversation.handle(tapOn(5, "q:a:2"));
+  assert.deepEqual(replies, ["1", "hazlo"], "un segundo reinicio tampoco la revive");
+});
+
+test("una entrega fallida sigue viva y se reintenta tras un reinicio", async () => {
+  const r = rig({ token: null });
+  r.store.updateConfig({ userId: 7, chatId: -100, topics: { api: 11 } });
+  r.store.updateState((s) => {
+    s.questions.a = { session: "s", questionId: "q", messageId: 901, options: ["Sí"], createdAt: "t" };
+  });
+  const replies: string[] = [];
+  let down = true;
+  const { conversation } = realConversation(r, async (_n, body) => { if (down) throw new Error("caído"); replies.push(body); });
+  await conversation.handle(tapOn(1, "q:a:1"));
+  assert.equal(r.store.readState().questions.a.answered, undefined);
+  await restart(r);
+  down = false;
+  await conversation.handle(tapOn(2, "q:a:1"));
+  assert.deepEqual(replies, ["1"]);
+  assert.equal(r.store.readState().questions.a.answered, true);
 });
 
 test("reload relee el token y nunca hay dos getUpdates a la vez", async () => {

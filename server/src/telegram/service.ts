@@ -213,8 +213,11 @@ export function createTelegramRuntime(deps: TelegramRuntimeDeps): TelegramRuntim
 
   function releaseStaleClaims(): void {
     const kinds = ["proposals", "drafts", "questions", "summaries"] as const;
+    // Una pregunta contestada no se libera: sus botones y su Responder deben seguir muertos.
     const claimedItems = (state: ReturnType<TelegramStore["readState"]>) =>
-      kinds.flatMap((kind) => Object.values(state[kind] as Record<string, { claimed?: boolean }>)).filter((item) => item?.claimed);
+      kinds
+        .flatMap((kind) => Object.values(state[kind] as Record<string, { claimed?: boolean; answered?: boolean }>))
+        .filter((item) => item?.claimed && !item.answered);
     try {
       // Sin reclamos no se escribe nada: un arranque limpio no toca el disco.
       if (claimedItems(store.readState()).length === 0) return;

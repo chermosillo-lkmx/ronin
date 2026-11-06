@@ -93,7 +93,7 @@ interface Place {
 
 type NewProposal = Pick<Proposal, "repo" | "instruction" | "thirdParty" | "workflowId" | "workflowName" | "workflowChoices">;
 type Claim<T> = { status: "ok"; item: T } | { status: "gone" } | { status: "busy" };
-type Claimable = { claimed?: boolean; createdAt?: unknown };
+type Claimable = { claimed?: boolean; answered?: boolean; createdAt?: unknown };
 
 const newId = (): string => randomBytes(6).toString("hex");
 const sessionSuffix = (): string => randomInt(36 ** 4).toString(36).padStart(4, "0");
@@ -202,7 +202,7 @@ export function createConversation(deps: ConversationDeps): { handle(update: Upd
       if (!item) return;
       if (kind !== "questions" && expired(item, kind === "summaries" ? SUMMARY_KEY_TTL_MS : PROPOSAL_TTL_MS)) {
         delete items[id];
-      } else if (item.claimed) {
+      } else if (item.claimed || item.answered) {
         result = { status: "busy" };
       } else {
         item.claimed = true;
@@ -351,6 +351,15 @@ export function createConversation(deps: ConversationDeps): { handle(update: Upd
       logFailure("respuesta a sesión", error);
       release("questions", key);
       return onReplyFailure(key, question, error, place);
+    }
+    try {
+      store.updateState((state) => {
+        const delivered = own(state.questions, key);
+        if (delivered) delivered.answered = true;
+      });
+    } catch (error) {
+      // Ya se entregó: el aviso de abajo sigue siendo cierto aunque no se haya podido registrar.
+      logFailure("registro de respuesta entregada", error);
     }
     await notify(place, `Respuesta entregada a ${question.session}.`);
   }

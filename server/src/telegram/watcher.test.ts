@@ -288,6 +288,35 @@ test("un envío fallido no se marca como enviado y se reintenta", async () => {
   cleanup();
 });
 
+test("cada tick poda las preguntas de más de 7 días, contestadas o no", async () => {
+  const { h, watcher, cleanup } = setup();
+  const nowMs = AFTER + 5000;
+  const days7 = 7 * 24 * 60 * 60 * 1000;
+  const at = (ms: number) => new Date(ms).toISOString();
+  const q = (createdAt: string, answered?: boolean) => ({ session: "cowork-a", questionId: "q", messageId: 1, options: [], createdAt, ...(answered ? { answered, claimed: true } : {}) });
+  h.store.updateState((s) => {
+    s.questions.viejaContestada = q(at(nowMs - days7 - 1), true);
+    s.questions.viejaSinContestar = q(at(nowMs - days7 - 1));
+    s.questions.fechaBasura = q("basura");
+    s.questions.recienteContestada = q(at(nowMs - days7 + 1000), true);
+    s.questions.recienteSinContestar = q(at(nowMs - days7 + 1000));
+  });
+  await watcher.tick();
+  assert.deepEqual(Object.keys(h.store.readState().questions).sort(), ["recienteContestada", "recienteSinContestar"]);
+  cleanup();
+});
+
+test("la poda corre aunque no se pueda leer el estado de las sesiones", async () => {
+  const { h, watcher, cleanup } = setup();
+  h.statusError = true;
+  h.store.updateState((s) => {
+    s.questions.vieja = { session: "cowork-a", questionId: "q", messageId: 1, options: [], createdAt: "2000-01-01T00:00:00.000Z" };
+  });
+  await watcher.tick();
+  assert.deepEqual(h.store.readState().questions, {});
+  cleanup();
+});
+
 test("un status que falla no tumba el tick", async () => {
   const { h, watcher, cleanup } = setup();
   h.statusError = true;

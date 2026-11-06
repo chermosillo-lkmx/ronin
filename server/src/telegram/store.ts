@@ -64,8 +64,10 @@ export interface SentQuestion {
   messageId: number;
   options: string[];
   createdAt: string;
-  /** Una respuesta está en curso o ya se entregó. Lo escribe la conversación; un fallo lo quita. */
+  /** Una respuesta está en curso. Lo escribe la conversación; un fallo o un reinicio lo quita. */
   claimed?: boolean;
+  /** La respuesta se entregó: esta entrada ya no acepta otra, ni tras un reinicio. */
+  answered?: boolean;
 }
 
 /** A qué sesión apunta un botón `r:<clave>`: la clave es opaca y siempre cabe en `callback_data`. */

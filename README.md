@@ -370,7 +370,7 @@ no es de un repo: `/reporte diario`, `/reporte semanal`, `/reporte <nombre>`, `/
   Solo hay dos formas de que algo llegue a un agente: **un botón** (los menús numerados) o un mensaje
   enviado con **Responder** de Telegram sobre la pregunta. Cualquier otro texto en el tema es una
   orden nueva y pasa por ✅. Si la pregunta ya no es la que el agente tiene pendiente, no se entrega
-  nada y se avisa; tocar el botón de una pregunta superada no hace nada.
+  nada y se avisa; tocar el botón de una pregunta superada avisa y no entrega nada.
 - **Avisos.** Fin de sesión, fallo de gate, sesión muerta o atascada, con botón para ver el resumen.
 - **Comentarios.** "dame una respuesta para esto: …" devuelve un texto propuesto, con ✏️ Ajustar y
   🔨 Convertir en sesión. Ronin no publica nada en ningún lado.
