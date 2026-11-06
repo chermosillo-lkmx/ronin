@@ -6,10 +6,18 @@ const MAX_CHUNKS_AS_MESSAGES = 3;
 const PER_MINUTE = 20;
 const WINDOW_MS = 60_000;
 
-/** Sustituye cada secreto (los más largos primero) por `[redactado]`. */
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Sustituye cada secreto (los más largos primero) por `[redactado]`. Una sola pasada con
+ * el marcador como primera alternativa: lo ya redactado se conserva tal cual, así que
+ * redactar dos veces no cambia nada ni siquiera con secretos de un carácter.
+ */
 export function redactSecrets(text: string, secrets: string[]): string {
-  const ordered = secrets.filter((s) => s.length > 0).sort((a, b) => b.length - a.length);
-  return ordered.reduce((acc, secret) => acc.split(secret).join(REDACTED), text);
+  const ordered = [...new Set(secrets.filter((s) => s.length > 0))].sort((a, b) => b.length - a.length);
+  if (ordered.length === 0) return text;
+  const pattern = new RegExp([REDACTED, ...ordered].map(escapeRegExp).join("|"), "g");
+  return text.replace(pattern, (match) => (match === REDACTED ? match : REDACTED));
 }
 
 export interface OutboundOptions {
@@ -81,10 +89,12 @@ export function createOutbound(api: TelegramApi, opts: OutboundOptions): Outboun
     }
   }
 
+  /** Envía tal cual: el llamador garantiza que el texto ya está redactado. */
+  const sendRedacted = (msg: SendMessageParams): Promise<TelegramMessage> =>
+    enqueue(msg.chatId, () => attempt(msg.chatId, () => api.sendMessage(msg)));
+
   const send = (msg: SendMessageParams): Promise<TelegramMessage> =>
-    enqueue(msg.chatId, () =>
-      attempt(msg.chatId, () => api.sendMessage({ ...msg, text: redact(msg.text), keyboard: redactKeyboard(msg.keyboard) })),
-    );
+    sendRedacted({ ...msg, text: redact(msg.text), keyboard: redactKeyboard(msg.keyboard) });
 
   const sendLong: Outbound["sendLong"] = async ({ chatId, threadId, title, text }) => {
     const full = redact(title ? `${title}\n\n${text}` : text);
@@ -96,7 +106,8 @@ export function createOutbound(api: TelegramApi, opts: OutboundOptions): Outboun
       );
       return;
     }
-    for (const part of parts) await send({ chatId, threadId, text: part });
+    // `full` ya está redactado: volver a redactar cada trozo podría romper un marcador cortado al partir.
+    for (const part of parts) await sendRedacted({ chatId, threadId, text: part });
   };
 
   return { send, sendLong };

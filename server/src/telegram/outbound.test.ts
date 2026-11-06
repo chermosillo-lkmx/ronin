@@ -45,6 +45,22 @@ test("redactSecrets sustituye y prefiere el secreto más largo", () => {
   assert.equal(redactSecrets("a abc b ab", ["ab", "abc", ""]), "a [redactado] b [redactado]");
 });
 
+test("redactSecrets redacta secretos cortos y es idempotente", () => {
+  const once = redactSecrets("a b a", ["a"]);
+  assert.equal(once, "[redactado] b [redactado]");
+  assert.equal(redactSecrets(once, ["a"]), once);
+  assert.equal(redactSecrets(once, ["a", "re", "dactado", "[", "]"]), once);
+  assert.equal(redactSecrets("x.y x+y", ["x.y", "x+y"]), "[redactado] [redactado]");
+  assert.equal(redactSecrets("x y", ["", ""]), "x y");
+});
+
+test("un trozo no crece más allá de su tamaño por re-redacción con un secreto corto", async () => {
+  const f = fake();
+  await createOutbound(f.api, { secrets: () => ["a"] }).sendLong({ chatId: 1, title: "", text: "a".repeat(400) });
+  assert.ok(f.messages.every((m) => m.text.length <= 4096));
+  assert.equal(f.messages.map((m) => m.text).join(""), "[redactado]".repeat(400));
+});
+
 test("sendLong de 5000 caracteres envía 2 mensajes ≤4096", async () => {
   const f = fake();
   await createOutbound(f.api, { secrets: () => [] }).sendLong({ chatId: 1, title: "", text: "x".repeat(5000) });

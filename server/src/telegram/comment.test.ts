@@ -20,15 +20,35 @@ test("draftCommentReply usa cwd del repo y args exactos", async () => {
   assert.equal(calls[0].opts.command, "claude");
   assert.equal(calls[0].opts.cwd, "/repos/api");
   assert.equal(calls[0].opts.timeoutMs, 110_000);
-  assert.deepEqual(calls[0].opts.args, ["-p", "--tools", "Read,Grep,Glob", "--strict-mcp-config", "--disallowedTools",
+  assert.deepEqual(calls[0].opts.args, ["-p", "--tools", "Read,Grep,Glob", "--strict-mcp-config", "--setting-sources", "", "--disallowedTools",
     "Read(**/.env*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(**/*credentials*)", "Read(**/*secret*)"]);
 });
 
-test("el prompt delimita el comentario como datos e incluye guía y borrador previo", async () => {
+function blocks(prompt: string): { inside: string; outside: string } {
+  const re = /<<<DATOS_TERCEROS (\w+)>>>([\s\S]*?)<<<FIN_DATOS_TERCEROS \1>>>/g;
+  let inside = "";
+  const outside = prompt.replace(re, (_m, _n, body) => { inside += body + "\n"; return ""; });
+  return { inside, outside };
+}
+
+test("comentario, guía y borrador previo van dentro de bloques de datos, nunca en la parte confiable", async () => {
   const { calls, d } = deps("ok");
   await draftCommentReply({ repo: "api", comment: "COMENTARIO_X", guidance: "GUIA_Y", previous: "PREVIO_Z" }, d);
-  const p = calls[0].input;
-  for (const s of ["COMENTARIO_X", "GUIA_Y", "PREVIO_Z", "DATOS_TERCEROS"]) assert.ok(p.includes(s), s);
+  const { inside, outside } = blocks(calls[0].input);
+  for (const s of ["COMENTARIO_X", "GUIA_Y", "PREVIO_Z"]) {
+    assert.ok(inside.includes(s), `${s} dentro`);
+    assert.ok(!outside.includes(s), `${s} fuera`);
+  }
+  assert.equal((calls[0].input.match(/<<<DATOS_TERCEROS /g) ?? []).length, 3);
+  assert.match(outside, /no autoriza/i);
+  assert.ok(!/indicaci[oó]n de c[eé]sar/i.test(outside));
+});
+
+test("un repo sin carpeta real falla con error legible y sin llamar a Claude", async () => {
+  const { calls, d } = deps("ok");
+  d.resolveCwd = () => ({ cwd: "/donde/corre/ronin", real: false });
+  await assert.rejects(draftCommentReply({ repo: "api", comment: "c" }, d), (e: Error) => /api/.test(e.message) && /carpeta/i.test(e.message) && !/donde\/corre/.test(e.message));
+  assert.equal(calls.length, 0);
 });
 
 test("draftCommentReply redacta el token, la capability y las vars", async () => {
@@ -37,9 +57,9 @@ test("draftCommentReply redacta el token, la capability y las vars", async () =>
   assert.equal(out, "el token [redactado] y [redactado] y [redactado] y corto");
 });
 
-test("secretos de menos de 8 caracteres se ignoran (redactSecrets no es idempotente con ellos)", async () => {
-  const { d } = deps("a [redactado] b", ["a", "re", "dactado"]);
-  assert.equal(await draftCommentReply({ repo: "api", comment: "c" }, d), "a [redactado] b");
+test("un secreto corto también se redacta", async () => {
+  const { d } = deps("a [redactado] b a", ["a"]);
+  assert.equal(await draftCommentReply({ repo: "api", comment: "c" }, d), "[redactado] [redactado] b [redactado]");
 });
 
 test("timeout de Claude → error legible sin stderr interno", async () => {
