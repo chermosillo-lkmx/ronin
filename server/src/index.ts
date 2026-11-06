@@ -758,6 +758,7 @@ app.post("/api/sessions", async (req, res) => {
       mode: req.body?.mode,
       agent: req.body?.agent,
       request,
+      channel: "ui",
       ...(inputs !== undefined ? { inputs } : {}),
     });
     const inventory = await readInventory();

@@ -44,6 +44,8 @@ export interface ManagedSessionLaunchInput {
   inputs?: Record<string, string>;
   /** Referencia externa que originó la sesión (p. ej. `clickup:<taskId>`). Solo informativa. */
   origin?: string;
+  /** Canal que lanzó la sesión; lo fija el servidor (nunca el cuerpo HTTP). Las sesiones MCP no lo fijan. */
+  channel?: "telegram" | "ui";
 }
 
 /** Cada valor se limita a 4 KiB UTF-8 para acotar launch.json y el prompt entregado al worker. */

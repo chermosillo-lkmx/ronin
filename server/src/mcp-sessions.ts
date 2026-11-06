@@ -10,6 +10,8 @@ export interface McpSessionStatus {
   attention: "decision" | "working" | "idle" | "shell" | "gone" | null;
   needsInput: boolean;
   question?: string;
+  /** Identidad de la pregunta vigente (16 hex); `responder_sesion` la compara antes de escribir. */
+  questionId?: string;
   /** Etiquetas del menú numerado, sólo cuando la decisión es un menú; se responde con su número (1..n). */
   options?: string[];
   /** Gate de verificación en juego: fallido, o el de merge en cola/corriendo (aunque su etapa esté cumplida). */
@@ -19,7 +21,7 @@ export interface McpSessionPort {
   catalog(): Promise<McpCatalog>;
   launch(input: McpLaunchInput): Promise<McpLaunchResult>;
   status(names?: string[]): Promise<McpSessionStatus[]>;
-  reply(name: string, text: string): Promise<void>;
+  reply(name: string, text: string, expectedQuestionId?: string): Promise<void>;
 }
 
 /** Error esperado de una herramienta: viaja al cliente como `CODE: mensaje`, nunca como excepción. */

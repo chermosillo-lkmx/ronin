@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { createSessionPort, deriveSessionName, toStatus, type SessionPortDeps } from "./mcp-session-port.js";
+import { createSessionPort, deriveSessionName, questionIdFromPane, toStatus, type SessionPortDeps } from "./mcp-session-port.js";
 import { McpToolError } from "./mcp-sessions.js";
 import { SessionLaunchError } from "./session-launch.js";
 import type { TmuxSessionInfo } from "./types.js";
@@ -278,4 +278,64 @@ test("reply con texto libre queda registrado; una opción de menú no", async ()
   await createSessionPort(menu.deps).reply("cowork-a", "2");
   assert.deepEqual(recorded, [["cowork-a", "usa make test-unit"]]);
   assert.deepEqual(menu.sent, [["%7", "2", false]]);
+});
+
+test("questionIdFromPane ignora líneas que no son la pregunta", () => {
+  const a = questionIdFromPane(CLAUDE_YN, true);
+  const b = questionIdFromPane(CLAUDE_YN.replace("bypass permissions on", "bypass permissions on · 3%"), true);
+  assert.ok(a);
+  assert.match(a, /^[0-9a-f]{16}$/);
+  assert.equal(a, b);
+});
+
+test("questionIdFromPane cambia si cambia la pregunta u opción", () => {
+  assert.notEqual(questionIdFromPane(CLAUDE_YN, true), questionIdFromPane(CLAUDE_YN.replace("¿sigo?", "¿borro?"), true));
+  assert.notEqual(
+    questionIdFromPane(PERMISSION_MENU, true),
+    questionIdFromPane(PERMISSION_MENU.replace("Yes, allow all edits", "Yes, allow everything"), true),
+  );
+});
+
+test("questionIdFromPane usa el último párrafo en idle pendiente y es null si no espera", () => {
+  assert.ok(questionIdFromPane(CLAUDE_IDLE, true));
+  assert.equal(questionIdFromPane(CLAUDE_IDLE, false), null);
+  assert.equal(questionIdFromPane("$ ls\n$ ", true), null);
+});
+
+test("reply con identidad vieja no entrega nada", async () => {
+  const idDeA = questionIdFromPane(CLAUDE_YN, true)!;
+  const inventory = async () => [session({ attention: { level: "decision", paneId: "%7", question: "¿borro?" } })];
+  const { deps: d, sent } = deps({ inventory }, { "%7": CLAUDE_YN.replace("¿sigo?", "¿borro?") });
+  await assert.rejects(
+    () => createSessionPort(d).reply("cowork-a", "y", idDeA),
+    (e: unknown) => e instanceof McpToolError && e.code === "QUESTION_CHANGED",
+  );
+  assert.equal(sent.length, 0);
+});
+
+test("reply con la identidad vigente entrega", async () => {
+  const id = questionIdFromPane(CLAUDE_YN, true)!;
+  const { deps: d, sent } = deps({ inventory: async () => [session({ attention: { level: "decision", paneId: "%7", question: "¿sigo?" } })] }, { "%7": CLAUDE_YN });
+  await createSessionPort(d).reply("cowork-a", "sí", id);
+  assert.deepEqual(sent, [["%7", "sí", true]]);
+});
+
+test("reply sin identidad conserva el comportamiento actual", async () => {
+  const { deps: d, sent } = deps({ inventory: async () => [session({ attention: { level: "decision", paneId: "%7", question: "¿sigo?" } })] }, { "%7": CLAUDE_YN });
+  await createSessionPort(d).reply("cowork-a", "sí");
+  assert.equal(sent.length, 1);
+});
+
+test("status incluye questionId cuando captura el pane", async () => {
+  const { deps: d } = deps({ inventory: async () => [session({ attention: { level: "idle", paneId: "%7" } })] }, { "%7": CLAUDE_IDLE });
+  const [status] = await createSessionPort(d).status();
+  assert.equal(status!.questionId, questionIdFromPane(CLAUDE_IDLE, true));
+  const [working] = await createSessionPort(deps().deps).status();
+  assert.equal(working!.questionId, undefined);
+});
+
+test("launch no fija channel (las sesiones MCP quedan fuera del seguimiento)", async () => {
+  const { deps: d, launched } = deps();
+  await createSessionPort(d).launch({ repo: "todo-api", workflowId: "wf-1", request: "x" });
+  assert.equal("channel" in (launched[0] as object), false);
 });
