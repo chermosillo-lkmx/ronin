@@ -4,7 +4,7 @@ import { readLaunchRecord } from "../sessions.js";
 import { cycleDirForSession, readEvidence } from "../stages.js";
 import type { InlineButton } from "./api.js";
 import { summaryButton } from "./conversation.js";
-import type { Outbound } from "./outbound.js";
+import { redactSecrets, type Outbound } from "./outbound.js";
 import type { FollowedSession, TelegramConfig, TelegramStore } from "./store.js";
 
 export const WATCH_INTERVAL_MS = 15_000;
@@ -57,6 +57,8 @@ export interface WatcherDeps {
   port: Pick<McpSessionPort, "status">;
   readRecord?: (name: string) => unknown | null;
   hasSummary?: (name: string) => boolean;
+  /** Token del bot, capability y `vars`: nada de eso llega a un registro. */
+  secrets: () => string[];
   now?: () => number;
   log?: (message: string) => void;
 }
@@ -70,8 +72,15 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
   const hasSummary = deps.hasSummary ?? ((name: string) => Boolean(readEvidence(cycleDirForSession(name)).summary));
   const now = deps.now ?? Date.now;
   const log = deps.log ?? ((message: string) => console.warn(`[telegram] ${message}`));
-  const logFailure = (what: string, error: unknown): void =>
-    log(`${what}: ${error instanceof Error ? error.message.slice(0, MAX_LOGGED_ERROR_CHARS) : "error"}`);
+  const logFailure = (what: string, error: unknown): void => {
+    let detail = "sin detalle";
+    try {
+      detail = error instanceof Error ? clip(redactSecrets(error.message, deps.secrets()), MAX_LOGGED_ERROR_CHARS) : "error";
+    } catch {
+      // Sin secretos a la mano no se registra el mensaje.
+    }
+    log(`${what}: ${detail}`);
+  };
 
   /** Confirmaciones en memoria: perder la cuenta en un reinicio solo retrasa un aviso. */
   const idleSeen = new Map<string, { questionId: string; ticks: number }>();

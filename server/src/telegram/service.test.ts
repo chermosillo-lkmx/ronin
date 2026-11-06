@@ -332,6 +332,21 @@ test("reload relee el token y nunca hay dos getUpdates a la vez", async () => {
   assert.equal(r.seen.concurrent, 0);
 });
 
+test("reload olvida el último error mostrado: un token nuevo que también falla vuelve a verse", async () => {
+  const unauthorized = async (): Promise<Update[]> => { throw new TelegramApiError("getUpdates: Unauthorized", 401); };
+  const r = rig({ script: [unauthorized, unauthorized] });
+  const stop = r.runtime.start();
+  await waitFor(() => r.store.readConfig().lastError !== undefined, "primer 401");
+  // Así deja la configuración PUT /token antes de recargar.
+  r.store.updateConfig({ lastError: undefined });
+  r.store.writeToken("222:NUEVO");
+  r.runtime.reload();
+  await waitFor(() => r.calls.length === 2, "sondeo con el token nuevo");
+  await settle();
+  assert.match(r.store.readConfig().lastError ?? "", /token/i);
+  await stop();
+});
+
 test("reload sin token deja de sondear", async () => {
   const r = rig();
   const stop = r.runtime.start();

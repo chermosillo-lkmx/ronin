@@ -19,7 +19,7 @@ function status(over: Partial<McpSessionStatus> = {}): McpSessionStatus {
 const asking = (over: Partial<McpSessionStatus> = {}) =>
   status({ attention: "decision", needsInput: true, questionId: "q1", question: "¿Sigo?", ...over });
 
-function setup(opts: { dir?: string } = {}) {
+function setup(opts: { dir?: string; secrets?: () => string[] } = {}) {
   const dir = opts.dir ?? mkdtempSync(join(tmpdir(), "watcher-"));
   const store: TelegramStore = createTelegramStore(dir);
   if (!opts.dir) store.updateConfig(CONFIG);
@@ -33,10 +33,12 @@ function setup(opts: { dir?: string } = {}) {
     sendError: 0,
     records: { "cowork-a": record(), "cowork-b": record({ repo: "beta" }) } as Record<string, unknown>,
     summary: true,
+    sendErrorText: "red",
+    logs: [] as string[],
   };
   const outbound = {
     async send(msg: SendMessageParams) {
-      if (h.sendError > 0) { h.sendError -= 1; throw new Error("red"); }
+      if (h.sendError > 0) { h.sendError -= 1; throw new Error(h.sendErrorText); }
       sent.push(msg);
       return { message_id: nextId++, chat: { id: msg.chatId, type: "supergroup" } };
     },
@@ -47,8 +49,9 @@ function setup(opts: { dir?: string } = {}) {
     port: { status: async () => { if (h.statusError) throw new Error("boom"); return h.statuses; } },
     readRecord: (name) => h.records[name] ?? null,
     hasSummary: () => h.summary,
+    secrets: opts.secrets ?? (() => []),
     now: () => AFTER + 5000,
-    log: () => {},
+    log: (message) => { h.logs.push(message); },
   });
   return { h, watcher, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
@@ -314,6 +317,29 @@ test("la poda corre aunque no se pueda leer el estado de las sesiones", async ()
   });
   await watcher.tick();
   assert.deepEqual(h.store.readState().questions, {});
+  cleanup();
+});
+
+test("un error registrado no filtra el token ni otros secretos", async () => {
+  const { h, watcher, cleanup } = setup({ secrets: () => ["111:TOKEN_REAL"] });
+  h.statuses = [asking()];
+  h.sendError = 1;
+  h.sendErrorText = "sendMessage falló: https://api.telegram.org/bot111:TOKEN_REAL/sendMessage";
+  await watcher.tick();
+  assert.ok(h.logs.length > 0);
+  assert.ok(h.logs.every((line) => !line.includes("TOKEN_REAL")), h.logs.join("\n"));
+  assert.ok(h.logs.some((line) => line.includes("[redactado]")));
+  cleanup();
+});
+
+test("sin poder leer los secretos no se registra el mensaje del error, y el tick sigue", async () => {
+  const { h, watcher, cleanup } = setup({ secrets: () => { throw new Error("roto"); } });
+  h.statuses = [asking()];
+  h.sendError = 1;
+  h.sendErrorText = "detalle con 111:TOKEN_REAL";
+  await watcher.tick();
+  assert.ok(h.logs.length > 0);
+  assert.ok(h.logs.every((line) => !line.includes("TOKEN_REAL")), h.logs.join("\n"));
   cleanup();
 });
 

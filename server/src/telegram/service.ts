@@ -160,7 +160,7 @@ export function createTelegramRuntime(deps: TelegramRuntimeDeps): TelegramRuntim
       log,
     };
     const conversation = (deps.conversation ?? createConversation)(conversationDeps);
-    const watcher = createWatcher({ store, outbound, port, now, log });
+    const watcher = createWatcher({ store, outbound, port, secrets, now, log });
     return {
       api,
       tick: () => watcher.tick(),
@@ -339,6 +339,7 @@ export function createTelegramRuntime(deps: TelegramRuntimeDeps): TelegramRuntim
     reload() {
       if (!started) return;
       stopLoop();
+      shownError = undefined; // Con otro token, el mismo error debe volver a guardarse.
       startLoop();
     },
   };
