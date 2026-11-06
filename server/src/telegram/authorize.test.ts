@@ -41,6 +41,10 @@ test("my_chat_member es irrelevante", () => {
   };
   assert.deepEqual(authorizeUpdate(update, config), { ok: false, reason: "irrelevant" });
 });
+test("callback sin message se rechaza (falla cerrado)", () => {
+  const update: Update = { update_id: 5, callback_query: { id: "c", from: { id: 7 }, data: "x" } };
+  assert.deepEqual(authorizeUpdate(update, config), { ok: false, reason: "chat" });
+});
 test("mensaje sin remitente se rechaza como usuario", () => {
   const update: Update = { update_id: 4, message: { message_id: 1, chat: { id: -100, type: "supergroup" } } };
   assert.deepEqual(authorizeUpdate(update, config), { ok: false, reason: "user" });
