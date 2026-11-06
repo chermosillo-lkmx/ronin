@@ -7,6 +7,7 @@ import { cycleDirForSession, readEvidence } from "../stages.js";
 import { createTelegramApi, TelegramApiError, type TelegramApi, type Update } from "./api.js";
 import { createConversation, type ConversationDeps, type ReportsPort } from "./conversation.js";
 import { createOutbound } from "./outbound.js";
+import { handleSetupUpdate } from "./setup.js";
 import type { TelegramStore } from "./store.js";
 import { createWatcher, isSessionFollowed, WATCH_INTERVAL_MS } from "./watcher.js";
 
@@ -98,6 +99,7 @@ export function createTelegramRuntime(deps: TelegramRuntimeDeps): TelegramRuntim
   const capabilityToken = deps.capabilityToken ?? (() => readCapabilityToken());
   const repoVars = deps.repoVars ?? defaultRepoVars;
   const watchIntervalMs = deps.watchIntervalMs ?? WATCH_INTERVAL_MS;
+  const onUpdate = deps.onUpdate ?? ((update: Update, api: TelegramApi) => handleSetupUpdate(update, store, api, now));
   const rawLog = deps.log ?? ((message: string) => console.warn(`[telegram] ${message}`));
   const log = (message: string): void => {
     try {
@@ -163,7 +165,7 @@ export function createTelegramRuntime(deps: TelegramRuntimeDeps): TelegramRuntim
       api,
       tick: () => watcher.tick(),
       handle: async (update) => {
-        if (deps.onUpdate && (await deps.onUpdate(update, api))) return;
+        if (await onUpdate(update, api)) return;
         await conversation.handle(update);
       },
     };

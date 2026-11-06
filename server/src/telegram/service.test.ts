@@ -302,6 +302,16 @@ test("un lastError guardado antes de arrancar se limpia con el primer sondeo exi
   await stop();
 });
 
+test("por defecto el emparejamiento ve cada update antes que la conversación", async () => {
+  const start: Update = { update_id: 1, message: { message_id: 1, from: { id: 7 }, chat: { id: 7, type: "private" }, text: "/start CODE" } };
+  const r = rig({ script: [async () => [start, upd(2)]], deps: { now: () => 1000 } });
+  r.store.updateConfig({ botUsername: "b", pairingCode: "CODE", pairingExpiresAt: 5000 });
+  const stop = r.runtime.start();
+  await waitFor(() => r.handled.includes(2) && r.store.readConfig().userId === 7);
+  assert.deepEqual(r.handled, [2], "el /start que vincula no llega a la conversación");
+  await stop();
+});
+
 test("expone store y getApi mientras hay token", async () => {
   const r = rig();
   const stop = r.runtime.start();

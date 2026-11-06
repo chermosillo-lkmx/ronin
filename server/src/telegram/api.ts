@@ -52,7 +52,7 @@ export interface TelegramApi {
   answerCallback(callbackId: string, text?: string): Promise<void>;
   createForumTopic(chatId: number, name: string): Promise<{ message_thread_id: number; name: string }>;
   getChat(chatId: number): Promise<TelegramChat>;
-  getChatMember(chatId: number, userId: number): Promise<{ status: string; user: TelegramUser }>;
+  getChatMember(chatId: number, userId: number): Promise<{ status: string; user: TelegramUser; can_manage_topics?: boolean }>;
   sendDocument(params: { chatId: number; threadId?: number; filename: string; content: string }): Promise<TelegramMessage>;
 }
 

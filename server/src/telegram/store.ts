@@ -7,9 +7,14 @@ export interface TelegramConfig {
   userId?: number;
   chatId?: number;
   topics: Record<string, number>;
+  /** Temas de repos desmarcados: ya no se enrutan ni se siguen, pero su hilo se conserva para restaurarlo. */
+  disabledTopics?: Record<string, number>;
   activatedAt?: string;
   pairingCode?: string;
+  /** ms desde epoch; un código sin vigencia registrada no sirve. */
+  pairingExpiresAt?: number;
   groupCode?: string;
+  groupExpiresAt?: number;
   lastError?: string;
 }
 

@@ -29,6 +29,8 @@ import { isSafeSessionName } from "./session-name.js";
 import { isReplyText, readHistory, recordEvent, recordReply } from "./history.js";
 import { generateReport, listReports, readReport, BadRequest } from "./reports.js";
 import { createTelegramRuntime, type TelegramRuntime, type TelegramRuntimeDeps } from "./telegram/service.js";
+import { createTelegramApi } from "./telegram/api.js";
+import { createTelegramRouter } from "./telegram/routes.js";
 import { createTelegramStore } from "./telegram/store.js";
 import { startReportSchedule } from "./report-schedule.js";
 import { cycleDirForSession, readCycleRepo } from "./stages.js";
@@ -314,6 +316,12 @@ app.locals.telegram =
     },
     ...options.telegramDeps,
   });
+app.use("/api/telegram", createTelegramRouter({
+  runtime: app.locals.telegram as TelegramRuntime,
+  listRepos: options.kb?.listRepos ?? listRepos,
+  createApi: options.telegramDeps?.createApi ?? ((token) => createTelegramApi(token)),
+  now: options.telegramDeps?.now,
+}));
 const mcpMemory = options.mcpMemory ?? createMemoryPort(memoryApi.store());
 const mcpSkills = options.mcpSkills ?? createSkillPort(skillsApi.store());
 app.post("/mcp", async (req, res) => {
