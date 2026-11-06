@@ -1,6 +1,6 @@
 # EVIDENCIA — Telegram en Ronin
 
-Rama `feat/telegram-ronin` · base `eebbc6c` · HEAD de código `57715c4`
+Rama `feat/telegram-ronin` · base `eebbc6c` · HEAD de código `bd60e81`
 
 ## Veredicto
 
@@ -10,14 +10,14 @@ Telegram, que aporta César; no se creó ningún bot ni se llamó a Telegram.
 
 ## Evidencia automatizada
 
-Corridas desde el worktree `.claude/worktrees/feat-telegram-ronin`:
+Corridas desde el worktree `.claude/worktrees/feat-telegram-ronin`, sobre el commit `bd60e81` (el anterior a este cambio de documentación):
 
 | Comando | Resultado |
 |---|---|
-| `npm test -w server` | 1228 pruebas, 1228 pasan, 0 fallan (una sola corrida; sin reintento) |
+| `npm test -w server` | 1239 pruebas, 1239 pasan, 0 fallan (una sola corrida; sin reintento) |
 | `npm test -w web` | 276 pruebas, 276 pasan, 0 fallan |
 | `npm run build:server` | `tsc -p tsconfig.build.json` sin errores |
-| `npm run build -w web` | build de Vite correcto (85 módulos) |
+| `npm run build -w web` | build de Vite correcto |
 
 Nota: el ledger registra una prueba intermitente del server previa a esta rama; no se manifestó en
 esta corrida.
