@@ -293,6 +293,15 @@ test("onUpdate que maneja el update evita la conversación", async () => {
   await stop();
 });
 
+test("un lastError guardado antes de arrancar se limpia con el primer sondeo exitoso", async () => {
+  const r = rig({ script: [async () => []] });
+  r.store.updateConfig({ lastError: "Otro proceso está usando este bot" });
+  const stop = r.runtime.start();
+  await waitFor(() => r.calls.length >= 2);
+  assert.equal(r.store.readConfig().lastError, undefined);
+  await stop();
+});
+
 test("expone store y getApi mientras hay token", async () => {
   const r = rig();
   const stop = r.runtime.start();

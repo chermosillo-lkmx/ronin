@@ -195,7 +195,8 @@ export function createTelegramRuntime(deps: TelegramRuntimeDeps): TelegramRuntim
   // ---- estado visible ----
   let shownError: string | undefined;
   function setLastError(text: string | undefined): void {
-    if (shownError === text) return;
+    // Limpiar siempre consulta el store: un lastError persistido de una ejecución anterior no está en `shownError`.
+    if (text !== undefined && shownError === text) return;
     try {
       if (text === undefined && store.readConfig().lastError === undefined) {
         shownError = undefined;
