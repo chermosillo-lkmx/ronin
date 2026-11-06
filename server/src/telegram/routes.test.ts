@@ -155,6 +155,52 @@ test("GET /status cachea 10 s las consultas a Telegram", async () => {
   assert.equal(r.calls.getChat, 2);
 });
 
+const activated = { ...ready, topics: { repoA: 5 }, activatedAt: "2026-11-06T00:00:00Z" };
+
+test("configurado y sin consulta exitosa (la Mac despertó sin red): sigue en done y muestra lastError", async () => {
+  let down = true;
+  const r = rig({ api: { getChat: async () => { if (down) throw new TelegramApiError("getChat: red", 0); return { id: -100, type: "supergroup", title: "Ronin", is_forum: true }; } } });
+  r.store.updateConfig(activated);
+  let status = (await r.call("GET", "/status")).body;
+  assert.equal(status.step, "done");
+  assert.equal(status.lastError, LAST_ERROR_TEXT.group);
+  assert.equal(status.group, undefined);
+  down = false;
+  r.advance(11_000);
+  status = (await r.call("GET", "/status")).body;
+  assert.equal(status.step, "done");
+  assert.equal(status.lastError, undefined);
+  assert.equal(status.group.isForum, true);
+});
+
+test("configurado: solo una consulta exitosa con el grupo mal regresa al paso 3", async () => {
+  const bad: Array<(r: ReturnType<typeof rig>) => void> = [
+    (r) => { r.behavior.chat.is_forum = false; },
+    (r) => { r.behavior.member = { status: "member", user: { id: 1 } }; },
+    (r) => { r.behavior.member = { status: "administrator", user: { id: 1 }, can_manage_topics: false }; },
+  ];
+  for (const breakGroup of bad) {
+    const r = rig();
+    r.store.updateConfig(activated);
+    assert.equal((await r.call("GET", "/status")).body.step, "done");
+    breakGroup(r);
+    r.advance(11_000);
+    assert.equal((await r.call("GET", "/status")).body.step, 3);
+  }
+});
+
+test("configurado: una consulta que falla tras ver el grupo mal conserva el paso 3 con lo último conocido", async () => {
+  let down = false;
+  const r = rig({ api: { getChat: async () => { if (down) throw new TelegramApiError("getChat: red", 0); return { id: -100, type: "supergroup", title: "Ronin", is_forum: false }; } } });
+  r.store.updateConfig(activated);
+  assert.equal((await r.call("GET", "/status")).body.step, 3);
+  down = true;
+  r.advance(11_000);
+  const status = (await r.call("GET", "/status")).body;
+  assert.equal(status.step, 3);
+  assert.equal(status.lastError, LAST_ERROR_TEXT.group);
+});
+
 test("un fallo de Telegram devuelve lo último conocido con lastError, nunca un 500", async () => {
   let fail = true;
   const failing = rig({
@@ -164,7 +210,7 @@ test("un fallo de Telegram devuelve lo último conocido con lastError, nunca un 
   let response = await failing.call("GET", "/status");
   assert.equal(response.status, 200);
   assert.equal(response.body.lastError, LAST_ERROR_TEXT.group);
-  assert.equal(response.body.step, 3);
+  assert.equal(response.body.step, 3, "sin activar: el wizard aún no terminó");
   assert.equal(response.text.includes(TOKEN), false);
   fail = false;
   failing.advance(11_000);

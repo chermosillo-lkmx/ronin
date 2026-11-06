@@ -122,10 +122,12 @@ export function createTelegramRouter(deps: TelegramRouterDeps): Router {
     if (hasToken && config.userId !== undefined && config.chatId !== undefined) group = await groupInfo(config.chatId);
 
     const groupReady = group.info?.isForum && group.info.botIsAdmin && group.info.canManageTopics;
+    // Sin una consulta exitosa no se sabe nada malo del grupo: lo ya activado no regresa al wizard, que rotaría el código.
+    const keepsActivated = config.activatedAt !== undefined && !group.info;
     let step: 1 | 2 | 3 | 4 | "done";
     if (!hasToken || !config.botUsername) step = 1;
     else if (config.userId === undefined) step = 2;
-    else if (config.chatId === undefined || !groupReady) step = 3;
+    else if (config.chatId === undefined || (!groupReady && !keepsActivated)) step = 3;
     else step = config.activatedAt !== undefined ? "done" : 4;
 
     const lastError = config.lastError ?? (group.failed ? LAST_ERROR_TEXT.group : undefined);
