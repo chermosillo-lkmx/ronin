@@ -397,9 +397,10 @@ Consecuencia: una respuesta desde el celular puede llegar a trabajo iniciado en 
   permiso. Todo rechazo se registra.
 - **Los bots de Telegram no tienen cifrado de extremo a extremo. No pegues secretos ahí** (tokens,
   contraseñas, llaves, contenido de `.env`).
-- La interpretación corre siempre con `claude -p --tools "" --strict-mcp-config`, sea cual sea el
-  motor de ajustes; lo pegado por terceros va delimitado y marcado como datos. Los reportes sí usan el
-  motor de ajustes.
+- La interpretación corre siempre con `claude -p --tools "" --strict-mcp-config --setting-sources ""`,
+  en una carpeta neutra y sea cual sea el motor de ajustes; el mensaje va delimitado y marcado como
+  datos, y lo pegado por terceros vuelve a delimitarse al lanzar. Los reportes sí usan el motor de
+  ajustes.
 - Los comentarios corren con Claude en la carpeta del repo con `Read`, `Grep` y `Glob`, sin MCP y sin
   escribir ni ejecutar. Una lista de **patrones** niega `.env*`, `*.pem`, `*.key`, `*credentials*`,
   `*secret*`, `id_rsa`, `*.p12`, `*.pfx`, `.npmrc` y `.netrc`; se probó con `claude -p` directo y
