@@ -7,6 +7,18 @@ const STEP_LABELS = ["Bot", "Tu usuario", "Grupo", "Repos"] as const;
 
 const messageOf = (error: unknown, fallback: string): string => (error instanceof Error && error.message ? error.message : fallback);
 
+/** Repos cuyo tema falló en un 502 parcial; vacío para cualquier otro error. */
+export const failedReposOf = (error: unknown): string[] => (error instanceof TelegramRequestError ? error.failed : []);
+
+function FailedRepos({ failed, busy, onRetry }: { failed: string[]; busy: boolean; onRetry: () => void }) {
+  if (failed.length === 0) return null;
+  return <div className="ron-tg-error" role="alert">
+    <strong>No pude crear el tema de:</strong>
+    <ul>{failed.map((repo) => <li key={repo}><code>{repo}</code></li>)}</ul>
+    <button className="n-btn" disabled={busy} onClick={onRetry}>Reintentar</button>
+  </div>;
+}
+
 function Stepper({ current }: { current: 1 | 2 | 3 | 4 | "done" }) {
   const index = current === "done" ? 5 : current;
   return <ol className="ron-tg-steps" aria-label="Pasos para conectar Telegram">{STEP_LABELS.map((label, i) => {
@@ -27,7 +39,7 @@ function LinkBox({ link, busy, onCopy, onRenew, copied }: { link: string | null;
   </div>;
 }
 
-export function TelegramScreen({ initial }: { initial?: TelegramStatus }) {
+export function TelegramScreen({ initial, initialFailedRepos }: { initial?: TelegramStatus; /** Solo para pruebas SSR. */ initialFailedRepos?: string[] }) {
   const [status, setStatus] = useState<TelegramStatus | null>(initial ?? null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -35,7 +47,7 @@ export function TelegramScreen({ initial }: { initial?: TelegramStatus }) {
   const [linkBusy, setLinkBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [selected, setSelected] = useState<Set<string> | null>(null);
-  const [failedRepos, setFailedRepos] = useState<string[]>([]);
+  const [failedRepos, setFailedRepos] = useState<string[]>(initialFailedRepos ?? []);
   const [editingRepos, setEditingRepos] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const tokenRef = useRef<HTMLInputElement>(null);
@@ -46,6 +58,7 @@ export function TelegramScreen({ initial }: { initial?: TelegramStatus }) {
   };
 
   useEffect(() => { if (!initial) void refresh(); }, []); // carga una vez
+  useEffect(() => { setError(""); }, [step]); // un aviso de un paso no sigue en pantalla en el siguiente
 
   // Sondeo solo mientras se espera algo de Telegram: pasos 2 y 3.
   useEffect(() => {
@@ -93,7 +106,8 @@ export function TelegramScreen({ initial }: { initial?: TelegramStatus }) {
       setSelected(null); setEditingRepos(false); await refresh();
     } catch (e) {
       setError(messageOf(e, "No pude guardar los repos."));
-      if (e instanceof TelegramRequestError && e.failed.length) { setFailedRepos(e.failed); await refresh(); }
+      const failed = failedReposOf(e);
+      if (failed.length) { setFailedRepos(failed); await refresh(); }
     } finally { setBusy(false); }
   };
 
@@ -116,11 +130,6 @@ export function TelegramScreen({ initial }: { initial?: TelegramStatus }) {
         <small className={chosen.has(row.repo) ? "" : "off"}>{chosen.has(row.repo) ? (row.hasTopic ? "con tema" : "se crea tema") : "sin tema"}</small>
       </label>)}
     </fieldset>
-    {failedRepos.length > 0 && <div className="ron-tg-error" role="alert">
-      <strong>No pude crear el tema de:</strong>
-      <ul>{failedRepos.map((repo) => <li key={repo}><code>{repo}</code></li>)}</ul>
-      <button className="n-btn" disabled={busy} onClick={() => void submitRepos()}>Reintentar</button>
-    </div>}
     <div className="ron-cfg-actions">
       <button className="n-btn n-btn-primary" disabled={busy || (!editingRepos && chosen.size === 0)} onClick={() => void submitRepos()}>{cta}</button>
       {editingRepos && <button className="n-btn" disabled={busy} onClick={() => { setEditingRepos(false); setSelected(null); setFailedRepos([]); }}>Cancelar</button>}
@@ -179,12 +188,14 @@ export function TelegramScreen({ initial }: { initial?: TelegramStatus }) {
       <h2>Elige los repos</h2>
       <p>Por cada repo elegido, el bot crea un tema en el grupo.</p>
       {reposEditor("Continuar")}
+      <FailedRepos failed={failedRepos} busy={busy} onRetry={() => void submitRepos()} />
     </>;
   } else {
     const withTopic = status.repos.filter((row) => row.hasTopic);
     body = <>
       <div className={`ron-tg-state ${status.connected ? "ok" : "bad"}`}><i />{status.connected ? "Conectado" : "Sin conexión"}{status.botUsername && <code>@{status.botUsername}</code>}</div>
       {group && <p className="ron-tg-muted">Grupo «{group.title}» · Temas {group.isForum ? "activos" : "apagados"} · bot {group.botIsAdmin ? "administrador" : "sin permisos de administrador"}</p>}
+      <FailedRepos failed={failedRepos} busy={busy} onRetry={() => void submitRepos()} />
       {editingRepos ? reposEditor("Guardar repos") : <section className="ron-tg-repolist" aria-label="Repos con tema">
         <h3>Repos con tema</h3>
         {withTopic.length === 0 ? <p className="ron-tg-muted">Ningún repo tiene tema.</p> : <ul>{withTopic.map((row) => <li key={row.repo}><code>{row.repo}</code></li>)}</ul>}

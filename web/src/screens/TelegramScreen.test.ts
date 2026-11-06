@@ -2,8 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
-import { TelegramScreen } from "./TelegramScreen.js";
+import { failedReposOf, TelegramScreen } from "./TelegramScreen.js";
+import { TelegramRequestError } from "../api.js";
 import type { TelegramStatus } from "../types";
+
+test("failedReposOf conserva la lista de un 502 parcial y vacía en cualquier otro error", () => {
+  assert.deepEqual(failedReposOf(new TelegramRequestError("No pude crear el tema de algunos repos.", ["acme-web"])), ["acme-web"]);
+  assert.deepEqual(failedReposOf(new TelegramRequestError("x")), []);
+  assert.deepEqual(failedReposOf(new Error("x")), []);
+  assert.deepEqual(failedReposOf("boom"), []);
+});
+
+test("en done, repos fallidos muestran la lista y Reintentar aunque no se edite", () => {
+  const html = renderToString(createElement(TelegramScreen, {
+    initial: { step: "done", botUsername: "b", userLinked: true, group: GROUP, repos: [{ repo: "acme-api", hasTopic: true }, { repo: "acme-web", hasTopic: false }], connected: true },
+    initialFailedRepos: ["acme-web"],
+  }));
+  assert.match(html, /No pude crear el tema de/);
+  assert.match(html, /acme-web/);
+  assert.match(html, /Reintentar/);
+});
 
 const REPOS = [{ repo: "acme-api", hasTopic: false }, { repo: "acme-web", hasTopic: false }];
 const GROUP = { title: "Ronin", isForum: true, botIsAdmin: true, canManageTopics: true };
