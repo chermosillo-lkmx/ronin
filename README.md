@@ -401,8 +401,12 @@ Consecuencia: una respuesta desde el celular puede llegar a trabajo iniciado en 
   motor de ajustes; lo pegado por terceros va delimitado y marcado como datos. Los reportes sí usan el
   motor de ajustes.
 - Los comentarios corren con Claude en la carpeta del repo con `Read`, `Grep` y `Glob`, sin MCP y sin
-  escribir ni ejecutar. Se bloquean archivos sensibles (`.env`, llaves, credenciales) y se filtran de
-  la salida el token del bot, el token de capability y los valores de `vars` del repo.
+  escribir ni ejecutar. Una lista de **patrones** niega `.env*`, `*.pem`, `*.key`, `*credentials*`,
+  `*secret*`, `id_rsa`, `*.p12`, `*.pfx`, `.npmrc` y `.netrc`; se probó con `claude -p` directo y
+  archivos falsos que ni `Read` ni `Grep` ni `Glob` los alcanzan (no por Telegram; ver
+  `EVIDENCIA-telegram-dev.md`). Depende de cómo la CLI aplica esas reglas y un secreto en un archivo
+  con otro nombre sí es legible. De la salida se filtran el token del bot, el token de capability y
+  los valores de `vars` del repo.
 - Riesgos residuales aceptados:
   - un comentario malicioso podría hacer que aparezca código del repo en el grupo privado (la lista de
     archivos sensibles es de patrones y no cubre todo nombre posible);

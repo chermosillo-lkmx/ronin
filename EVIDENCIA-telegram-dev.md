@@ -39,10 +39,59 @@ Con Ronin abierto en la Mac y César en la calle:
 8. PENDIENTE: requiere bot real. Una sesión lanzada desde la app de Ronin le pregunta algo y César la contesta desde el celular.
 9. PENDIENTE: requiere bot real. Tocar un botón de una pregunta ya superada no le entrega nada al agente.
 
+## Sondeos directos de la CLI: lista de archivos negados en comentarios
+
+Qué son: llamadas directas a `claude -p` (versión 2.1.319) con archivos falsos en un directorio
+temporal, ya borrado. **No son una corrida de punta a punta por Telegram**: no intervienen bot,
+conversación ni modelo decidiendo por un comentario real; se le pidió al modelo llamar cada
+herramienta y se leyó el resultado de cada llamada. El bloqueo es comportamiento de Claude Code, no
+de Ronin, y una versión futura de la CLI podría cambiarlo. La lista es de patrones: un secreto en un
+archivo con otro nombre (por ejemplo `config.yml`) sí es legible.
+
+Args finales (`COMMENT_ARGS`), con `--output-format stream-json --verbose` añadido solo para observar:
+
+```
+-p --tools Read,Grep,Glob --strict-mcp-config --setting-sources "" --disallowedTools
+Read(**/.env*) Read(**/*.pem) Read(**/*.key) Read(**/*credentials*) Read(**/*secret*)
+Read(**/id_rsa) Read(**/*.p12) Read(**/*.pfx) Read(**/.npmrc) Read(**/.netrc)
+```
+
+Corrida con los args finales; cada archivo contenía `PROBE_MARKER=<valor falso>`:
+
+| Archivo | `Read` | `Grep` con ruta explícita, salida `content` |
+|---|---|---|
+| `server.key` | negado | negado |
+| `aws-credentials.txt` | negado | negado |
+| `my_secret.yml` | negado | negado |
+| `id_rsa` | negado | negado |
+| `.npmrc` | negado | negado |
+| `cert.p12` | negado | negado |
+| `cert.pfx` | negado | negado |
+| `.netrc` | negado | negado |
+| `README.md` (control) | lee el contenido | devuelve la línea |
+| `.normalrc` (control oculto) | lee el contenido | devuelve la línea |
+
+- `Read` negado: `File is in a directory that is denied by your permission settings.`
+- `Grep` negado: `Permission to read <ruta> has been denied.`
+- `Grep` sobre el directorio completo: solo devolvió las líneas de `README.md` y `.normalrc`.
+- `Glob` con `*`: `README.md`, `.normalrc`. Con `.*`: `.normalrc`. Los archivos falsos no aparecen.
+- Ningún valor falso apareció en una salida; 16 negaciones registradas. `Grep` se queda en `--tools`.
+
+Sondeos anteriores (Tarea 4), con la lista de entonces y también directos:
+
+- `.env` falso, sin `--setting-sources ""` todavía: `Read` negado; `Grep` con ruta `.env` negado;
+  `Grep` con ruta `.` y glob `.env*` sin coincidencias; `Glob` `.env*` sin archivos.
+- Control sin `--disallowedTools`: `Grep` devolvió `.env:1:DB_PASSWORD=...` y `Glob` devolvió `.env`.
+  La ausencia anterior se debe a las reglas, no a que ripgrep omita archivos ocultos.
+- `*.pem` con `--setting-sources ""`: `Read` de `key.pem` negado; `Grep` y `Glob` con `*.pem` sin
+  resultados; `README.md` se lee bien; `Read` de un archivo fuera de la carpeta negado.
+- Sin `--setting-sources ""`, `Read` y `Grep` sí alcanzaron un archivo fuera de la carpeta, por los
+  permisos de las settings de usuario. Por eso esa bandera se quedó.
+
 ## Otros pendientes (solo verificables con Telegram real)
 
 - PENDIENTE: requiere bot real. Que el enlace `startgroup` entregue `/start@<bot> <código>` al grupo (T8).
 - PENDIENTE: requiere bot real. Que `getChatMember` exponga `can_manage_topics` para el bot admin (T8).
 - PENDIENTE: requiere bot real. Que un prompt de interpretación real con `claude` se comporte como se espera; hasta ahora solo corrió contra dobles (T4).
 - PENDIENTE: requiere la app abierta con un bot real. Que los pasos 2 a 4 del wizard y el diálogo Desconectar se vean bien en pantalla; hoy solo hay pruebas SSR y fetch simulado (T9).
-- PENDIENTE: requiere bot real. Con un `.env` de prueba en un repo, confirmar que la respuesta a un comentario no puede leerlo (paso 2 del brief).
+- PENDIENTE: requiere bot real. Con un `.env` de prueba en un repo, confirmar por Telegram que la respuesta a un comentario no puede leerlo (paso 2 del brief). Solo hay sondeos directos de la CLI, arriba.

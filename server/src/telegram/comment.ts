@@ -6,6 +6,7 @@ import { redactSecrets } from "./outbound.js";
 export const COMMENT_ARGS = [
   "-p", "--tools", "Read,Grep,Glob", "--strict-mcp-config", "--setting-sources", "", "--disallowedTools",
   "Read(**/.env*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(**/*credentials*)", "Read(**/*secret*)",
+  "Read(**/id_rsa)", "Read(**/*.p12)", "Read(**/*.pfx)", "Read(**/.npmrc)", "Read(**/.netrc)",
 ];
 const COMMENT_TIMEOUT_MS = 110_000;
 

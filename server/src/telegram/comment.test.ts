@@ -21,7 +21,8 @@ test("draftCommentReply usa cwd del repo y args exactos", async () => {
   assert.equal(calls[0].opts.cwd, "/repos/api");
   assert.equal(calls[0].opts.timeoutMs, 110_000);
   assert.deepEqual(calls[0].opts.args, ["-p", "--tools", "Read,Grep,Glob", "--strict-mcp-config", "--setting-sources", "", "--disallowedTools",
-    "Read(**/.env*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(**/*credentials*)", "Read(**/*secret*)"]);
+    "Read(**/.env*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(**/*credentials*)", "Read(**/*secret*)",
+    "Read(**/id_rsa)", "Read(**/*.p12)", "Read(**/*.pfx)", "Read(**/.npmrc)", "Read(**/.netrc)"]);
 });
 
 function blocks(prompt: string): { inside: string; outside: string } {
