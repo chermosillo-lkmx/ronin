@@ -331,6 +331,86 @@ const instruction = fill(s.instruction?.trim() || `etapa ${s.label}.`);
 No se aplica en este cambio porque altera el comportamiento del runner, que queda fuera de este
 alcance.
 
+## Telegram
+
+Ronin puede recibir órdenes y avisos por Telegram, con su propio bot y sin depender de Kitsune. Usa
+long polling (`getUpdates`): solo hay conexiones salientes, no se expone ningún puerto.
+
+> **Estado de la verificación:** las pruebas automatizadas pasan, pero la prueba de punta a punta con
+> un bot y un segundo usuario reales **está pendiente**. Ver `EVIDENCIA-telegram-dev.md`.
+
+### Configurar (wizard ✈)
+
+El icono ✈ de la barra lateral abre el wizard la primera vez; después muestra el estado (conectado,
+grupo, repos con tema, último error).
+
+1. **Bot.** Crea el bot con @BotFather y pega el token. Ronin lo valida con `getMe`.
+2. **Tu usuario.** Abre el enlace del wizard (o envía `/start <código>` al bot por privado); Ronin guarda tu ID
+   como único usuario autorizado. Los códigos son de un solo uso y caducan.
+3. **Grupo.** Crea un grupo con Temas activados y agrega al bot como admin con el enlace del wizard
+   (necesita `can_manage_topics`). Se vincula con otro código de un solo uso.
+4. **Repos.** Marca los repos que quieres en Telegram; el bot crea un tema por cada uno.
+
+El token se guarda en `<dataDir>/telegram-token` con modo `0600`, separado de `settings.json`, y
+nunca vuelve a la interfaz ni aparece en logs.
+
+### Un grupo, un tema por repo
+
+Es un solo grupo con un tema por repo porque un bot no puede crear grupos, pero sí temas
+(`createForumTopic`). El repo se deduce del tema donde escribes. El tema **General** queda para lo que
+no es de un repo: `/reporte diario`, `/reporte semanal`, `/reporte <nombre>`, `/reportes` y `/estado`.
+
+### Cómo se usa
+
+- **Iniciar una sesión.** Escribe en lenguaje natural en el tema del repo. Ronin interpreta el
+  mensaje y responde con repo, workflow y petición, con ✅ Lanzar, ✏️ Editar y ❌ Cancelar. El ✅
+  muestra el texto completo que se va a lanzar. **Nada se lanza sin ✅**, y las propuestas caducan
+  (1 hora). Si falta el workflow, lo pide con botones; elegirlo no lanza, vuelve a mostrar el ✅.
+- **Responder a un agente.** Las preguntas del agente llegan al tema del repo indicando la sesión.
+  Solo hay dos formas de que algo llegue a un agente: **un botón** (los menús numerados) o un mensaje
+  enviado con **Responder** de Telegram sobre la pregunta. Cualquier otro texto en el tema es una
+  orden nueva y pasa por ✅. Si la pregunta ya no es la que el agente tiene pendiente, no se entrega
+  nada y se avisa; tocar el botón de una pregunta superada no hace nada.
+- **Avisos.** Fin de sesión, fallo de gate, sesión muerta o atascada, con botón para ver el resumen.
+- **Comentarios.** "dame una respuesta para esto: …" devuelve un texto propuesto, con ✏️ Ajustar y
+  🔨 Convertir en sesión. Ronin no publica nada en ningún lado.
+
+### Qué sesiones se siguen
+
+Las lanzadas desde Telegram y desde la app de Ronin, de repos con tema y creadas **después** de
+activar la integración (cada lanzamiento registra su origen en `launch.json`). No se siguen las
+creadas por MCP (por ejemplo, las de Kitsune), las adoptadas, las externas ni las de repos sin tema.
+Consecuencia: una respuesta desde el celular puede llegar a trabajo iniciado en el escritorio.
+
+### Condiciones
+
+- **La Mac encendida y despierta, con Ronin abierto.** Si duerme o Ronin está cerrado, nada responde
+  hasta que vuelva. Ronin no hace nada para mantenerla despierta. Lo que llegó mientras tanto nunca
+  lanza nada sin ✅.
+- **Un bot por proceso.** Solo un proceso puede leer las actualizaciones de un bot. Kitsune sigue
+  aparte con otro bot; usar el mismo en ambos los hace chocar.
+- Requiere `claude` en el `PATH` para interpretar mensajes y redactar comentarios.
+
+### Seguridad y riesgos aceptados
+
+- Cada mensaje y cada botón se autoriza por **ID de usuario y por grupo**; ser miembro del grupo no da
+  permiso. Todo rechazo se registra.
+- **Los bots de Telegram no tienen cifrado de extremo a extremo. No pegues secretos ahí** (tokens,
+  contraseñas, llaves, contenido de `.env`).
+- La interpretación corre siempre con `claude -p --tools "" --strict-mcp-config`, sea cual sea el
+  motor de ajustes; lo pegado por terceros va delimitado y marcado como datos. Los reportes sí usan el
+  motor de ajustes.
+- Los comentarios corren con Claude en la carpeta del repo con `Read`, `Grep` y `Glob`, sin MCP y sin
+  escribir ni ejecutar. Se bloquean archivos sensibles (`.env`, llaves, credenciales) y se filtran de
+  la salida el token del bot, el token de capability y los valores de `vars` del repo.
+- Riesgos residuales aceptados:
+  - un comentario malicioso podría hacer que aparezca código del repo en el grupo privado (la lista de
+    archivos sensibles es de patrones y no cubre todo nombre posible);
+  - las sesiones lanzadas desde Telegram usan el mismo modo que las del escritorio
+    (`bypassPermissions` por defecto), con el ✅ como aprobación; un texto malicioso aún podría
+    influir en un agente sin límites, también cuando este lee el ticket por su cuenta;
+  - Telegram puede entregar mensajes acumulados al volver Ronin; no lanzan nada sin ✅.
+
 ## Arquitectura
 
 ```
@@ -338,7 +418,7 @@ server/   Express + TypeScript  → API local, sesiones tmux, workflows y servic
 web/      Vite + React + TS     → interfaz de sesiones, workflows, Skills y pruebas
 ```
 
-**Server (`server/src/`):** `index.ts`, `engine.ts` (adopción), `tmux.ts` / `ttyd.ts`, `sessions.ts`, `session-launch.ts`, `workflow.ts`, `workflow-catalog.ts`, `workflow-insights/`, `repos.ts`, `repo-config.ts`, `repo-roots.ts`, `skills.ts`, `reports.ts`, `history.ts`, `preflight.ts`, `mcp.ts` + `agent-mcp.ts` (servidor MCP y su configuración para el worker), `verify.ts` + `verify-driver.ts` (gate de etapa), `provision.ts` (entorno del worktree) y `test-harness/`.
+**Server (`server/src/`):** `index.ts`, `engine.ts` (adopción), `tmux.ts` / `ttyd.ts`, `sessions.ts`, `session-launch.ts`, `workflow.ts`, `workflow-catalog.ts`, `workflow-insights/`, `repos.ts`, `repo-config.ts`, `repo-roots.ts`, `skills.ts`, `reports.ts`, `history.ts`, `preflight.ts`, `mcp.ts` + `agent-mcp.ts` (servidor MCP y su configuración para el worker), `verify.ts` + `verify-driver.ts` (gate de etapa), `provision.ts` (entorno del worktree), `telegram/` (bot: API, autorización, conversación, vigilante de sesiones y rutas del wizard) y `test-harness/`.
 
 **Web (`web/src/`):** `App.tsx` y `DesktopApp.tsx` (el shell de escritorio), `screens/SessionsScreen.tsx`, `components/sessions/`, `components/PaneViewer.tsx`, `components/pane-terminal.ts`, `components/tests/` (calendario de actividad) y las pantallas de workflows, Skills y pruebas.
 
