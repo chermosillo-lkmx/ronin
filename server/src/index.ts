@@ -28,6 +28,8 @@ import { classifySession } from "./sessions.js";
 import { isSafeSessionName } from "./session-name.js";
 import { isReplyText, readHistory, recordEvent, recordReply } from "./history.js";
 import { generateReport, listReports, readReport, BadRequest } from "./reports.js";
+import { createTelegramRuntime, type TelegramRuntime, type TelegramRuntimeDeps } from "./telegram/service.js";
+import { createTelegramStore } from "./telegram/store.js";
 import { startReportSchedule } from "./report-schedule.js";
 import { cycleDirForSession, readCycleRepo } from "./stages.js";
 import { attachSessionMemory, attachSessionSkills, createSessionInfoReader, getDefaultDistiller, sessionRepo, startMemoryDistiller, type Distiller } from "./memory-distiller.js";
@@ -167,6 +169,10 @@ export interface CreateAppOptions {
     store?: LearnedSkillStore;
     globalEnabled?: boolean;
   };
+  /** Runtime de Telegram ya construido (tests). `createApp` solo lo guarda: nunca lo arranca. */
+  telegram?: TelegramRuntime;
+  /** Sustituye partes del runtime de Telegram que construye `createApp` (store, API falsa…). */
+  telegramDeps?: Partial<TelegramRuntimeDeps>;
   /** Costuras de las rutas KB para pruebas HTTP con un repositorio temporal. */
   kb?: {
     listRepos?: typeof listRepos;
@@ -283,6 +289,31 @@ const mcpSessions = options.mcpSessions ?? createSessionPort({
   now: () => Date.now(),
   recordReply: recordSessionReply,
 });
+// Solo se construye y se guarda: `startServer` es quien lo arranca, así que ningún test de createApp toca la red.
+app.locals.telegram =
+  options.telegram ??
+  createTelegramRuntime({
+    store: createTelegramStore(),
+    port: mcpSessions,
+    // El mismo callable que recibe createApp: en producción es el que añade la config MCP.
+    launch: (input) => performLaunchManagedSession(input),
+    reports: {
+      generate: async (kind) => {
+        const { name, markdown } = await generateReport(kind);
+        return { name, markdown };
+      },
+      list: listReports,
+      read: (name) => {
+        try {
+          const report = readReport(name);
+          return report ? { markdown: report.markdown } : null;
+        } catch {
+          return null;
+        }
+      },
+    },
+    ...options.telegramDeps,
+  });
 const mcpMemory = options.mcpMemory ?? createMemoryPort(memoryApi.store());
 const mcpSkills = options.mcpSkills ?? createSkillPort(skillsApi.store());
 app.post("/mcp", async (req, res) => {
@@ -1271,7 +1302,20 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
 
   const address = server.address();
   const port = typeof address === "object" && address ? (address as AddressInfo).port : requestedPort;
+  const telegram = app.locals.telegram as TelegramRuntime | undefined;
+  let stopTelegram: (() => Promise<void>) | undefined;
+  try {
+    stopTelegram = telegram?.start();
+  } catch (error) {
+    // Telegram es opcional: sin red o sin token el server sigue sirviendo la app.
+    console.warn(`[telegram] no pude arrancar (${error instanceof Error ? error.name : "error"})`);
+  }
   const close = once(async () => {
+    try {
+      await stopTelegram?.();
+    } catch {
+      // Un fallo al detener Telegram no debe impedir cerrar el server.
+    }
     await closeServer(server!);
     await background!();
   });
