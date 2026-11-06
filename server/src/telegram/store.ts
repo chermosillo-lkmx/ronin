@@ -13,13 +13,34 @@ export interface TelegramConfig {
   lastError?: string;
 }
 
-/** Interfaces mínimas: las tareas 5 y 6 las amplían. */
+/** Propuesta de sesión a la espera de ✅. `createdAt` en ms; caduca a los `PROPOSAL_TTL_MS`. */
 export interface Proposal {
   id: string;
+  repo: string;
+  instruction: string;
+  thirdParty?: string;
+  workflowId?: string;
+  workflowName?: string;
+  /** Los workflows mostrados en botones: `w:<id>:<índice>` se resuelve aquí, no contra el catálogo vigente. */
+  workflowChoices?: Array<{ id: string; name: string }>;
+  createdAt: number;
+  /** Un toque o Responder la está procesando: nadie más puede actuar sobre ella. */
+  claimed?: boolean;
+  /** Mensaje que pidió la nueva redacción; Responder sobre él la reemplaza. */
+  editMessageId?: number;
 }
+/** Borrador de respuesta a un comentario. Caduca igual que una propuesta. */
 export interface CommentDraft {
   id: string;
+  repo: string;
+  comment: string;
+  guidance?: string;
+  text: string;
+  createdAt: number;
+  claimed?: boolean;
+  editMessageId?: number;
 }
+/** Interfaz mínima: la tarea 6 la amplía. */
 export interface FollowedSession {
   session: string;
 }
@@ -30,6 +51,8 @@ export interface SentQuestion {
   messageId: number;
   options: string[];
   createdAt: string;
+  /** Una respuesta está en curso o ya se entregó. Lo escribe la conversación; un fallo lo quita. */
+  claimed?: boolean;
 }
 
 export interface TelegramState {
