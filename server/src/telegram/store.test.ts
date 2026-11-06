@@ -31,7 +31,7 @@ test("readConfig de un archivo corrupto devuelve config vacía", () =>
     writeFileSync(join(dir, "telegram.json"), "{no json");
     assert.deepEqual(store.readConfig(), { topics: {} });
     writeFileSync(join(dir, "telegram-state.json"), "[]");
-    assert.deepEqual(store.readState(), { proposals: {}, drafts: {}, questions: {}, sessions: {} });
+    assert.deepEqual(store.readState(), { proposals: {}, drafts: {}, questions: {}, sessions: {}, summaries: {} });
   }));
 
 test("migrateChat cambia chatId y conserva topics", () =>

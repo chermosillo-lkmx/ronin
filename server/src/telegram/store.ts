@@ -21,7 +21,7 @@ export interface Proposal {
   thirdParty?: string;
   workflowId?: string;
   workflowName?: string;
-  /** Los workflows mostrados en botones: `w:<id>:<índice>` se resuelve aquí, no contra el catálogo vigente. */
+  /** Los workflows mostrados en botones: `w:<id>:<índice>` elige aquí, no contra el catálogo vigente. */
   workflowChoices?: Array<{ id: string; name: string }>;
   createdAt: number;
   /** Un toque o Responder la está procesando: nadie más puede actuar sobre ella. */
@@ -55,12 +55,20 @@ export interface SentQuestion {
   claimed?: boolean;
 }
 
+/** A qué sesión apunta un botón `r:<clave>`: la clave es opaca y siempre cabe en `callback_data`. */
+export interface SummaryKey {
+  session: string;
+  createdAt: number;
+  claimed?: boolean;
+}
+
 export interface TelegramState {
   offset?: number;
   proposals: Record<string, Proposal>;
   drafts: Record<string, CommentDraft>;
   questions: Record<string, SentQuestion>;
   sessions: Record<string, FollowedSession>;
+  summaries: Record<string, SummaryKey>;
 }
 
 export interface TelegramStore {
@@ -75,7 +83,7 @@ export interface TelegramStore {
 }
 
 const emptyConfig = (): TelegramConfig => ({ topics: {} });
-const emptyState = (): TelegramState => ({ proposals: {}, drafts: {}, questions: {}, sessions: {} });
+const emptyState = (): TelegramState => ({ proposals: {}, drafts: {}, questions: {}, sessions: {}, summaries: {} });
 
 function readJson(file: string): Record<string, unknown> | null {
   try {
@@ -107,6 +115,7 @@ export function createTelegramStore(dir: string = DATA_DIR): TelegramStore {
       drafts: record(raw.drafts),
       questions: record(raw.questions),
       sessions: record(raw.sessions),
+      summaries: record(raw.summaries),
     } as TelegramState;
   };
 

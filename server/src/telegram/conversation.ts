@@ -12,10 +12,11 @@ import { redactSecrets, type Outbound } from "./outbound.js";
 import type { CommentDraft, Proposal, SentQuestion, TelegramState, TelegramStore } from "./store.js";
 
 export const PROPOSAL_TTL_MS = 60 * 60 * 1000;
+/** Un aviso de fin de sesión puede tocarse días después; pasado esto, su botón deja de servir. */
+export const SUMMARY_KEY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_REQUEST_BYTES = 8 * 1024;
-const PREVIEW_INSTRUCTION_CHARS = 3000;
-const PREVIEW_THIRD_PARTY_CHARS = 500;
-const MAX_INLINE_DRAFT_CHARS = 3800;
+/** Por encima, el texto va por `sendLong` y los botones en un mensaje aparte. */
+const MAX_INLINE_CHARS = 3800;
 const MAX_BUTTON_LABEL_CHARS = 60;
 const MAX_LISTED_REPORTS = 10;
 const MAX_LOGGED_ERROR_CHARS = 200;
@@ -33,6 +34,8 @@ const NOTICE = {
   draftFailed: "No pude redactar la respuesta. Intenta de nuevo.",
   adjustFailed: "No pude redactar el ajuste. Responde otra vez a la solicitud para reintentar.",
   busy: "Eso ya se está procesando; no apliqué este mensaje.",
+  alreadyAnswered: "Esa pregunta ya tiene una respuesta; no entregué esto.",
+  summaryGone: "Ese resumen ya no está disponible.",
   reportUsage: "Usa /reporte diario, /reporte semanal o /reporte <nombre> de la lista de /reportes.",
   reportNotFound: "No encontré ese reporte. Revisa los nombres con /reportes.",
   reportListFailed: "No pude leer la lista de reportes.",
@@ -104,11 +107,30 @@ function buildRequest(p: Pick<Proposal, "instruction" | "thirdParty">): string {
   return p.thirdParty ? `${p.instruction}\n\n${wrapThirdParty(p.thirdParty)}` : p.instruction;
 }
 
+/** Todo lo que recibirá el agente: el ✅ aprueba lo que César vio, nunca una parte. */
 function previewText(p: NewProposal): string {
-  const lines = [`Repo: ${p.repo}`, `Workflow: ${p.workflowName ?? "elige uno con los botones"}`, "", "Petición:", clip(p.instruction, PREVIEW_INSTRUCTION_CHARS)];
-  if (p.instruction.length > PREVIEW_INSTRUCTION_CHARS) lines.push(`(vista recortada: la petición completa tiene ${p.instruction.length} caracteres)`);
-  if (p.thirdParty) lines.push("", `Texto de terceros adjunto como datos (${p.thirdParty.length} caracteres):`, clip(p.thirdParty, PREVIEW_THIRD_PARTY_CHARS));
+  const lines = [`Repo: ${p.repo}`, `Workflow: ${p.workflowName ?? "elige uno con los botones"}`, "", "Petición:", p.instruction];
+  if (p.thirdParty) lines.push("", "Texto de terceros adjunto como datos:", p.thirdParty);
   return lines.join("\n");
+}
+
+/** Crea o renueva la clave del botón "Ver resumen" de una sesión. La usa el aviso de fin de sesión. */
+export function summaryButton(store: TelegramStore, session: string, now: number): InlineButton {
+  let key = "";
+  store.updateState((state) => {
+    for (const [id, item] of Object.entries(state.summaries)) {
+      if (!(now - Number(item.createdAt) <= SUMMARY_KEY_TTL_MS)) delete state.summaries[id];
+    }
+    const existing = Object.entries(state.summaries).find(([, item]) => item.session === session);
+    if (existing) {
+      key = existing[0];
+      existing[1].createdAt = now;
+    } else {
+      key = newId();
+      state.summaries[key] = { session, createdAt: now };
+    }
+  });
+  return { text: "Ver resumen", data: `r:${key}` };
 }
 
 function proposalKeyboard(p: Pick<Proposal, "id" | "workflowId" | "workflowChoices">): InlineButton[][] {
@@ -132,7 +154,7 @@ function statusLine(s: McpSessionStatus): string {
 
 /**
  * Decide qué llega a un agente y qué lanza una sesión. Reglas: solo el botón `q:` y Responder
- * sobre una pregunta guardada llaman `reply`; solo `p:…:go` y `w:…` llaman `launch`.
+ * sobre una pregunta guardada llaman `reply`; solo `p:…:go` llama `launch`, nunca `w:…`.
  * El servicio despacha sin esperar, así que todo reclamo se hace con `updateState` antes del
  * primer `await`, y ningún `e.message` llega a Telegram: puede traer stderr.
  */
@@ -170,15 +192,15 @@ export function createConversation(deps: ConversationDeps): { handle(update: Upd
 
   // ─── Reclamos: síncronos, antes de cualquier await ────────────────────────
 
-  const expired = (item: Claimable): boolean => !(deps.now() - Number(item.createdAt) <= PROPOSAL_TTL_MS);
+  const expired = (item: Claimable, ttl = PROPOSAL_TTL_MS): boolean => !(deps.now() - Number(item.createdAt) <= ttl);
 
-  function claim<K extends "proposals" | "drafts" | "questions">(kind: K, id: string): Claim<TelegramState[K][string]> {
+  function claim<K extends "proposals" | "drafts" | "questions" | "summaries">(kind: K, id: string): Claim<TelegramState[K][string]> {
     let result: Claim<TelegramState[K][string]> = { status: "gone" };
     store.updateState((state) => {
       const items = state[kind] as unknown as Record<string, TelegramState[K][string] & Claimable>;
       const item = own(items, id);
       if (!item) return;
-      if (kind !== "questions" && expired(item)) {
+      if (kind !== "questions" && expired(item, kind === "summaries" ? SUMMARY_KEY_TTL_MS : PROPOSAL_TTL_MS)) {
         delete items[id];
       } else if (item.claimed) {
         result = { status: "busy" };
@@ -190,7 +212,7 @@ export function createConversation(deps: ConversationDeps): { handle(update: Upd
     return result;
   }
 
-  function release(kind: "proposals" | "drafts" | "questions", id: string): void {
+  function release(kind: "proposals" | "drafts" | "questions" | "summaries", id: string): void {
     store.updateState((state) => {
       const item = own(state[kind] as Record<string, Claimable>, id);
       if (item) delete item.claimed;
@@ -216,8 +238,29 @@ export function createConversation(deps: ConversationDeps): { handle(update: Upd
       for (const [id, item] of Object.entries(state.drafts)) if (expired(item)) delete state.drafts[id];
       state.proposals[proposal.id] = proposal;
     });
-    await outbound.send({ ...place, text: previewText(proposal), keyboard: proposalKeyboard(proposal) });
+    const preview = previewText(proposal);
+    const keyboard = proposalKeyboard(proposal);
+    if (preview.length <= MAX_INLINE_CHARS) {
+      await outbound.send({ ...place, text: preview, keyboard });
+      return true;
+    }
+    // Si esto falla no salen los botones: nada se aprueba sin haberse mostrado completo.
+    await outbound.sendLong({ ...place, title: "Propuesta de sesión", text: preview });
+    await outbound.send({ ...place, text: proposal.workflowId ? "¿Lanzo la propuesta de arriba?" : "Elige el workflow de la propuesta de arriba:", keyboard });
     return true;
+  }
+
+  /** La misma propuesta, con los cambios: su id nuevo deja sin efecto los botones ya mostrados. */
+  function successor(p: Proposal, changes: Partial<NewProposal>): NewProposal {
+    const { repo, instruction, thirdParty, workflowId, workflowName, workflowChoices } = p;
+    return {
+      repo, instruction,
+      ...(thirdParty ? { thirdParty } : {}),
+      ...(workflowId ? { workflowId } : {}),
+      ...(workflowName ? { workflowName } : {}),
+      ...(workflowChoices ? { workflowChoices } : {}),
+      ...changes,
+    };
   }
 
   /** Propuesta sin workflow elegido: congela las opciones que se muestran. */
@@ -285,21 +328,17 @@ export function createConversation(deps: ConversationDeps): { handle(update: Upd
       release("proposals", id);
       return notify(place, NOTICE.invalidButton);
     }
-    return launchProposal(claimed.item, choice.id, place);
+    // Elegir no aprueba: solo ✅ lanza, y ahora la propuesta muestra el workflow elegido.
+    const { workflowChoices: _chosen, ...current } = claimed.item;
+    const fields = successor(current, { workflowId: choice.id, workflowName: choice.name });
+    if (!(await createProposal(fields, place, id))) release("proposals", id);
   }
 
   async function onProposalEdit(proposalId: string, text: string, place: Place): Promise<void> {
     const claimed = claim("proposals", proposalId);
     if (claimed.status === "gone") return notify(place, NOTICE.expired);
     if (claimed.status === "busy") return notify(place, NOTICE.busy);
-    const { repo, thirdParty, workflowId, workflowName, workflowChoices } = claimed.item;
-    const fields: NewProposal = {
-      repo, instruction: text.trim(),
-      ...(thirdParty ? { thirdParty } : {}),
-      ...(workflowId ? { workflowId } : {}),
-      ...(workflowName ? { workflowName } : {}),
-      ...(workflowChoices ? { workflowChoices } : {}),
-    };
+    const fields = successor(claimed.item, { instruction: text.trim() });
     if (!(await createProposal(fields, place, proposalId))) release("proposals", proposalId);
   }
 
@@ -341,14 +380,12 @@ export function createConversation(deps: ConversationDeps): { handle(update: Upd
     if (!stored) return notify(place, NOTICE.invalidButton);
     const number = /^\d+$/.test(rawNumber ?? "") ? Number(rawNumber) : 0;
     if (number < 1 || number > stored.options.length) return notify(place, NOTICE.invalidButton);
-    const claimed = claim("questions", key);
-    if (claimed.status !== "ok") return;
-    return replyToQuestion(key, claimed.item, String(number), place);
+    return deliverToQuestion(key, String(number), place);
   }
 
-  function onQuestionReply(key: string, text: string, place: Place): Promise<void> {
+  function deliverToQuestion(key: string, text: string, place: Place): Promise<void> {
     const claimed = claim("questions", key);
-    if (claimed.status !== "ok") return notify(place, "Esa pregunta ya tiene una respuesta; no entregué este mensaje.");
+    if (claimed.status !== "ok") return notify(place, NOTICE.alreadyAnswered);
     return replyToQuestion(key, claimed.item, text, place);
   }
 
@@ -361,7 +398,7 @@ export function createConversation(deps: ConversationDeps): { handle(update: Upd
       state.drafts[draft.id] = draft;
     });
     const keyboard = draftKeyboard(draft.id);
-    if (draft.text.length <= MAX_INLINE_DRAFT_CHARS) {
+    if (draft.text.length <= MAX_INLINE_CHARS) {
       await outbound.send({ ...place, text: `Borrador de respuesta (Ronin no publica nada):\n\n${draft.text}`, keyboard });
       return;
     }
@@ -523,7 +560,7 @@ export function createConversation(deps: ConversationDeps): { handle(update: Upd
   function onReplyTo(messageId: number, text: string, place: Place): Promise<void> | null {
     const state = store.readState();
     const question = Object.entries(state.questions).find(([, q]) => q.messageId === messageId);
-    if (question) return onQuestionReply(question[0], text, place);
+    if (question) return deliverToQuestion(question[0], text, place);
     const proposal = Object.values(state.proposals).find((p) => p.editMessageId === messageId);
     if (proposal) return onProposalEdit(proposal.id, text, place);
     const draft = Object.values(state.drafts).find((d) => d.editMessageId === messageId);
@@ -545,11 +582,19 @@ export function createConversation(deps: ConversationDeps): { handle(update: Upd
     return notify(place, NOTICE.invalidButton);
   }
 
-  async function onSummary(session: string, place: Place): Promise<void> {
-    if (!isSafeSessionName(session)) return notify(place, NOTICE.invalidButton);
-    const summary = deps.summaryFor(session);
-    if (!summary) return notify(place, `No hay resumen de ${session}.`);
-    return outbound.sendLong({ ...place, title: `Resumen de ${session}`, text: summary });
+  async function onSummary(key: string, place: Place): Promise<void> {
+    const claimed = claim("summaries", key);
+    if (claimed.status === "gone") return notify(place, NOTICE.summaryGone);
+    if (claimed.status === "busy") return;
+    const { session } = claimed.item;
+    try {
+      if (!isSafeSessionName(session)) return await notify(place, NOTICE.summaryGone);
+      const summary = deps.summaryFor(session);
+      if (!summary) return await notify(place, `No hay resumen de ${session}.`);
+      await outbound.sendLong({ ...place, title: `Resumen de ${session}`, text: summary });
+    } finally {
+      release("summaries", key); // Solo evita el doble toque: el resumen se puede volver a pedir.
+    }
   }
 
   async function route(update: Update, place: Place): Promise<void> {
