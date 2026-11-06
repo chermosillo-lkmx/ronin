@@ -11,6 +11,9 @@ server/data/curl-env.json
 server/data/settings.json
 server/data/repo-config.json
 server/data/capability-token
+server/data/telegram-token
+server/data/telegram.json
+server/data/telegram-state.json
 # datos reales / config local — NO publicar
 server/data/repos.json
 server/data/reports/
