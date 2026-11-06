@@ -40,9 +40,17 @@ export interface CommentDraft {
   claimed?: boolean;
   editMessageId?: number;
 }
-/** Interfaz mínima: la tarea 6 la amplía. */
+/** Lo que el watcher ya avisó de una sesión seguida; persiste para que un reinicio no repita avisos. */
 export interface FollowedSession {
   session: string;
+  repo: string;
+  /** Identidad de la pregunta ya enviada mientras la sesión sigue esperando; se borra al dejar de esperar. */
+  lastQuestionId?: string;
+  finished?: boolean;
+  /** `<etapa>:<intentos>` del último gate fallido avisado. */
+  gateKey?: string;
+  stuck?: boolean;
+  gone?: boolean;
 }
 
 export interface SentQuestion {
