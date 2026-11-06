@@ -523,3 +523,15 @@ export interface SessionSkillInfo {
   repo: string;
   state: SkillDistillState | null;
 }
+
+export interface TelegramRepoRow { repo: string; hasTopic: boolean }
+export interface TelegramGroupInfo { title: string; isForum: boolean; botIsAdmin: boolean; canManageTopics: boolean }
+export interface TelegramStatus {
+  step: 1 | 2 | 3 | 4 | "done";
+  botUsername?: string;
+  userLinked: boolean;
+  group?: TelegramGroupInfo;
+  repos: TelegramRepoRow[];
+  lastError?: string;
+  connected: boolean;
+}
