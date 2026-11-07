@@ -265,7 +265,16 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
       // Sin nada que podar no se escribe: esto corre en cada tick.
       if (!Object.values(store.readState().questions).some((q) => stale(q.createdAt))) return;
       store.updateState((state) => {
-        for (const [key, q] of Object.entries(state.questions)) if (stale(q.createdAt)) delete state.questions[key];
+        const pruned = Object.entries(state.questions).filter(([, q]) => stale(q.createdAt));
+        for (const [key] of pruned) delete state.questions[key];
+        // Si la sesión sigue esperando esa pregunta, olvidarla hace que el tick la reenvíe:
+        // sin entrada no habría botón ni Responder que llegue al agente.
+        for (const [, q] of pruned) {
+          const followed = state.sessions[q.session];
+          if (followed?.lastQuestionId !== q.questionId) continue;
+          const kept = Object.values(state.questions).some((other) => other.session === q.session && other.questionId === q.questionId);
+          if (!kept) delete followed.lastQuestionId;
+        }
       });
     } catch (error) {
       logFailure("no pude podar las preguntas", error);

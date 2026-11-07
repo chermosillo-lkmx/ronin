@@ -309,6 +309,39 @@ test("cada tick poda las preguntas de más de 7 días, contestadas o no", async 
   cleanup();
 });
 
+test("una pregunta podada que la sesión sigue esperando se reenvía una vez y se puede contestar", async () => {
+  const { h, watcher, cleanup } = setup();
+  const old = new Date(AFTER + 5000 - 8 * 24 * 60 * 60 * 1000).toISOString();
+  h.store.updateState((s) => {
+    s.sessions["cowork-a"] = { session: "cowork-a", repo: "alpha", lastQuestionId: "q1" };
+    s.questions.vieja = { session: "cowork-a", questionId: "q1", messageId: 1, options: [], createdAt: old };
+  });
+  h.statuses = [asking()];
+  await watcher.tick();
+  await watcher.tick();
+  assert.equal(h.sent.length, 1);
+  const entries = Object.values(h.store.readState().questions);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]!.messageId, 100);
+  cleanup();
+});
+
+test("podar una copia vieja no reenvía si ya hay una entrada vigente de esa pregunta", async () => {
+  const { h, watcher, cleanup } = setup();
+  const nowMs = AFTER + 5000;
+  const old = new Date(nowMs - 8 * 24 * 60 * 60 * 1000).toISOString();
+  h.store.updateState((s) => {
+    s.sessions["cowork-a"] = { session: "cowork-a", repo: "alpha", lastQuestionId: "q1" };
+    s.questions.vieja = { session: "cowork-a", questionId: "q1", messageId: 1, options: [], createdAt: old };
+    s.questions.vigente = { session: "cowork-a", questionId: "q1", messageId: 2, options: [], createdAt: new Date(nowMs).toISOString() };
+  });
+  h.statuses = [asking()];
+  await watcher.tick();
+  assert.equal(h.sent.length, 0);
+  assert.deepEqual(Object.keys(h.store.readState().questions), ["vigente"]);
+  cleanup();
+});
+
 test("la poda corre aunque no se pueda leer el estado de las sesiones", async () => {
   const { h, watcher, cleanup } = setup();
   h.statusError = true;
