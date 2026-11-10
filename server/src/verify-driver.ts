@@ -22,8 +22,11 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  *   `cacheHit` no ve la suciedad).
  * - Un PASS guardado que cubre los HEADs actuales (mismos SHAs o commits sólo-e2e) se reusa sin correr.
  * - Un FAIL queda `failed` con sus SHAs: el mismo commit no se reintenta. Se re-arma cuando el árbol
- *   está limpio en SHAs distintos, así que `maxRetries` cuenta commits, no corridas. Un `passed`
- *   también se re-considera con un commit nuevo; ahí la caché decide si hace falta correr.
+ *   está limpio en SHAs distintos Y el worker re-tocó el sentinela después de la foto del veredicto
+ *   (`retocadoTrasFoto`): `maxRetries` cuenta corridas PEDIDAS, no commits. Un `passed` también se
+ *   re-considera con un commit nuevo y el sentinela re-tocado; ahí la caché decide si hace falta correr.
+ * - Un FAIL con el árbol movido a media corrida (commit, paso de un rebase) no gasta intento ni
+ *   guarda `shas`: no probó el HEAD vigente.
  * - El re-arme lo da el cambio de SHA, no el armado en memoria por ocupado/ocioso: sobrevive a un
  *   reinicio de Ronin sin repetir corridas.
  * Timeout y entorno salen de `gateConfig(repo)` para todos los gates, con o sin la bandera.
@@ -153,6 +156,18 @@ function mergeGateRearms(state: VerifyState, heads: RepoHead[] | null, maxRetrie
 }
 
 /**
+ * ¿El worker pidió otra corrida? Su sentinela es posterior a la FOTO del último veredicto: el
+ * inicio de la corrida (`at - durationMs`) o, sin duración (árbol sucio, HEADs ilegibles, caché),
+ * el propio `at`. Un toque a media corrida cuenta: llegó después de la foto, así que esa corrida no
+ * lo cubre. Un estado sin `at` (anterior a esta regla) no exige toque.
+ */
+export function retocadoTrasFoto(tocado: number | null, state: VerifyState): boolean {
+  if (state.at === undefined) return true;
+  if (tocado === null) return false;
+  return tocado > state.at - (state.durationMs ?? 0);
+}
+
+/**
  * Gate que toca considerar: el MÁS TEMPRANO del flujo que ya fue alcanzado, tiene `verifyCmd` y
  * no está resuelto. Que el worker se haya adelantado no cancela un gate — es autónomo y puede
  * tocar el siguiente sentinela sin esperar a nadie, pero la deuda sigue siendo suya.
@@ -160,7 +175,9 @@ function mergeGateRearms(state: VerifyState, heads: RepoHead[] | null, maxRetrie
  * `headsFor`: HEADs actuales del worktree. Con ellos, un gate de merge resuelto se re-arma si
  * hubo commit nuevo (ver `mergeGateRearms`) y el worker sigue en esa etapa (es la más lejana
  * alcanzada, o `enGate` dice que volvió a ella); sin ellos, o con el worker ya más adelante,
- * resuelto es resuelto.
+ * resuelto es resuelto. `retocado`: además, el worker re-tocó el sentinela del gate después de la
+ * foto del veredicto — sin eso, un commit intermedio (arreglo a medias, paso de un rebase) gastaba
+ * un intento que nadie pidió.
  */
 export function selectGate(
   stages: GateStage[],
@@ -168,6 +185,7 @@ export function selectGate(
   stateFor: (stageKey: string) => VerifyState | null,
   headsFor?: () => RepoHead[] | null,
   enGate?: (stageKey: string) => boolean,
+  retocado?: (stageKey: string, state: VerifyState) => boolean,
 ): Gate | null {
   if (!reached) return null;
   const hasta = stages.findIndex((stage) => stage.key === reached);
@@ -183,6 +201,9 @@ export function selectGate(
       // Sólo mientras el worker sigue EN el gate: pasada la etapa siguiente, resuelto es resuelto.
       const actual = stage.key === reached || enGate?.(stage.key) === true;
       if (!mergeGate || !headsFor || !actual || !mergeGateRearms(state, headsFor(), maxRetries)) continue;
+      // Un commit nuevo no basta: el worker tiene que PEDIR la corrida re-tocando el sentinela
+      // después de la foto del veredicto (ver `retocadoTrasFoto`).
+      if (retocado && !retocado(stage.key, state)) continue;
     }
     return { key: stage.key, cmd, maxRetries, attempts: state?.attempts ?? 0, mergeGate };
   }
@@ -517,6 +538,7 @@ export async function tickOnce(
         (key) => deps.readState(cycle, key),
         heads === undefined ? undefined : () => heads,
         (key) => enEtapa(stages.findIndex((s) => s.key === key)),
+        deps.sentinelAt ? (key, state) => retocadoTrasFoto(tocadoEn(key), state) : undefined,
       );
 
       // Re-entrega: el worker volvió al gate de merge (o lo re-tocó) y no hay nada que correr. Sólo
@@ -696,8 +718,11 @@ async function planMergeGate(
     const fin = Date.now();
     guardarLog(deps, cycle, gate.key, resultado.output);
     // Un PASS sólo vale si el árbol sigue igual que en la foto previa: un commit o una edición a
-    // media corrida pudo quedar fuera de lo probado. Sin `shas` → se re-arma en el siguiente tick limpio.
-    if (resultado.ok && !sameHeads(heads, await deps.heads(worktree))) {
+    // media corrida pudo quedar fuera de lo probado. Sin `shas` → se re-arma con el árbol limpio y el
+    // sentinela re-tocado.
+    // Un FAIL tampoco cuenta si el árbol se movió: lo probado ya no es el HEAD (p.ej. un paso
+    // intermedio de un rebase) y gastar el intento ahí agotaba ciclos sin que nadie lo pidiera.
+    if (!sameHeads(heads, await deps.heads(worktree))) {
       return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts, at: Date.now() }, resultado.output);
     }
     // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
