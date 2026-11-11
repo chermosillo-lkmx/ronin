@@ -733,7 +733,8 @@ test("tickOnce: run recibe timeoutMs del repo o, si falta, el global, y env con 
         gateConfig: (repo) => { repos.push(repo); return config; },
       });
       await tick(d, new Map());
-      assert.deepEqual(corridas.map((c) => c.opts), [config]);
+      // Los ganchos de pid (onSpawn/onExit) son de métricas; el timeout y el entorno no cambian.
+      assert.deepEqual(corridas.map((c) => { const { onSpawn: _s, onExit: _e, ...rest } = c.opts as Record<string, unknown>; return rest; }), [config]);
     }
     assert.deepEqual(repos, ["api", "api"]);
   } finally {
@@ -1841,6 +1842,47 @@ test("tickOnce: mergeGate FAIL con el árbol cambiado a media corrida no gasta i
     });
     await tick(d, new Map());
     assert.deepEqual(escrito.map(sinAt), [{ status: "failed", reason: "el árbol cambió durante la corrida", attempts: 2 }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("perf: cada desenlace de gate llega a onGateOutcome con duración real, y el pid del gate a su sesión", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-perf-"));
+  try {
+    const medidos: any[] = [];
+    const pids: string[] = [];
+    const { d } = mergeDeps({
+      cycle: dir,
+      readState: () => ({ attempts: 0, status: "pending" }),
+      sentinelAt: () => 1000,
+      run: async (_cmd, _cwd, opts) => {
+        opts.onSpawn?.(77);
+        opts.onExit?.(77);
+        return { ok: false, code: 1, output: "rojo" };
+      },
+      onGateOutcome: (e) => void medidos.push(e),
+      onGateSpawn: (s, pid) => void pids.push(`+${s}:${pid}`),
+      onGateExit: (s, pid) => void pids.push(`-${s}:${pid}`),
+    });
+    await tick(d, new Map());
+    assert.deepEqual(pids, ["+cowork-x:77", "-cowork-x:77"]);
+    assert.equal(medidos.length, 1);
+    assert.equal(medidos[0].status, "failed");
+    assert.equal(medidos[0].ran, true);
+    assert.equal(medidos[0].armedAt, 1000);
+    assert.ok(medidos[0].endedAt >= medidos[0].startedAt);
+
+    // Caché: desenlace sin correr (ran:false) y un registrador que lanza no rompe el gate.
+    const { d: d2, escrito } = mergeDeps({
+      cycle: dir,
+      readState: () => ({ attempts: 0, status: "pending" }),
+      cacheHit: async () => true,
+      onGateOutcome: () => { throw new Error("boom"); },
+    });
+    const informes = await tick(d2, new Map());
+    assert.deepEqual(informes.map((i) => i.status), ["passed"]);
+    assert.equal(escrito.at(-1)?.reason, "caché");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

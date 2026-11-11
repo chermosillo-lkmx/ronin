@@ -62,6 +62,8 @@ export function resolveVerifyGate(raw: string | undefined): boolean {
 }
 export const VERIFY_GATE = resolveVerifyGate(process.env.COWORK_VERIFY_GATE);
 
+/** Métricas de performance de ciclos (diario `cycle-metrics-*.jsonl`): `COWORK_PERF=0` las apaga. */
+export const PERF = process.env.COWORK_PERF !== "0";
 /** Memoria por repo: `COWORK_MEMORY=0` apaga la inyección al lanzar y la destilación automática. */
 export const MEMORY = process.env.COWORK_MEMORY !== "0";
 /** Skills aprendidas: `COWORK_LEARNED_SKILLS=0` apaga el triaje, la redacción y las learned del índice de lanzamiento. */

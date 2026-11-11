@@ -473,3 +473,35 @@
 .ron-tg-repolist ul { margin: 0; padding-left: 18px; }
 .ron-tg .n-btn:not(.n-btn-primary):not(.n-btn-danger) { border: 1px solid var(--color-neutral-600); }
 .ron-tg-confirm { width: min(440px, 100%); }
+
+/* ---- Performance por tipo de ciclo ---- */
+.ron-perf-seg { display: inline-flex; border: 1px solid var(--color-divider); border-radius: 8px; overflow: hidden; }
+.ron-perf-seg button { background: transparent; border: 0; color: var(--color-neutral-400); padding: 6px 12px; cursor: pointer; font: inherit; }
+.ron-perf-seg button.active { background: color-mix(in srgb, var(--color-accent) 22%, transparent); color: var(--color-text); }
+.ron-perf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: var(--space-4); }
+.ron-perf-card, .ron-perf-machine, .ron-perf-open { padding: var(--space-4); display: grid; gap: var(--space-3); }
+.ron-perf-card.degraded, .ron-perf-machine.degraded { box-shadow: inset 3px 0 0 var(--status-fail); }
+.ron-perf-card-head { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
+.ron-perf-card-head small, .ron-perf-card-head span { color: var(--color-neutral-400); font-size: 12px; }
+.ron-perf-kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: var(--space-2); margin: 0; }
+.ron-perf-kpis div { display: grid; gap: 2px; }
+.ron-perf-kpis dt { color: var(--color-neutral-500); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.ron-perf-kpis dd { margin: 0; font-size: 16px; font-variant-numeric: tabular-nums; }
+.ron-perf-chart { width: 100%; height: 150px; overflow: visible; }
+.ron-perf-chart.small { height: 56px; }
+.ron-perf-axis { fill: var(--color-neutral-500); font-size: 10px; text-anchor: middle; }
+.ron-perf-empty { fill: var(--color-divider); }
+.ron-perf-gate-line, .ron-perf-load-line, .ron-perf-swap-line { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.ron-perf-gate-line { stroke: var(--color-text); stroke-dasharray: 4 3; }
+.ron-perf-load-line { stroke: var(--status-warn); }
+.ron-perf-swap-line { stroke: var(--status-fail); }
+.ron-perf-legend { display: flex; flex-wrap: wrap; gap: var(--space-3); list-style: none; margin: 0; padding: 0; font-size: 12px; color: var(--color-neutral-400); }
+.ron-perf-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.ron-perf-gate-key { background: var(--color-text); height: 2px !important; }
+.ron-perf-load-key { background: var(--status-warn); }
+.ron-perf-swap-key { background: var(--status-fail); }
+.ron-perf-delta { font-size: 12px; padding: 1px 6px; border-radius: 6px; }
+.ron-perf-delta.bad { color: var(--status-fail); background: color-mix(in srgb, var(--status-fail) 14%, transparent); }
+.ron-perf-delta.good { color: var(--status-ok); }
+.ron-perf-delta.flat { color: var(--color-neutral-400); }
+.ron-perf-bad { color: var(--status-fail) !important; }

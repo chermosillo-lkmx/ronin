@@ -5,7 +5,8 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { LEARNED_SKILLS, MEMORY, PORT, REPORT_SCHEDULE, VERIFY_GATE } from "./config.js";
+import { LEARNED_SKILLS, MEMORY, PERF, PORT, REPORT_SCHEDULE, VERIFY_GATE } from "./config.js";
+import { getPerfRecorder, perfReport, startPerfRecorder } from "./perf/service.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
 import { AdoptCommitError, AdoptValidationError, type AdoptErrorCode } from "./adopt.js";
 import {
@@ -1141,6 +1142,13 @@ app.put("/api/tests/config/:repo", (req, res) => {
   }
 });
 
+// Performance por tipo de ciclo (workflow): ?bucket=day|week|month (default week).
+app.get("/api/perf", (req, res) => {
+  const raw = String((req.query as Record<string, unknown>).bucket ?? "week");
+  const bucket = raw === "day" || raw === "month" ? raw : "week";
+  res.json(perfReport(bucket));
+});
+
 app.get("/api/tests/matrix", (_req, res) => {
   res.json(harness.matrix());
 });
@@ -1255,8 +1263,14 @@ async function startDefaultBackground(): Promise<Cleanup> {
   const cleanups: Cleanup[] = [];
   try {
     if (REPORT_SCHEDULE) cleanups.push(startReportSchedule());
+    if (PERF) cleanups.push(startPerfRecorder());
     if (VERIFY_GATE) {
-      const verifyDriver = startVerifyDriver(realVerifyDriverDeps);
+      const rec = PERF ? getPerfRecorder() : null;
+      const verifyDriver = startVerifyDriver(
+        rec
+          ? { ...realVerifyDriverDeps, onGateOutcome: rec.onGateOutcome, onGateSpawn: rec.onGateSpawn, onGateExit: rec.onGateExit }
+          : realVerifyDriverDeps,
+      );
       cleanups.push(() => verifyDriver.stop());
     }
     // El barrido sirve a la memoria y al triaje de skills: corre si cualquiera de los dos está activo.

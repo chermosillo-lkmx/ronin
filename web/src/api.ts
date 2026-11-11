@@ -1,3 +1,4 @@
+import type { PerfBucket, PerfReport } from "./components/perf/model";
 import type { TelegramRepoRow, TelegramStatus } from "./types";
 import type { SkillDistillState, SkillLearningView, SkillProposalAction, SkillProposalDetail, SkillProposalSummary, SkillResolution } from "./types";
 import type { DistillState, EngineChoice, KnowledgeBaseGeneration, KnowledgeBaseInfo, MemoryAction, MemoryKind, RepoMemoryView, TestCasesFile, TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionCleanupReport, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
@@ -642,6 +643,15 @@ async function harnessJson<T>(r: Response, fallback: string): Promise<T> {
 export async function getTestsConfig(): Promise<TestRepoConfig[] | null> {
   try {
     const r = await fetch("/api/tests/config");
+    return r.ok ? r.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getPerf(bucket: PerfBucket): Promise<PerfReport | null> {
+  try {
+    const r = await fetch(`/api/perf?bucket=${bucket}`);
     return r.ok ? r.json() : null;
   } catch {
     return null;

@@ -6,7 +6,7 @@ import { APP_VIEWS } from "./App.js";
 import { DesktopStatusBar } from "./components/DesktopStatusBar.js";
 
 test("App declares exactly the retained views", () => {
-  assert.deepEqual(APP_VIEWS, ["sessions", "settings", "reports", "preflight", "workflow", "tests", "skills"]);
+  assert.deepEqual(APP_VIEWS, ["sessions", "settings", "reports", "preflight", "workflow", "tests", "perf", "skills"]);
 });
 
 test("DesktopStatusBar: sin aviso de límite conserva el footer actual", () => {
