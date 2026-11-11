@@ -23,6 +23,8 @@
 #      UNIT_GATE_STATE_DIR (default ~/.cowork/unit-gate) caché compartida de cobertura por SHA/árbol
 #      UNIT_GATE_RECORD_BASE=1 mide un checkout limpio de main, registra su cobertura y sale con
 #        el veredicto de la suite completa, sin aplicar las reglas de cambio de una rama
+#      UNIT_GATE_MAX_SUITES cupos globales de suites completas; sin él lee gate.maxConcurrent de
+#        $COWORK_DATA_DIR/settings.json (default 2). UNIT_GATE_LOCK_POLL controla la espera (15 s)
 set -u
 ROOT="${1:-$PWD}"
 BASE_REF="${UNIT_GATE_BASE:-origin/main}"
@@ -32,6 +34,7 @@ STATE_DIR="${UNIT_GATE_STATE_DIR:-$HOME/.cowork/unit-gate}"
 RECORD_BASE="${UNIT_GATE_RECORD_BASE:-0}"
 fail=0; checked=0
 suite_pid=""
+held_slot=""
 say() { printf '%s\n' "$*"; }
 bad() { say "❌ $*"; fail=1; }
 ok()  { say "✅ $*"; }
@@ -41,7 +44,72 @@ stop_suite() {
   wait "$suite_pid" 2>/dev/null || true
   suite_pid=""
 }
-trap 'stop_suite; exit 143' TERM INT
+release_suite_slot() {
+  [ -n "$held_slot" ] || return 0
+  if [ "$(cat "$held_slot/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$held_slot/pid" "$held_slot/ROOT" "$held_slot/at"
+    rmdir "$held_slot" 2>/dev/null || true
+  fi
+  held_slot=""
+}
+cleanup() { stop_suite; release_suite_slot; }
+trap cleanup EXIT
+trap 'cleanup; exit 143' TERM INT
+
+settings_dir="${COWORK_DATA_DIR:-$HOME/Library/Application Support/claude-cowork/data}"
+MAX_SUITES="${UNIT_GATE_MAX_SUITES:-}"
+if ! [[ "$MAX_SUITES" =~ ^[1-9][0-9]*$ ]]; then
+  MAX_SUITES="$(python3 - "$settings_dir/settings.json" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1])).get("gate", {}).get("maxConcurrent")
+except (OSError, ValueError, AttributeError):
+    value = None
+print(value if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 8 else 2)
+PY
+)"
+fi
+LOCK_POLL="${UNIT_GATE_LOCK_POLL:-15}"
+[[ "$LOCK_POLL" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || LOCK_POLL=15
+
+claim_slot() { # $1 slot dir
+  local slot="$1"
+  mkdir "$slot" 2>/dev/null || return 1
+  printf '%s\n' "$$" > "$slot/pid"
+  printf '%s\n' "$ROOT" > "$slot/ROOT"
+  date +%s > "$slot/at"
+  held_slot="$slot"
+}
+
+acquire_suite_slot() {
+  local locks="$STATE_DIR/locks" slot owner current i used details root
+  mkdir -p "$locks"
+  while :; do
+    for ((i=1; i<=MAX_SUITES; i++)); do
+      slot="$locks/slot-$i"
+      if claim_slot "$slot"; then return 0; fi
+      owner="$(cat "$slot/pid" 2>/dev/null || true)"
+      if [[ "$owner" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+        current="$(cat "$slot/pid" 2>/dev/null || true)"
+        if [ "$current" = "$owner" ]; then
+          rm -f "$slot/pid" "$slot/ROOT" "$slot/at"
+          rmdir "$slot" 2>/dev/null || true
+          claim_slot "$slot" && return 0
+        fi
+      fi
+    done
+    used=0; details=""
+    for ((i=1; i<=MAX_SUITES; i++)); do
+      slot="$locks/slot-$i"
+      [ -d "$slot" ] || continue
+      used=$((used+1)); owner="$(cat "$slot/pid" 2>/dev/null || echo '?')"
+      root="$(cat "$slot/ROOT" 2>/dev/null || echo '?')"
+      details="${details}${details:+, }slot-$i pid=$owner root=$root"
+    done
+    say "⏳ esperando cupo de suite completa ($used/$MAX_SUITES ocupados: $details)"
+    sleep "$LOCK_POLL"
+  done
+}
 # shellcheck source=gate-source-dirs.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gate-source-dirs.sh" || { bad "no pude cargar gate-source-dirs.sh"; say "UNIT-GATE: FAIL"; exit 1; }
 
@@ -648,20 +716,24 @@ for repo in "${candidates[@]}"; do
     # pytest --cov escribe `.coverage` en el cwd (raíz del sub-repo): en repos que no lo ignoran
     # dejaba el árbol sucio y el gate de merge lo rechazaba. Va a la carpeta de reportes del gate,
     # absoluto por si algún test cambia de directorio.
+    acquire_suite_slot
     COVERAGE_FILE="$(cd "$REPORTS" && pwd)/.coverage" \
     "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
     suite_pid=$!
     wait "$suite_pid"; rc=$?
     suite_pid=""
+    release_suite_slot
   elif [ "$runner" = "node" ]; then
     [ -d node_modules ] || { bad "$name: sin node_modules en el worktree (corre npm ci antes)"; continue; }
     coverage_xml="$REPORTS/coverage-gate/cobertura-coverage.xml"
     mkdir -p "$REPORTS/coverage-gate"; rm -f "$coverage_xml"
     say "   → npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory=$REPORTS/coverage-gate --reporter=junit --outputFile=$junit"
+    acquire_suite_slot
     npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory="$REPORTS/coverage-gate" --reporter=junit --outputFile="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
     suite_pid=$!
     wait "$suite_pid"; rc=$?
     suite_pid=""
+    release_suite_slot
   else
     bad "$name: no reconozco el runner (ni tests/ de pytest ni package.json)"; continue
   fi

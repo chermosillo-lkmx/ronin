@@ -5,7 +5,7 @@
 // Correr: node --test scripts/unit-gate.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -122,19 +122,31 @@ function fixture(t) {
       return p;
     },
     run: (env = {}) => {
-      const r = spawnSync("bash", [GATE, session], {
-        encoding: "utf8",
-        env: {
+      const gateEnv = {
           ...gitEnv,
           UNIT_GATE_BASE: "origin/main",
           UNIT_GATE_MAIN_ROOT: mainRoot,
           FAKE_SUITE_JUNIT: suiteJunit,
           FAKE_SUITE_COVERAGE: suiteCoverage,
           ...env,
-        },
+      };
+      const r = spawnSync("bash", [GATE, session], {
+        encoding: "utf8",
+        env: gateEnv,
       });
       return { code: r.status, out: r.stdout + r.stderr };
     },
+    spawnRun: (env = {}) => spawn("bash", [GATE, session], {
+      env: {
+        ...gitEnv,
+        UNIT_GATE_BASE: "origin/main",
+        UNIT_GATE_MAIN_ROOT: mainRoot,
+        FAKE_SUITE_JUNIT: suiteJunit,
+        FAKE_SUITE_COVERAGE: suiteCoverage,
+        ...env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
   };
 }
 
@@ -997,4 +1009,64 @@ test("52. pytest --cov deja .coverage dentro de la carpeta de reportes del gate,
   const covfile2 = join(porDefecto.tmp, "covfile");
   porDefecto.run({ ...withoutExtra, FAKE_COVFILE: covfile2 });
   assert.ok(readFileSync(covfile2, "utf8").endsWith("/reports/.coverage"));
+});
+
+test("53. cupo ocupado por PID vivo espera y sólo corre al liberarse", async (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const stateDir = join(fx.tmp, "state");
+  const slot = join(stateDir, "locks", "slot-1");
+  mkdirSync(slot, { recursive: true });
+  writeFileSync(join(slot, "pid"), `${process.pid}\n`);
+  writeFileSync(join(slot, "ROOT"), "otra-corrida\n");
+  const marker = join(fx.tmp, "suite-ran");
+  const child = fx.spawnRun({
+    ...withoutExtra,
+    UNIT_GATE_STATE_DIR: stateDir,
+    UNIT_GATE_MAX_SUITES: "1",
+    UNIT_GATE_LOCK_POLL: "0.05",
+    FAKE_MARKER: marker,
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  const closed = new Promise((resolve) => child.once("close", (code) => resolve(code)));
+  const first = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve("timeout"), 3000);
+    child.stdout.on("data", () => {
+      if (output.includes("esperando cupo")) {
+        clearTimeout(timer);
+        resolve("waiting");
+      }
+    });
+    child.once("close", () => {
+      clearTimeout(timer);
+      resolve("closed");
+    });
+  });
+  assert.equal(first, "waiting", output);
+  assert.equal(existsSync(marker), false, output);
+  rmSync(slot, { recursive: true, force: true });
+  assert.equal(await closed, 0, output);
+  assert.equal(existsSync(marker), true, output);
+});
+
+test("54. cupo con PID muerto se recupera y se libera al terminar", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const stateDir = join(fx.tmp, "state");
+  const slot = join(stateDir, "locks", "slot-1");
+  mkdirSync(slot, { recursive: true });
+  writeFileSync(join(slot, "pid"), "99999999\n");
+  writeFileSync(join(slot, "ROOT"), "abandonada\n");
+  const marker = join(fx.tmp, "suite-ran");
+  const r = fx.run({
+    ...withoutExtra,
+    UNIT_GATE_STATE_DIR: stateDir,
+    UNIT_GATE_MAX_SUITES: "1",
+    FAKE_MARKER: marker,
+  });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(existsSync(marker), true, r.out);
+  assert.equal(existsSync(slot), false, "el slot propio debe liberarse al terminar");
 });

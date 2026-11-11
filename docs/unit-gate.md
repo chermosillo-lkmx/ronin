@@ -52,6 +52,19 @@ Al vencer el timeout, Ronin envía `SIGTERM` al grupo completo y espera hasta 60
 pytest/vitest ejecute sus `finally` y teardown; sólo entonces usa `SIGKILL` si el grupo sigue vivo.
 La salida producida durante ese cierre queda incluida en `verify-<etapa>.log`.
 
+### Cupo global de suites completas
+
+Antes de pytest/vitest, `unit-gate.sh` toma atómicamente uno de los slots bajo
+`UNIT_GATE_STATE_DIR/locks/`. Esto incluye corridas manuales: Ronin pasa
+`UNIT_GATE_MAX_SUITES=gate.maxConcurrent`; fuera de Ronin, el script lee `gate.maxConcurrent` de
+`$COWORK_DATA_DIR/settings.json` (por defecto `~/Library/Application Support/claude-cowork/data`,
+y default de cupo 2). Un PID muerto se recupera; un cupo ocupado imprime periódicamente
+`⏳ esperando cupo de suite completa (…)`. `UNIT_GATE_LOCK_POLL` ajusta ese periodo (default 15 s).
+
+El slot se libera al terminar la suite y también en `EXIT`, `TERM` o `INT`. La espera ocurre dentro
+del timeout del gate de Ronin; si lo agota, se trata como fallo de infraestructura y no gasta
+intento, por lo que se puede re-tocar el sentinela para correr el mismo commit.
+
 ## Qué comprueba (por cada sub‑repo con cambios respecto a `origin/main`)
 
 1. **Cambios en código de producto traen tests.** El código de producto (ver «Dónde está el código de producto» abajo), excluyendo

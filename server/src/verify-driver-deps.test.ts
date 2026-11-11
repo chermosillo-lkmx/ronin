@@ -143,10 +143,20 @@ test("A4: flowFor cae al override por repo cuando flow.json está corrupto", () 
 
 test("gateConfig incluye UNIT_GATE_XDIST sólo si el repo lo declara", () => {
   const sin = createVerifyDriverDeps(sources({ repoGate: () => ({}) }));
-  assert.deepEqual(sin.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate" });
+  assert.deepEqual(sin.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_MAX_SUITES: "2" });
   const con = createVerifyDriverDeps(sources({ repoGate: (repo) => (repo === "api" ? { xdist: 4 } : {}) }));
-  assert.deepEqual(con.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_XDIST: "4" });
-  assert.deepEqual(con.gateConfig("otro").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate" });
+  assert.deepEqual(con.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_MAX_SUITES: "2", UNIT_GATE_XDIST: "4" });
+  assert.deepEqual(con.gateConfig("otro").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_MAX_SUITES: "2" });
+});
+
+test("gateConfig comparte gate.maxConcurrent con unit-gate.sh", () => {
+  let maxConcurrent = 2;
+  const deps = createVerifyDriverDeps(sources({
+    gateSettings: () => ({ timeoutMin: 45, maxConcurrent, maxConcurrentLight: 4 }),
+  }));
+  assert.equal(deps.gateConfig("api").env.UNIT_GATE_MAX_SUITES, "2");
+  maxConcurrent = 3;
+  assert.equal(deps.gateConfig("api").env.UNIT_GATE_MAX_SUITES, "3");
 });
 
 test("gateConfig toma el timeout del repo o, si falta, el global (en ms), leído en cada llamada", () => {
