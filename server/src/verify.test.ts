@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -93,4 +93,46 @@ test("runVerify: un timeout con salida larga conserva la marca [timeout] al fina
   assert.equal(r.timedOut, true);
   assert.match(r.output, /\[timeout\]$/);
   assert.ok(r.output.length < 8200);
+});
+
+test("runVerify: timeout envía SIGTERM y espera el teardown del hijo", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cowork-term-"));
+  const marker = join(dir, "teardown");
+  try {
+    // El trap del shell queda listo sin depender del arranque de otro runtime bajo carga.
+    const r = await runVerify(`trap 'touch ${JSON.stringify(marker)}; exit 0' TERM; while :; do sleep 1; done`, dir, 300, {}, 300);
+    assert.equal(r.timedOut, true);
+    assert.equal(existsSync(marker), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runVerify: hijo que ignora SIGTERM muere por SIGKILL tras la gracia", async () => {
+  const start = Date.now();
+  const r = await runVerify("trap '' TERM; while :; do sleep 1; done", process.cwd(), 300, {}, 300);
+  const elapsed = Date.now() - start;
+  assert.equal(r.timedOut, true);
+  assert.ok(elapsed >= 550, `terminó antes de la gracia: ${elapsed} ms`);
+  assert.ok(elapsed < 5000, `duró demasiado: ${elapsed} ms`);
+});
+
+test("runVerify: si el líder sale durante la gracia, el SIGKILL igual alcanza a los nietos que ignoran SIGTERM", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cowork-nieto-"));
+  const pidFile = join(dir, "nieto.pid");
+  try {
+    const r = await runVerify(
+      `(trap '' TERM; exec sleep 30) >/dev/null 2>&1 </dev/null & echo $! > ${JSON.stringify(pidFile)}; trap 'exit 0' TERM; while :; do sleep 0.1; done`,
+      dir, 300, {}, 300,
+    );
+    assert.equal(r.timedOut, true);
+    const nieto = Number(readFileSync(pidFile, "utf8").trim());
+    await delay(700);
+    let vivo = true;
+    try { process.kill(nieto, 0); } catch { vivo = false; }
+    if (vivo) process.kill(nieto, "SIGKILL");
+    assert.equal(vivo, false, "el nieto sobrevivió al plazo de gracia");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

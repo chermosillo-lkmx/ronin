@@ -523,3 +523,20 @@ test("mergeGate no booleano true se descarta", () => {
     assert.equal("mergeGate" in out.stages[0], false, `valor ${JSON.stringify(bad)}`);
   }
 });
+
+test("heavy sólo se conserva con verifyCmd en el override", () => {
+  const stages = [
+    { key: "unit", label: "Unit", icon: "u", verifyCmd: "unit-gate.sh", heavy: true },
+    { key: "i18n", label: "i18n", icon: "i", verifyCmd: "i18n-gate.sh", heavy: false },
+    { key: "plain", label: "Plain", icon: "p", heavy: true },
+  ] as WfStage[];
+  const allowed = validateStages({ stages, verifyAfter: null }, { allowVerifyCmd: true });
+  assert.equal((allowed.stages[0] as any).heavy, true);
+  assert.equal((allowed.stages[1] as any).heavy, false);
+  assert.equal("heavy" in allowed.stages[2], false);
+
+  const tracked = validateStages({ stages, verifyAfter: null });
+  assert.equal(tracked.stages.every((stage) => !("heavy" in stage)), true);
+  const stripped = stripVerifyFields(stages[0]);
+  assert.equal("heavy" in stripped, false);
+});

@@ -3,6 +3,7 @@ import { readProvisionState, type ProvisionState } from "./provision.js";
 import { DEFAULT_GATE_SETTINGS } from "./settings.js";
 import { readVerifyState, sentinelMtime, writeVerifyLog, writeVerifyState, type VerifyState } from "./stages.js";
 import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "./verify.js";
+import { basename } from "node:path";
 
 /**
  * P2 — el bucle que faltaba. `verify.ts` traía el ejecutor (`runVerify`), la regla de desenlace
@@ -91,7 +92,7 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  * - Intentos agotados: el FAIL que gasta el último intento no manda "vuelve a tocar el sentinela"
  *   (el gate ya no se re-arma) sino que pide intervención humana; flow-progress lo marca `gate-agotado`.
  * - La salida de cada corrida queda en `<cycle>/verify-<etapa>.log` (`writeLog`) y un timeout se
- *   guarda con `reason: "timeout"` (sí gasta intento).
+ *   guarda con `reason: "timeout"` sin gastar intento.
  * - Entorno que no se pudo preparar con el worker ya en el gate de merge: `failed` con su razón, sin
  *   gastar intento y avisado una vez, en vez de un silencio que lo deja esperando.
  */
@@ -105,6 +106,7 @@ export const NO_REPOS_REASON = "no encontré repos con tests en el worktree";
 export const CHANGED_REASON = "el árbol cambió durante la corrida";
 export const TIMEOUT_REASON = "timeout";
 export const PROVISION_FAILED_REASON = "el entorno del worktree no se pudo preparar";
+export const INFRA_REASONS = [TIMEOUT_REASON, PROVISION_FAILED_REASON, CHANGED_REASON] as const;
 /** La etapa del gate de unitarias previo al merge; sin `verifyCmd` se avisa SIN-GATE. */
 export const PRE_MERGE_KEY = "pre-merge";
 /**
@@ -120,6 +122,7 @@ export interface GateStage {
   verifyCmd?: string;
   maxRetries?: number;
   mergeGate?: true;
+  heavy?: boolean;
 }
 
 export interface Gate {
@@ -128,6 +131,19 @@ export interface Gate {
   maxRetries: number;
   attempts: number;
   mergeGate: boolean;
+  heavy: boolean;
+  reason?: string;
+}
+
+export function isHeavyStage(stage: GateStage): boolean {
+  if (stage.heavy === true) return true;
+  if (stage.heavy === false) return false;
+  const firstToken = stage.verifyCmd?.trim().split(/\s+/, 1)[0];
+  return !!firstToken && basename(firstToken) === "unit-gate.sh";
+}
+
+export function esInfra(state: VerifyState): boolean {
+  return state.status === "failed" && INFRA_REASONS.some((reason) => reason === state.reason);
 }
 
 /** sub-repo → SHA, la forma en que se persisten los HEADs probados. */
@@ -151,6 +167,7 @@ function sameHeads(antes: RepoHead[], despues: RepoHead[] | null): boolean {
  */
 function mergeGateRearms(state: VerifyState, heads: RepoHead[] | null, maxRetries: number): boolean {
   if (!heads || heads.length === 0 || heads.some((h) => h.dirty)) return false;
+  if (esInfra(state)) return true;
   if (state.status === "failed" && state.attempts >= maxRetries) return false;
   return !sameShas(state.shas, heads);
 }
@@ -205,7 +222,7 @@ export function selectGate(
       // después de la foto del veredicto (ver `retocadoTrasFoto`).
       if (retocado && !retocado(stage.key, state)) continue;
     }
-    return { key: stage.key, cmd, maxRetries, attempts: state?.attempts ?? 0, mergeGate };
+    return { key: stage.key, cmd, maxRetries, attempts: state?.attempts ?? 0, mergeGate, heavy: isHeavyStage(stage), ...(state?.reason ? { reason: state.reason } : {}) };
   }
   return null;
 }
@@ -252,6 +269,8 @@ export interface DriverDeps {
   gateConfig(repo: string): { timeoutMs: number; env: Record<string, string> };
   /** Cupo global de corridas simultáneas (`gate.maxConcurrent` de settings), leído en cada tick. */
   maxConcurrent?(): number;
+  /** Cupo de gates ligeros (`gate.maxConcurrentLight`), leído en cada tick. */
+  maxConcurrentLight?(): number;
   /**
    * Le entrega al worker de la sesión un prompt corto; false si no llegó (CLI ausente o error).
    * Sólo lo usa el gate de merge. Sin él, el veredicto queda sólo por escrito, como antes.
@@ -277,6 +296,9 @@ export function verdictMessage(stageKey: string, state: VerifyState, cycle: stri
   if (state.status === "sin-gate") return `UNIT-GATE: SIN-GATE — este flujo no tiene gate de unitarias configurado; continúa con ${siguiente}`;
   const log = `${cycle}/verify-${stageKey}.log`;
   const json = `${cycle}/verify-${stageKey}.json`;
+  if (esInfra(state)) {
+    return `UNIT-GATE: FAIL — ${state.reason} (no gasta intento) — fallo de infraestructura, no de tu código; re-toca el sentinela para re-correr con el mismo commit — salida en ${log}, veredicto en ${json}`;
+  }
   if (state.status === "failed" && maxRetries !== undefined && state.attempts >= maxRetries) {
     // El gate ya no se re-arma: pedirle que vuelva a tocar el sentinela lo dejaría esperando.
     return `UNIT-GATE: FAIL — intentos agotados (${state.attempts}/${maxRetries}); pide intervención humana — salida en ${log}, veredicto en ${json}`;
@@ -308,14 +330,17 @@ function mismoDesenlace(a: VerifyState, b: VerifyState): boolean {
 const armKey = (session: string, stageKey: string): string => `${session}:${stageKey}`;
 
 /**
- * El cupo global de corridas. Uno solo para gates de merge y normales: lo que se reparte es CPU y
- * memoria de la máquina, no turnos por tipo de gate.
+ * Cupos separados para suites pesadas y gates ligeros; una sesión conserva una sola corrida.
  */
 export interface GateSlots {
   /** Corridas simultáneas permitidas; `startVerifyDriver` lo relee de settings en cada tick. */
   max: number;
+  /** Corridas ligeras simultáneas permitidas. */
+  maxLight?: number;
   /** `sesión:etapa` → corrida en marcha. Se borra sola al terminar. */
   inFlight: Map<string, Promise<void>>;
+  /** Carril de cada corrida en vuelo. */
+  lane?: Map<string, "heavy" | "light">;
   /**
    * Interno del driver (se crea solo): `sesión:etapa` cuyo estado en disco lleva una marca
    * (`queued`, o `running` huérfano) que quizá haya que limpiar. Así una sesión que desaparece
@@ -374,6 +399,7 @@ export async function tickOnce(
   slots: GateSlots,
   onReport?: (r: GateReport) => void,
 ): Promise<void> {
+  const lanes = slots.lane ??= new Map();
   const marcados = (slots.marked ??= new Map());
   const entregas = (slots.entregas ??= new Set());
   const avisando = (slots.avisando ??= new Map());
@@ -588,7 +614,10 @@ export async function tickOnce(
       if (!corrida) continue;
 
       vigentes.add(clave);
-      if (slots.inFlight.size >= slots.max) {
+      const lane = gate.heavy ? "heavy" : "light";
+      const usados = [...lanes.values()].filter((value) => value === lane).length;
+      const limite = lane === "heavy" ? slots.max : (slots.maxLight ?? DEFAULT_GATE_SETTINGS.maxConcurrentLight);
+      if (usados >= limite) {
         // Sin cupo: a la cola. Se escribe una sola vez, no en cada tick que siga esperando. Se
         // conserva el estado previo (p.ej. un passed con sus SHAs): al salir de la cola sin correr,
         // quitar la marca lo deja tal cual estaba.
@@ -603,6 +632,7 @@ export async function tickOnce(
       if (!gate.mergeGate) armed.delete(clave);
       marcados.delete(clave);
       deps.writeState(cycle, gate.key, { attempts: gate.attempts, status: "pending", running: true, queued: false });
+      lanes.set(clave, lane);
       const enVuelo = corrida()
         .then(informar, (error: unknown) => {
           // La corrida misma reventó (no un rojo): sin veredicto, se quita `running` y el gate
@@ -615,7 +645,10 @@ export async function tickOnce(
           }
         })
         .catch(registrar)
-        .finally(() => slots.inFlight.delete(clave));
+        .finally(() => {
+          slots.inFlight.delete(clave);
+          lanes.delete(clave);
+        });
       slots.inFlight.set(clave, enVuelo);
     } catch (error) {
       deps.logError?.(error);
@@ -648,15 +681,24 @@ function planGate(
   armado: boolean,
   armar: () => void,
 ): Corrida | null {
-  const decision = verifyRunDecision(sesion.busy, gate.attempts, armado);
+  const pacingAttempts = gate.reason === TIMEOUT_REASON ? Math.max(gate.attempts, 1) : gate.attempts;
+  const decision = verifyRunDecision(sesion.busy, pacingAttempts, armado);
   if (decision === "arm") armar();
   if (decision !== "run") return null;
   // El desenlace sale de `gate` (el estado al decidir), nunca de una relectura posterior.
   return async () => {
     const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
     guardarLog(deps, cycle, gate.key, resultado.output);
-    const desenlace = verifyOutcome(resultado.ok, gate.attempts, gate.maxRetries);
-    const state: VerifyState = { attempts: desenlace.attempts, status: desenlace.status };
+    const timeout = porTimeout(resultado);
+    const sinGate = resultado.ok && /(?:^|\n)[^\n]*-GATE: SIN-GATE\s*$/.test(resultado.output);
+    const desenlace = timeout
+      ? { attempts: gate.attempts, status: "pending" as const }
+      : verifyOutcome(resultado.ok, gate.attempts, gate.maxRetries);
+    const state: VerifyState = {
+      attempts: desenlace.attempts,
+      status: desenlace.status,
+      ...(timeout ? { reason: TIMEOUT_REASON } : sinGate ? { reason: "sin-gate" } : {}),
+    };
     deps.writeState(cycle, gate.key, state);
     return { session: sesion.name, stageKey: gate.key, status: state.status, attempts: state.attempts, output: resultado.output };
   };
@@ -726,9 +768,10 @@ async function planMergeGate(
       return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts, at: Date.now() }, resultado.output);
     }
     // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
+    const timeout = porTimeout(resultado);
     const state: VerifyState = resultado.ok
       ? { attempts: gate.attempts, status: "passed", shas, durationMs: fin - inicio, at: fin }
-      : { attempts: gate.attempts + 1, status: "failed", shas, durationMs: fin - inicio, at: fin, ...(porTimeout(resultado) ? { reason: TIMEOUT_REASON } : {}) };
+      : { attempts: timeout ? gate.attempts : gate.attempts + 1, status: "failed", shas, durationMs: fin - inicio, at: fin, ...(timeout ? { reason: TIMEOUT_REASON } : {}) };
     return informe(state, resultado.output);
   };
 }
@@ -745,13 +788,19 @@ export interface DriverHandle {
  */
 export function startVerifyDriver(deps: DriverDeps, intervalMs = 20_000): DriverHandle {
   const armed = new Map<string, boolean>();
-  const slots: GateSlots = { max: DEFAULT_GATE_SETTINGS.maxConcurrent, inFlight: new Map() };
+  const slots: GateSlots = {
+    max: DEFAULT_GATE_SETTINGS.maxConcurrent,
+    maxLight: DEFAULT_GATE_SETTINGS.maxConcurrentLight,
+    inFlight: new Map(),
+    lane: new Map(),
+  };
   let corriendo = false;
   const timer = setInterval(() => {
     if (corriendo) return;
     corriendo = true;
     try {
       slots.max = deps.maxConcurrent?.() ?? DEFAULT_GATE_SETTINGS.maxConcurrent;
+      slots.maxLight = deps.maxConcurrentLight?.() ?? DEFAULT_GATE_SETTINGS.maxConcurrentLight;
     } catch (error) {
       deps.logError?.(error);
     }

@@ -14,7 +14,8 @@ inglés para siempre.
 El gate es un `verifyCmd` de etapa, igual que [`unit-gate.sh`](unit-gate.md): Ronin lo corre en el
 worktree de la sesión cuando el worker toca el sentinela de la etapa y está ocioso; `maxRetries: 2`;
 el veredicto queda en `<cycle>/verify-i18n.json` y en el medidor del Harness. La instrucción de la
-etapa le pide al worker correr el mismo script y no avanzar sin `I18N-GATE: PASS`.
+etapa le pide al worker correr el mismo script y no avanzar sin `I18N-GATE: PASS` o
+`I18N-GATE: SIN-GATE`.
 
 | workflow | la etapa `i18n` va… | por qué ahí |
 |---|---|---|
@@ -45,7 +46,9 @@ cambios falla cerrado («no sé dónde está el código de producto de <repo>»)
 No cuentan como literal: el mensaje que sólo repite otra excepción atrapada (`str(e)`, `{e}`), el
 que hace eco de otro servicio junto con su status (`{response.text}`), y todo lo que no sea 4xx.
 
-Default‑deny: sin `git`, sin catálogo de `ant-ms-i18n` o sin intérprete para el trinquete → `FAIL`.
+Un worktree sin ningún repo de servicio devuelve `I18N-GATE: SIN-GATE` con exit 0 y Ronin lo
+persiste como `passed` con `reason: "sin-gate"`. Si sí hay candidatos, se conserva el default-deny:
+sin `git`, sin catálogo de `ant-ms-i18n` o sin intérprete para el trinquete → `FAIL`.
 
 ## Cómo se migra un literal
 
@@ -73,7 +76,7 @@ presupuesto para literales nuevos.
 
 ```bash
 ~/code/claude-cowork/scripts/i18n-gate.sh <worktree>
-# I18N-GATE: PASS  |  I18N-GATE: FAIL
+# I18N-GATE: PASS  |  I18N-GATE: SIN-GATE  |  I18N-GATE: FAIL
 ```
 
 Env: `I18N_GATE_BASE` (default `origin/main`) · `I18N_GATE_MAIN_ROOT` (default `~/code/lkmx/liebre`,
