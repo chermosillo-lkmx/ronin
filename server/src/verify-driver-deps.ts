@@ -82,6 +82,7 @@ export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverD
     // Se lee en cada llamada: un cambio en settings.json o repo-config.json aplica sin reiniciar.
     gateConfig: (repo) => gateConfigFrom(sources.gateSettings(), sources.repoGate(repo)),
     maxConcurrent: () => sources.gateSettings().maxConcurrent,
+    maxConcurrentLight: () => sources.gateSettings().maxConcurrentLight,
     // El veredicto del gate de merge al pane conductor, resuelto en vivo. Cualquier fallo —sin
     // conductor inequívoco, tmux ilegible, CLI ausente— es `false`: el driver lo anota como
     // `notify: "failed"` y no reintenta. Nunca cae al pane activo de la sesión.

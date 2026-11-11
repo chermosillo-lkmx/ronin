@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
 import { DEFAULT_GATE_RETRIES, selectGate, startVerifyDriver, tickOnce, verdictMessage, type DriverDeps, type GateReport, type GateSlots, type GateStage } from "./verify-driver.js";
+import * as verifyDriver from "./verify-driver.js";
 import { readVerifyState, writeVerifyState, type VerifyState } from "./stages.js";
 
 const STAGES: GateStage[] = [
   { key: "planning", label: "Plan" },
   { key: "implementing", label: "Impl" },
-  { key: "tests", label: "Pruebas", verifyCmd: "correr-pruebas", maxRetries: 2 },
+  { key: "tests", label: "Pruebas", verifyCmd: "correr-pruebas", maxRetries: 2, heavy: true },
   { key: "curl", label: "Curl" },
   { key: "done", label: "Evidencia" },
 ];
@@ -35,7 +36,7 @@ test("selectGate: una etapa anterior al gate no lo dispara", () => {
 
 test("selectGate: al alcanzar la etapa con verifyCmd, ése es el gate", () => {
   const gate = selectGate(STAGES, "tests", sinEstado);
-  assert.deepEqual(gate, { key: "tests", cmd: "correr-pruebas", maxRetries: 2, attempts: 0, mergeGate: false });
+  assert.deepEqual(gate, { key: "tests", cmd: "correr-pruebas", maxRetries: 2, attempts: 0, mergeGate: false, heavy: true });
 });
 
 test("selectGate: el gate sigue vigente aunque el worker se haya adelantado", () => {
@@ -67,6 +68,16 @@ test("selectGate: con varios gates pendientes gana el más temprano del flujo", 
 test("selectGate: sin maxRetries declarado usa el default del driver", () => {
   const sinRetries: GateStage[] = [{ key: "tests", label: "Pruebas", verifyCmd: "a" }];
   assert.equal(selectGate(sinRetries, "tests", sinEstado)?.maxRetries, DEFAULT_GATE_RETRIES);
+});
+
+test("isHeavyStage: heavy explícito gana y, sin bandera, sólo unit-gate.sh es pesado", () => {
+  assert.equal(typeof (verifyDriver as any).isHeavyStage, "function");
+  const isHeavyStage = (verifyDriver as any).isHeavyStage as (stage: GateStage) => boolean;
+  assert.equal(isHeavyStage({ key: "a", label: "A", verifyCmd: "i18n-gate.sh", heavy: true } as GateStage), true);
+  assert.equal(isHeavyStage({ key: "b", label: "B", verifyCmd: "/repo/scripts/unit-gate.sh --all", heavy: false } as GateStage), false);
+  assert.equal(isHeavyStage({ key: "c", label: "C", verifyCmd: "env X=1 ./scripts/unit-gate.sh" } as GateStage), false);
+  assert.equal(isHeavyStage({ key: "d", label: "D", verifyCmd: "./scripts/unit-gate.sh --all" }), true);
+  assert.equal(isHeavyStage({ key: "e", label: "E", verifyCmd: "bash scripts/i18n-gate.sh" }), false);
 });
 
 // ---- tickOnce: el bucle en sí ----
@@ -322,7 +333,7 @@ test("tickOnce: con la provisión lista el gate corre normal", async () => {
 
 const MERGE: GateStage[] = [
   { key: "implementing", label: "Impl" },
-  { key: "pre-merge", label: "Gate pre-merge", verifyCmd: "unit-gate", maxRetries: 3, mergeGate: true },
+  { key: "pre-merge", label: "Gate pre-merge", verifyCmd: "unit-gate", maxRetries: 3, mergeGate: true, heavy: true },
   { key: "pr", label: "PR" },
 ];
 const limpio = (sha: string) => [{ repo: "api", sha, dirty: false }];
@@ -804,6 +815,37 @@ function flota(over: Partial<DriverDeps> & { sesiones: string[] }) {
     },
   };
 }
+
+test("carril: un gate ligero arranca aunque el carril pesado esté lleno", async () => {
+  const pesado: GateStage[] = [{ key: "tests", label: "Unit", verifyCmd: "./scripts/unit-gate.sh" }];
+  const ligero: GateStage[] = [{ key: "tests", label: "i18n", verifyCmd: "./scripts/i18n-gate.sh" }];
+  const f = flota({ sesiones: ["heavy", "light"], flowFor: (s) => s === "heavy" ? pesado : ligero });
+  f.slots.max = 1;
+  Object.assign(f.slots, { maxLight: 1, lane: new Map() });
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["heavy", "light"]);
+  assert.deepEqual([...(f.slots as any).lane.values()], ["heavy", "light"]);
+});
+
+test("carril: max=1 encola el segundo pesado", async () => {
+  const pesado: GateStage[] = [{ key: "tests", label: "Unit", verifyCmd: "unit-gate.sh" }];
+  const f = flota({ sesiones: ["h1", "h2"], flowFor: () => pesado });
+  f.slots.max = 1;
+  Object.assign(f.slots, { maxLight: 4, lane: new Map() });
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["h1"]);
+  assert.equal(f.estado("h2")?.queued, true);
+});
+
+test("carril: maxLight=1 encola el segundo ligero", async () => {
+  const ligero: GateStage[] = [{ key: "tests", label: "i18n", verifyCmd: "i18n-gate.sh" }];
+  const f = flota({ sesiones: ["l1", "l2"], flowFor: () => ligero });
+  f.slots.max = 2;
+  Object.assign(f.slots, { maxLight: 1, lane: new Map() });
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["l1"]);
+  assert.equal(f.estado("l2")?.queued, true);
+});
 
 test("concurrencia: con max 2 y 3 sesiones listas, corren 2 y la tercera queda queued", async () => {
   const f = flota({ sesiones: ["s1", "s2", "s3"] });

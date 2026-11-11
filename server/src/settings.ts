@@ -6,11 +6,12 @@ import { DEFAULT_ENGINE, sanitizeEngine, type EngineChoice } from "./engine-conf
 const SETTINGS_FILE = dataPath("settings.json");
 
 /** Ajustes globales del gate de pruebas previo al merge. */
-export interface GateSettings { timeoutMin: number; maxConcurrent: number; }
-export const DEFAULT_GATE_SETTINGS: GateSettings = { timeoutMin: 45, maxConcurrent: 2 };
+export interface GateSettings { timeoutMin: number; maxConcurrent: number; maxConcurrentLight: number; }
+export const DEFAULT_GATE_SETTINGS: GateSettings = { timeoutMin: 45, maxConcurrent: 2, maxConcurrentLight: 4 };
 /** Rango válido del timeout del gate (minutos); también lo usa el override por repo. */
 export const GATE_TIMEOUT_RANGE = { min: 5, max: 240 } as const;
 const GATE_CONCURRENT_RANGE = { min: 1, max: 8 } as const;
+const GATE_CONCURRENT_LIGHT_RANGE = { min: 1, max: 16 } as const;
 
 /** Entero dentro de [min, max]; cualquier otro tipo o valor fuera de rango → undefined (cae al default). */
 export function boundedInt(v: unknown, { min, max }: { min: number; max: number }): number | undefined {
@@ -22,7 +23,8 @@ interface StoredSettings { allowedRoots?: string[]; engine?: EngineChoice; gate?
 function sanitizeGate(raw: any): Partial<GateSettings> {
   const timeoutMin = boundedInt(raw?.timeoutMin, GATE_TIMEOUT_RANGE);
   const maxConcurrent = boundedInt(raw?.maxConcurrent, GATE_CONCURRENT_RANGE);
-  return { ...(timeoutMin !== undefined ? { timeoutMin } : {}), ...(maxConcurrent !== undefined ? { maxConcurrent } : {}) };
+  const maxConcurrentLight = boundedInt(raw?.maxConcurrentLight, GATE_CONCURRENT_LIGHT_RANGE);
+  return { ...(timeoutMin !== undefined ? { timeoutMin } : {}), ...(maxConcurrent !== undefined ? { maxConcurrent } : {}), ...(maxConcurrentLight !== undefined ? { maxConcurrentLight } : {}) };
 }
 
 function load(file = SETTINGS_FILE): StoredSettings {
@@ -41,7 +43,11 @@ export function readEngine(file = SETTINGS_FILE): EngineChoice { return load(fil
 /** Defaults del gate; un valor ausente, de otro tipo o fuera de rango cae al predeterminado. */
 export function readGateSettings(file = SETTINGS_FILE): GateSettings {
   const gate = load(file).gate;
-  return { timeoutMin: gate?.timeoutMin ?? DEFAULT_GATE_SETTINGS.timeoutMin, maxConcurrent: gate?.maxConcurrent ?? DEFAULT_GATE_SETTINGS.maxConcurrent };
+  return {
+    timeoutMin: gate?.timeoutMin ?? DEFAULT_GATE_SETTINGS.timeoutMin,
+    maxConcurrent: gate?.maxConcurrent ?? DEFAULT_GATE_SETTINGS.maxConcurrent,
+    maxConcurrentLight: gate?.maxConcurrentLight ?? DEFAULT_GATE_SETTINGS.maxConcurrentLight,
+  };
 }
 export function saveAllowedRoots(input: unknown, file = SETTINGS_FILE): string[] {
   if (!Array.isArray(input)) throw new Error("se esperaba una lista de raíces (rutas absolutas existentes)");

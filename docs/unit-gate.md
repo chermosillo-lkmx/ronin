@@ -39,6 +39,15 @@ idempotente: una segunda corrida no cambia nada).
 
 Las sesiones ya creadas conservan su `flow.json` congelado: el gate aplica a sesiones nuevas.
 
+## Carriles de concurrencia
+
+`gate.maxConcurrent` (default 2, rango 1–8) limita suites pesadas y
+`gate.maxConcurrentLight` (default 4, rango 1–16) limita gates ligeros. Una etapa puede declarar
+`heavy: true` o `heavy: false` junto a su `verifyCmd` en el override por repo. Sin bandera, los
+`flow.json` ya congelados se consideran pesados sólo cuando el primer token de `verifyCmd` tiene
+basename `unit-gate.sh`; los demás gates usan el carril ligero. Una sesión nunca corre dos gates a
+la vez, aunque pertenezcan a carriles distintos.
+
 ## Qué comprueba (por cada sub‑repo con cambios respecto a `origin/main`)
 
 1. **Cambios en código de producto traen tests.** El código de producto (ver «Dónde está el código de producto» abajo), excluyendo
