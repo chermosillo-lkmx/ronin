@@ -378,3 +378,10 @@ test("skills: sin prompt que entregar no se consulta el índice; si el índice l
   assert.equal(delivered.length, 1);
   assert.equal(errors.length, 1);
 });
+
+test("channel se persiste en launch.json", async () => {
+  const deps = launchDeps();
+  await launchManagedSession({ repo: "monorepo", workflowId: "wf-test", name: "cowork-canal", channel: "telegram" }, deps);
+  const launch = deps.readWrite?.("/cycles/cowork-canal/launch.json") as Record<string, unknown>;
+  assert.equal(launch.channel, "telegram");
+});

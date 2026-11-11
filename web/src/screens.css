@@ -437,3 +437,71 @@
 .ron-mem-note { margin: 0; color: var(--color-neutral-500); }
 .ron-mem-note.error { color: var(--status-fail); }
 .ron-mem-hint { margin: 0; color: var(--color-neutral-500); font-size: 11px; }
+
+/* Telegram: wizard y estado */
+.ron-tg-steps { display: flex; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.ron-tg-steps li { flex: 1; padding-top: 6px; border-top: 3px solid var(--color-divider); color: var(--color-neutral-600); font-size: 11px; }
+.ron-tg-steps li.done { border-color: var(--status-ok); color: var(--status-ok); }
+.ron-tg-steps li.now { border-color: var(--color-accent); color: var(--color-text); font-weight: 600; }
+.ron-tg h2 { margin: 0; font-size: 15px; }
+.ron-tg h3 { margin: 0; font-size: 12px; color: var(--color-neutral-400); }
+.ron-tg p { margin: 0; font-size: 12.5px; line-height: 1.45; }
+.ron-tg-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; line-height: 1.45; }
+.ron-tg code { font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ron-tg-muted { color: var(--color-neutral-500); }
+.ron-tg-note { padding: 9px 11px; border-radius: 6px; color: var(--color-neutral-400); background: var(--color-bg); }
+.ron-tg-field { display: flex; flex-direction: column; gap: 5px; color: var(--color-neutral-400); font-size: 11px; }
+.ron-tg-field input { height: 31px; box-sizing: border-box; padding: 0 8px; border: 1px solid var(--color-divider); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-bg); font-size: 12px; }
+.ron-tg-link { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: var(--color-bg); }
+.ron-tg-link code { overflow-wrap: anywhere; color: var(--color-neutral-300); }
+.ron-tg-link a.n-btn { text-decoration: none; }
+.ron-tg-wait { color: var(--color-neutral-400); }
+.ron-tg-ok { color: var(--status-ok); }
+.ron-tg-warn { padding: 9px 11px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--status-warn) 40%, transparent); background: color-mix(in srgb, var(--status-warn) 10%, var(--color-bg)); }
+.ron-tg-warn ul { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }
+.ron-tg-error { padding: 9px 11px; border-radius: 6px; color: var(--status-fail); background: color-mix(in srgb, var(--status-fail) 10%, var(--color-bg)); }
+.ron-tg-error ul { margin: 4px 0 8px; padding-left: 18px; }
+.ron-tg-repos { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.ron-tg-repos legend { padding: 0 0 6px; color: var(--color-neutral-400); font-size: 11px; }
+.ron-tg-repo { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--color-divider); border-radius: 6px; cursor: pointer; }
+.ron-tg-repo small { margin-left: auto; color: var(--status-ok); font-size: 11px; }
+.ron-tg-repo small.off { color: var(--color-neutral-600); }
+.ron-tg-state { display: flex; align-items: center; gap: 9px; font: 500 14px var(--font-heading); }
+.ron-tg-state i { width: 9px; height: 9px; border-radius: 50%; background: var(--status-fail); }
+.ron-tg-state.ok i { background: var(--status-ok); }
+.ron-tg-repolist { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.ron-tg-repolist ul { margin: 0; padding-left: 18px; }
+.ron-tg .n-btn:not(.n-btn-primary):not(.n-btn-danger) { border: 1px solid var(--color-neutral-600); }
+.ron-tg-confirm { width: min(440px, 100%); }
+
+/* ---- Performance por tipo de ciclo ---- */
+.ron-perf-seg { display: inline-flex; border: 1px solid var(--color-divider); border-radius: 8px; overflow: hidden; }
+.ron-perf-seg button { background: transparent; border: 0; color: var(--color-neutral-400); padding: 6px 12px; cursor: pointer; font: inherit; }
+.ron-perf-seg button.active { background: color-mix(in srgb, var(--color-accent) 22%, transparent); color: var(--color-text); }
+.ron-perf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: var(--space-4); }
+.ron-perf-card, .ron-perf-machine, .ron-perf-open { padding: var(--space-4); display: grid; gap: var(--space-3); }
+.ron-perf-card.degraded, .ron-perf-machine.degraded { box-shadow: inset 3px 0 0 var(--status-fail); }
+.ron-perf-card-head { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
+.ron-perf-card-head small, .ron-perf-card-head span { color: var(--color-neutral-400); font-size: 12px; }
+.ron-perf-kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: var(--space-2); margin: 0; }
+.ron-perf-kpis div { display: grid; gap: 2px; }
+.ron-perf-kpis dt { color: var(--color-neutral-500); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.ron-perf-kpis dd { margin: 0; font-size: 16px; font-variant-numeric: tabular-nums; }
+.ron-perf-chart { width: 100%; height: 150px; overflow: visible; }
+.ron-perf-chart.small { height: 56px; }
+.ron-perf-axis { fill: var(--color-neutral-500); font-size: 10px; text-anchor: middle; }
+.ron-perf-empty { fill: var(--color-divider); }
+.ron-perf-gate-line, .ron-perf-load-line, .ron-perf-swap-line { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.ron-perf-gate-line { stroke: var(--color-text); stroke-dasharray: 4 3; }
+.ron-perf-load-line { stroke: var(--status-warn); }
+.ron-perf-swap-line { stroke: var(--status-fail); }
+.ron-perf-legend { display: flex; flex-wrap: wrap; gap: var(--space-3); list-style: none; margin: 0; padding: 0; font-size: 12px; color: var(--color-neutral-400); }
+.ron-perf-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.ron-perf-gate-key { background: var(--color-text); height: 2px !important; }
+.ron-perf-load-key { background: var(--status-warn); }
+.ron-perf-swap-key { background: var(--status-fail); }
+.ron-perf-delta { font-size: 12px; padding: 1px 6px; border-radius: 6px; }
+.ron-perf-delta.bad { color: var(--status-fail); background: color-mix(in srgb, var(--status-fail) 14%, transparent); }
+.ron-perf-delta.good { color: var(--status-ok); }
+.ron-perf-delta.flat { color: var(--color-neutral-400); }
+.ron-perf-bad { color: var(--status-fail) !important; }

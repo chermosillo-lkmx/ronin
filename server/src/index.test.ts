@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,6 +10,9 @@ import { promisify } from "node:util";
 import { CAPABILITY_FILE, ensureCapabilityToken, readCapabilityToken } from "./capability.js";
 import { VERIFY_GATE } from "./config.js";
 import { createApp, runConfiguredClaude, startServer } from "./index.js";
+import type { TelegramRuntime } from "./telegram/service.js";
+import type { Update } from "./telegram/api.js";
+import { createTelegramStore } from "./telegram/store.js";
 import { createSession } from "./tmux.js";
 import { cycleDirForSession } from "./stages.js";
 import { adoptSession, releaseAdoption } from "./engine.js";
@@ -18,6 +21,18 @@ import { createMemoryStore } from "./memory.js";
 import type { Distiller } from "./memory-distiller.js";
 
 const pexec = promisify(execFile);
+
+/** Runtime de Telegram inerte: los tests de startServer nunca deben abrir un sondeo real. */
+function fakeTelegram(events: string[] = [], over: Partial<TelegramRuntime> = {}): TelegramRuntime {
+  return {
+    start: () => { events.push("telegram:start"); return async () => { events.push("telegram:stop"); }; },
+    reload: () => {},
+    store: undefined as never,
+    getApi: () => null,
+    ...over,
+  };
+}
+const offlineApp = (options?: Parameters<typeof createApp>[0]) => createApp({ ...options, telegram: fakeTelegram() });
 
 function envWithoutTmux(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -158,6 +173,7 @@ test("startServer does not listen until background setup is ready", async () => 
   const starting = startServer({
     port: 43210,
     deps: {
+      createApp: offlineApp,
       startBackground: async () => () => { events.push("background"); },
       listen: async () => { events.push("listen"); return server as any; },
     },
@@ -214,6 +230,7 @@ test("startServer generates the capability token exactly once, before listening"
   const starting = startServer({
     port: 43211,
     deps: {
+      createApp: offlineApp,
       startBackground: async () => () => {},
       ensureCapability: () => { events.push("capability"); return "fixture-token"; },
       listen: async () => { events.push("listen"); return server as any; },
@@ -232,6 +249,7 @@ test("startServer keeps the real loopback socket closed until background setup i
   const starting = startServer({
     port,
     deps: {
+      createApp: offlineApp,
       startBackground: () => backgroundReady.promise,
       listen: listenOnLoopback,
     },
@@ -260,6 +278,7 @@ test("startServer keeps the real loopback socket closed until background setup i
       startServer({
         port: await freeLoopbackPort(),
         deps: {
+          createApp: offlineApp,
           startBackground: async () => {
             failureEvents.push("background");
             return failure.startBackground();
@@ -286,6 +305,92 @@ test("startServer does not expose an engine dependency when a background produce
     }),
     /background failed/,
   );
+});
+
+test("createApp guarda el runtime de Telegram sin arrancarlo", () => {
+  const events: string[] = [];
+  const telegram = fakeTelegram(events);
+  const app = createApp({ telegram });
+  assert.equal(app.locals.telegram, telegram);
+  assert.deepEqual(events, []);
+});
+
+test("startServer arranca Telegram después de listen y lo detiene en close", async () => {
+  const events: string[] = [];
+  const server = {
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43212 }),
+    close: (callback: (error?: Error) => void) => callback(),
+  };
+  const handle = await startServer({
+    port: 43212,
+    deps: {
+      createApp: (options) => createApp({ ...options, telegram: fakeTelegram(events) }),
+      startBackground: async () => () => {},
+      listen: async () => { events.push("listen"); return server as any; },
+    },
+  });
+  assert.deepEqual(events, ["listen", "telegram:start"]);
+  await handle.close();
+  await handle.close();
+  assert.deepEqual(events, ["listen", "telegram:start", "telegram:stop"]);
+});
+
+test("un start de Telegram que falla no tumba el server", async () => {
+  const warn = mock.method(console, "warn", () => {});
+  const server = {
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43213 }),
+    close: (callback: (error?: Error) => void) => callback(),
+  };
+  const handle = await startServer({
+    port: 43213,
+    deps: {
+      createApp: (options) => createApp({ ...options, telegram: fakeTelegram([], { start: () => { throw new Error("sin red"); } }) }),
+      startBackground: async () => () => {},
+      listen: async () => server as any,
+    },
+  });
+  await handle.close();
+  assert.equal(warn.mock.callCount(), 1);
+  warn.mock.restore();
+});
+
+test("el lanzamiento de Telegram usa el launch recibido en options (el de startServer, con mcp config)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "telegram-launch-"));
+  try {
+    const store = createTelegramStore(dir);
+    store.writeToken("1:TOK");
+    store.updateConfig({ userId: 7, chatId: -100, topics: { monorepo: 11 }, activatedAt: "2026-01-01T00:00:00.000Z" });
+    store.updateState((s) => {
+      s.proposals.p1 = { id: "p1", repo: "monorepo", instruction: "arregla el login", workflowId: "wf-a", workflowName: "Flujo A", createdAt: Date.now() };
+    });
+    const tap: Update = {
+      update_id: 1,
+      callback_query: { id: "cb", from: { id: 7 }, data: "p:p1:go", message: { message_id: 4, message_thread_id: 11, chat: { id: -100, type: "supergroup" } } },
+    };
+    const launched: Array<Record<string, unknown>> = [];
+    const sent: string[] = [];
+    const api = {
+      getUpdates: async (_o: unknown, _t: unknown, signal?: AbortSignal) => {
+        if (launched.length === 0 && !sent.includes("polled")) { sent.push("polled"); return [tap]; }
+        return new Promise<Update[]>((_, reject) => signal?.addEventListener("abort", () => reject(new Error("abort"))));
+      },
+      answerCallback: async () => {},
+      sendMessage: async (m: { text: string }) => { sent.push(m.text); return { message_id: 9, chat: { id: -100, type: "supergroup" } }; },
+    };
+    const app = createApp({
+      launchManagedSession: (async (input: Record<string, unknown>) => { launched.push(input); return { name: "cowork-x" }; }) as any,
+      mcpSessions: { catalog: async () => ({ repos: ["monorepo"], workflows: [] }), status: async () => [], reply: async () => {}, launch: async () => ({ name: "x" }) } as any,
+      telegramDeps: { store, createApi: () => api as any },
+    });
+    const stop = (app.locals.telegram as TelegramRuntime).start();
+    for (let i = 0; i < 200 && launched.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    await stop();
+    assert.equal(launched.length, 1);
+    assert.equal(launched[0].channel, "telegram");
+    assert.equal(launched[0].workflowId, "wf-a");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---- T4: requireCapability montada por MÉTODO sobre todo /api mutante ----
@@ -951,7 +1056,7 @@ test("POST /api/sessions limpia NUL y espacios antes de medir y lanzar una petic
     body: { repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", request: `\0`.repeat(8 * 1024 + 1) + "  arregla CU-86e2\0  " },
   });
   assert.equal(response.status, 201);
-  assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", mode: undefined, agent: undefined, request: "arregla CU-86e2" }]);
+  assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", mode: undefined, agent: undefined, request: "arregla CU-86e2", channel: "ui" }]);
 });
 
 test("POST /api/sessions sólo reenvía inputs que sean un objeto plano de strings", async () => {
@@ -969,7 +1074,7 @@ test("POST /api/sessions sólo reenvía inputs que sean un objeto plano de strin
     body: { repo: "monorepo", workflowId: "wf-test", name: "cowork-inputs-http", inputs: { ticket: "CU-42", numero: 42 } },
   });
   assert.equal(response.status, 201);
-  assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-inputs-http", mode: undefined, agent: undefined, request: undefined, inputs: { ticket: "CU-42" } }]);
+  assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-inputs-http", mode: undefined, agent: undefined, request: undefined, channel: "ui", inputs: { ticket: "CU-42" } }]);
 });
 
 test("POST /api/sessions propaga la causa real de un fallo de launch no tipado", async () => {
@@ -1722,4 +1827,22 @@ test("final F2: GET /api/sessions arma una vista por petición: state.json una v
   } finally {
     cleanup();
   }
+});
+
+test("POST /api/sessions fija channel ui e ignora el channel del body", async () => {
+  const token = ensureCapabilityToken();
+  const received: Array<{ channel?: string }> = [];
+  const app = createApp({
+    launchManagedSession: async (input) => {
+      received.push(input);
+      return { name: "cowork-canal-http", repo: "monorepo", mode: "workflow", workflowId: "wf-test", cwd: "/repo" };
+    },
+    readTmuxInventory: async () => ({ sessions: [], diagnostic: null }),
+  });
+  const response = await invokeRequest(app, "POST", "/api/sessions", {
+    headers: { "x-ronin-capability": token },
+    body: { repo: "monorepo", workflowId: "wf-test", name: "cowork-canal-http", channel: "telegram" },
+  });
+  assert.equal(response.status, 201);
+  assert.equal(received[0]!.channel, "ui");
 });

@@ -1,3 +1,5 @@
+import type { PerfBucket, PerfReport } from "./components/perf/model";
+import type { TelegramRepoRow, TelegramStatus } from "./types";
 import type { SkillDistillState, SkillLearningView, SkillProposalAction, SkillProposalDetail, SkillProposalSummary, SkillResolution } from "./types";
 import type { DistillState, EngineChoice, KnowledgeBaseGeneration, KnowledgeBaseInfo, MemoryAction, MemoryKind, RepoMemoryView, TestCasesFile, TestMatrixRow, TestRepoConfig, TestRun, TestSelection, TestStartResult, TestSuite, PreflightCheck, PromptTemplate, RepoOverrideConfig, ReportMeta, ReposConfig, SessionCleanupReport, SessionPresentation, SkillDocument, SkillRef, SkillSummary, TmuxInventoryResult, TmuxSessionInfo, ProposalStatus, TrustedRoots, WorkflowAnalysis, WorkflowCatalog, WorkflowCatalogItem, WorkflowConfig, WorkflowProposal } from "./types";
 
@@ -231,6 +233,33 @@ export async function saveEngine(engine: EngineChoice): Promise<EngineChoice> {
   }
   return ((await r.json()) as { engine: EngineChoice }).engine;
 }
+
+// ---- Telegram: los textos de error del server son fijos y en español; se muestran tal cual ----
+export class TelegramRequestError extends Error {
+  constructor(message: string, readonly failed: string[] = [], readonly repos: TelegramRepoRow[] = []) { super(message); }
+}
+
+async function telegramRequest<T>(path: string, init: RequestInit | undefined, fallback: string): Promise<T> {
+  const r = await fetch(`/api/telegram${path}`, init);
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({})) as { error?: string; failed?: string[]; repos?: TelegramRepoRow[] };
+    throw new TelegramRequestError(e.error || fallback, e.failed ?? [], e.repos ?? []);
+  }
+  return r.json() as Promise<T>;
+}
+
+const JSON_HEADERS = { "Content-Type": "application/json" };
+
+export const getTelegramStatus = (): Promise<TelegramStatus> => telegramRequest("/status", undefined, "no se pudo leer el estado de Telegram");
+export const saveTelegramToken = (token: string): Promise<{ botUsername: string }> =>
+  telegramRequest("/token", { method: "PUT", headers: JSON_HEADERS, body: JSON.stringify({ token }) }, "no se pudo guardar el token");
+export const createTelegramPairingLink = async (): Promise<string> =>
+  (await telegramRequest<{ link: string }>("/pairing", { method: "POST" }, "no se pudo generar el enlace")).link;
+export const createTelegramGroupLink = async (): Promise<string> =>
+  (await telegramRequest<{ link: string }>("/group-link", { method: "POST" }, "no se pudo generar el enlace")).link;
+export const saveTelegramRepos = async (repos: string[]): Promise<TelegramRepoRow[]> =>
+  (await telegramRequest<{ repos: TelegramRepoRow[] }>("/repos", { method: "PUT", headers: JSON_HEADERS, body: JSON.stringify({ repos }) }, "no se pudieron guardar los repos")).repos;
+export const disconnectTelegram = async (): Promise<void> => { await telegramRequest("/", { method: "DELETE" }, "no se pudo desconectar"); };
 
 export async function getRepoKnowledgeBase(repo: string): Promise<KnowledgeBaseInfo | null> {
   const r = await fetch(`/api/repos/${encodeURIComponent(repo)}/kb`);
@@ -614,6 +643,15 @@ async function harnessJson<T>(r: Response, fallback: string): Promise<T> {
 export async function getTestsConfig(): Promise<TestRepoConfig[] | null> {
   try {
     const r = await fetch("/api/tests/config");
+    return r.ok ? r.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getPerf(bucket: PerfBucket): Promise<PerfReport | null> {
+  try {
+    const r = await fetch(`/api/perf?bucket=${bucket}`);
     return r.ok ? r.json() : null;
   } catch {
     return null;

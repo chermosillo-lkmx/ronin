@@ -1,3 +1,4 @@
+import type { GateOutcome } from "./perf/recorder.js";
 import { cacheHit, realGitPort, repoHeads, type RepoHead } from "./gate-cache.js";
 import { readProvisionState, type ProvisionState } from "./provision.js";
 import { DEFAULT_GATE_SETTINGS } from "./settings.js";
@@ -258,7 +259,14 @@ export interface DriverDeps {
   provisionOf(cycle: string): ProvisionState | null;
   readState(cycle: string, stageKey: string): VerifyState | null;
   writeState(cycle: string, stageKey: string, state: VerifyState): void;
-  run(cmd: string, cwd: string, opts: { timeoutMs: number; env: Record<string, string> }): Promise<VerifyResult>;
+  run(cmd: string, cwd: string, opts: GateRunOpts): Promise<VerifyResult>;
+  /**
+   * Métricas de performance (opcional): cada desenlace de gate con su duración real, y el pid del
+   * proceso del gate mientras corre para atribuirle su CPU a la sesión. Nunca cambia la decisión.
+   */
+  onGateOutcome?(e: GateOutcome): void;
+  onGateSpawn?(session: string, pid: number): void;
+  onGateExit?(session: string, pid: number): void;
   /** Guarda la salida de la corrida en `<cycle>/verify-<etapa>.log` (se sobrescribe). Best-effort. */
   writeLog?(cycle: string, stageKey: string, output: string): void;
   /** HEAD y suciedad de cada sub-repo del worktree; null si git no se pudo leer. */
@@ -687,7 +695,9 @@ function planGate(
   if (decision !== "run") return null;
   // El desenlace sale de `gate` (el estado al decidir), nunca de una relectura posterior.
   return async () => {
-    const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
+    const inicio = Date.now();
+    const resultado = await deps.run(gate.cmd, worktree, runOpts(deps, sesion.name, repo));
+    const fin = Date.now();
     guardarLog(deps, cycle, gate.key, resultado.output);
     const timeout = porTimeout(resultado);
     const sinGate = resultado.ok && /(?:^|\n)[^\n]*-GATE: SIN-GATE\s*$/.test(resultado.output);
@@ -700,6 +710,7 @@ function planGate(
       ...(timeout ? { reason: TIMEOUT_REASON } : sinGate ? { reason: "sin-gate" } : {}),
     };
     deps.writeState(cycle, gate.key, state);
+    medir(deps, cycle, { session: sesion.name, stage: gate.key, status: state.status, attempts: state.attempts, ran: true, startedAt: inicio, endedAt: fin, ...(state.reason ? { reason: state.reason } : {}) });
     return { session: sesion.name, stageKey: gate.key, status: state.status, attempts: state.attempts, output: resultado.output };
   };
 }
@@ -724,8 +735,18 @@ async function planMergeGate(
 ): Promise<Corrida | null> {
   if (sesion.busy) return null;
   // Todo desenlace del gate de merge pasa por aquí: se escribe (sin `notify`) y se avisa al worker.
-  const informe = (state: VerifyState, output: string): GateReport => {
+  const informe = (state: VerifyState, output: string, inicio?: number): GateReport => {
     deps.writeState(cycle, gate.key, state);
+    medir(deps, cycle, {
+      session: sesion.name,
+      stage: gate.key,
+      status: state.status,
+      attempts: state.attempts,
+      ran: inicio !== undefined,
+      ...(inicio !== undefined ? { startedAt: inicio } : {}),
+      endedAt: state.at ?? Date.now(),
+      ...(state.reason ? { reason: state.reason } : {}),
+    });
     avisar(state);
     return { session: sesion.name, stageKey: gate.key, status: state.status, attempts: state.attempts, output };
   };
@@ -756,7 +777,7 @@ async function planMergeGate(
   // `heads` y `gate.attempts` son la foto del lanzamiento: el desenlace se calcula contra ellos.
   return async () => {
     const inicio = Date.now();
-    const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
+    const resultado = await deps.run(gate.cmd, worktree, runOpts(deps, sesion.name, repo));
     const fin = Date.now();
     guardarLog(deps, cycle, gate.key, resultado.output);
     // Un PASS sólo vale si el árbol sigue igual que en la foto previa: un commit o una edición a
@@ -765,15 +786,42 @@ async function planMergeGate(
     // Un FAIL tampoco cuenta si el árbol se movió: lo probado ya no es el HEAD (p.ej. un paso
     // intermedio de un rebase) y gastar el intento ahí agotaba ciclos sin que nadie lo pidiera.
     if (!sameHeads(heads, await deps.heads(worktree))) {
-      return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts, at: Date.now() }, resultado.output);
+      return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts, at: Date.now() }, resultado.output, inicio);
     }
     // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
     const timeout = porTimeout(resultado);
     const state: VerifyState = resultado.ok
       ? { attempts: gate.attempts, status: "passed", shas, durationMs: fin - inicio, at: fin }
       : { attempts: timeout ? gate.attempts : gate.attempts + 1, status: "failed", shas, durationMs: fin - inicio, at: fin, ...(timeout ? { reason: TIMEOUT_REASON } : {}) };
-    return informe(state, resultado.output);
+    return informe(state, resultado.output, inicio);
   };
+}
+
+export interface GateRunOpts {
+  timeoutMs: number;
+  env: Record<string, string>;
+  onSpawn?(pid: number): void;
+  onExit?(pid: number): void;
+}
+
+/** Opciones de corrida con los ganchos de pid de la sesión ya puestos. */
+function runOpts(deps: DriverDeps, session: string, repo: string): GateRunOpts {
+  return {
+    ...deps.gateConfig(repo),
+    onSpawn: (pid) => deps.onGateSpawn?.(session, pid),
+    onExit: (pid) => deps.onGateExit?.(session, pid),
+  };
+}
+
+/** Avisa el desenlace a las métricas; un fallo del registrador nunca toca el gate. */
+function medir(deps: DriverDeps, cycle: string, e: Omit<GateOutcome, "armedAt">): void {
+  if (!deps.onGateOutcome) return;
+  try {
+    const armedAt = deps.sentinelAt?.(cycle, e.stage) ?? null;
+    deps.onGateOutcome({ ...e, ...(armedAt !== null ? { armedAt: Math.round(armedAt) } : {}) });
+  } catch {
+    /* best-effort */
+  }
 }
 
 export interface DriverHandle {
@@ -817,7 +865,8 @@ export const realGateDeps = {
   provisionOf: readProvisionState,
   readState: readVerifyState,
   writeState: writeVerifyState,
-  run: (cmd: string, cwd: string, opts: { timeoutMs: number; env: Record<string, string> }) => runVerify(cmd, cwd, opts.timeoutMs, opts.env),
+  run: (cmd: string, cwd: string, opts: GateRunOpts) =>
+    runVerify(cmd, cwd, opts.timeoutMs, opts.env, undefined, { onSpawn: opts.onSpawn, onExit: opts.onExit }),
   writeLog: writeVerifyLog,
   sentinelAt: sentinelMtime,
   heads: (worktree: string) => repoHeads(worktree, realGitPort),

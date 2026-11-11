@@ -51,6 +51,8 @@ export function runVerify(
   timeoutMs = 120000,
   env: Record<string, string> = {},
   killGraceMs = DEFAULT_KILL_GRACE_MS,
+  /** Pid del líder del grupo al arrancar y al terminar (para atribuir CPU del gate a su sesión). */
+  hooks: { onSpawn?(pid: number): void; onExit?(pid: number): void } = {},
 ): Promise<VerifyResult> {
   return new Promise((resolve) => {
     let out = "";
@@ -73,6 +75,21 @@ export function runVerify(
       child = spawn(cmd, { shell: true, cwd, detached: true, env: { ...process.env, ...env } });
     } catch (e) {
       return finish({ ok: false, code: null, output: String(e) });
+    }
+    const spawnedPid = child.pid;
+    if (spawnedPid) {
+      try {
+        hooks.onSpawn?.(spawnedPid);
+      } catch {
+        /* medir nunca rompe el gate */
+      }
+      child.once("close", () => {
+        try {
+          hooks.onExit?.(spawnedPid);
+        } catch {
+          /* idem */
+        }
+      });
     }
 
     timeoutTimer = setTimeout(() => {

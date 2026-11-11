@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { McpToolError, type McpSessionPort, type McpSessionStatus } from "./mcp-sessions.js";
 import { SessionLaunchError, type ManagedSessionLaunchInput } from "./session-launch.js";
 import { detectDecision, menuIsLastLine, paneAttention } from "./attention.js";
@@ -32,6 +33,22 @@ function menuOptions(pane: string | null | undefined): string[] {
   return pane ? detectDecision(pane)?.options ?? [] : [];
 }
 
+/**
+ * Identidad de la pregunta que espera el agente: SHA-256 (16 hex) de la pregunta normalizada más
+ * las opciones del menú. Ignora el resto del pane (barra de estado, contadores). null si no espera.
+ */
+export function questionIdFromPane(pane: string, pending: boolean): string | null {
+  const attention = paneAttention(pane);
+  let question: string;
+  if (attention.level === "decision") question = attention.question ?? "";
+  else if (attention.level === "idle" && pending) question = lastMeaningfulText(pane, MAX_QUESTION);
+  else return null;
+  question = question.replace(/\s+/g, " ").trim();
+  if (!question) return null;
+  const options = menuOptions(pane).map((option) => option.replace(/\s+/g, " ").trim());
+  return createHash("sha256").update(JSON.stringify([question, options])).digest("hex").slice(0, 16);
+}
+
 /** `pane`: captura fresca del pane que pidió atención, si se tomó; aporta las opciones del menú. */
 export function toStatus(session: TmuxSessionInfo, pane?: string | null): McpSessionStatus {
   const flow = session.flow;
@@ -58,6 +75,10 @@ export function toStatus(session: TmuxSessionInfo, pane?: string | null): McpSes
     // Spec §4.2: sin diálogo detectado, la pregunta es el último párrafo de Claude sobre la caja de input.
     const question = lastMeaningfulText(pane, MAX_QUESTION);
     if (question) status.question = question;
+  }
+  if (needsInput && pane) {
+    const questionId = questionIdFromPane(pane, pending);
+    if (questionId) status.questionId = questionId;
   }
   const options = level === "decision" ? menuOptions(pane) : [];
   if (options.length) status.options = options;
@@ -107,7 +128,7 @@ export function createSessionPort(deps: SessionPortDeps): McpSessionPort {
       const panes = paneIds.length ? await deps.capture(paneIds) : new Map<string, string | null>();
       return wanted.map((session) => toStatus(session, panes.get(waitingPane(session) ?? "")));
     },
-    async reply(name, text) {
+    async reply(name, text, expectedQuestionId) {
       const session = (await managed()).find((item) => item.name === name);
       if (!session) throw new McpToolError("SESSION_NOT_FOUND", `no hay una sesión gestionada llamada ${name}`);
       const status = toStatus(session);
@@ -120,6 +141,9 @@ export function createSessionPort(deps: SessionPortDeps): McpSessionPort {
       const live = (await deps.capture([paneId])).get(paneId) ?? null;
       const pending = session.flow ? session.flow.done < session.flow.total : true;
       if (!liveWaiting(live, pending)) throw new McpToolError("SESSION_NOT_WAITING", "la sesión no está esperando una respuesta");
+      if (expectedQuestionId !== undefined && questionIdFromPane(live!, pending) !== expectedQuestionId) {
+        throw new McpToolError("QUESTION_CHANGED", "la pregunta de la sesión cambió; vuelve a leer su estado");
+      }
       // En un menú numerado (p. ej. permisos de Claude) texto + Enter confirmaría la opción
       // resaltada: sólo se acepta el número de una opción y se envía sólo esa tecla.
       const options = paneAttention(live!).level === "decision" ? menuOptions(live) : [];
