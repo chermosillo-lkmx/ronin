@@ -48,6 +48,10 @@ Las sesiones ya creadas conservan su `flow.json` congelado: el gate aplica a ses
 basename `unit-gate.sh`; los demás gates usan el carril ligero. Una sesión nunca corre dos gates a
 la vez, aunque pertenezcan a carriles distintos.
 
+Al vencer el timeout, Ronin envía `SIGTERM` al grupo completo y espera hasta 60 segundos para que
+pytest/vitest ejecute sus `finally` y teardown; sólo entonces usa `SIGKILL` si el grupo sigue vivo.
+La salida producida durante ese cierre queda incluida en `verify-<etapa>.log`.
+
 ## Qué comprueba (por cada sub‑repo con cambios respecto a `origin/main`)
 
 1. **Cambios en código de producto traen tests.** El código de producto (ver «Dónde está el código de producto» abajo), excluyendo

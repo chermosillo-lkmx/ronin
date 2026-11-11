@@ -3,8 +3,8 @@ import { spawn } from "node:child_process";
 /**
  * P2: run a stage's `verifyCmd` (a pass/fail exit-code check) in the worker's cwd. Default-deny:
  * ANY exception, spawn failure, missing cwd, or timeout resolves to `ok:false` — a verify never
- * produces a false-green. On timeout the whole PROCESS GROUP is killed (detached), so a dev
- * server / test runner that forks children doesn't leak. Never throws.
+ * produces a false-green. On timeout the whole PROCESS GROUP receives SIGTERM and, after a grace
+ * period, SIGKILL if it is still alive, so teardown can run without leaking children. Never throws.
  */
 export interface VerifyResult {
   ok: boolean;
@@ -42,15 +42,27 @@ export function verifyRunDecision(busy: boolean, attempts: number, armed: boolea
 }
 
 const truncateOutput = (s: string): string => (s.length > 8000 ? s.slice(0, 8000) + "\n…(truncado)" : s);
+export const DEFAULT_KILL_GRACE_MS = 60_000;
 
 /** `env` se mezcla SOBRE `process.env` (no lo reemplaza): el comando conserva PATH y compañía. */
-export function runVerify(cmd: string, cwd: string, timeoutMs = 120000, env: Record<string, string> = {}): Promise<VerifyResult> {
+export function runVerify(
+  cmd: string,
+  cwd: string,
+  timeoutMs = 120000,
+  env: Record<string, string> = {},
+  killGraceMs = DEFAULT_KILL_GRACE_MS,
+): Promise<VerifyResult> {
   return new Promise((resolve) => {
     let out = "";
     let done = false;
+    let timedOut = false;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
     const finish = (r: VerifyResult) => {
       if (done) return;
       done = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
       // La marca de timeout va DESPUÉS del recorte: con salida larga, recortar primero la borraba.
       resolve({ ...r, output: truncateOutput(r.output) + (r.timedOut ? "\n[timeout]" : "") });
     };
@@ -63,13 +75,23 @@ export function runVerify(cmd: string, cwd: string, timeoutMs = 120000, env: Rec
       return finish({ ok: false, code: null, output: String(e) });
     }
 
-    const timer = setTimeout(() => {
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
       try {
-        if (child.pid) process.kill(-child.pid, "SIGKILL"); // kill the whole group (D2)
+        if (child.pid) process.kill(-child.pid, "SIGTERM");
       } catch {
         /* already gone */
       }
-      finish({ ok: false, code: null, output: out, timedOut: true });
+      killTimer = setTimeout(() => {
+        try {
+          if (child.pid) {
+            process.kill(-child.pid, 0);
+            process.kill(-child.pid, "SIGKILL");
+          }
+        } catch {
+          /* el grupo ya terminó durante la gracia */
+        }
+      }, killGraceMs);
     }, timeoutMs);
 
     // Cap accumulation (not just the final truncate) so a chatty command before a 120s timeout
@@ -80,12 +102,12 @@ export function runVerify(cmd: string, cwd: string, timeoutMs = 120000, env: Rec
     child.stdout?.on("data", append);
     child.stderr?.on("data", append);
     child.on("error", (e) => {
-      clearTimeout(timer);
-      finish({ ok: false, code: null, output: out + String(e) }); // e.g. cwd missing / spawn failure
+      finish({ ok: false, code: null, output: out + String(e), ...(timedOut ? { timedOut: true } : {}) }); // e.g. cwd missing / spawn failure
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      finish({ ok: code === 0, code, output: out });
+      finish(timedOut
+        ? { ok: false, code, output: out, timedOut: true }
+        : { ok: code === 0, code, output: out });
     });
   });
 }

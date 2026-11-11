@@ -26,9 +26,17 @@ BASE_REF="${UNIT_GATE_BASE:-origin/main}"
 MAIN_ROOT="${UNIT_GATE_MAIN_ROOT:-$HOME/code/lkmx/liebre}"
 REPORTS="${UNIT_GATE_REPORTS_DIR:-reports}"
 fail=0; checked=0
+suite_pid=""
 say() { printf '%s\n' "$*"; }
 bad() { say "❌ $*"; fail=1; }
 ok()  { say "✅ $*"; }
+stop_suite() {
+  [ -n "$suite_pid" ] || return 0
+  kill -TERM "$suite_pid" 2>/dev/null || true
+  wait "$suite_pid" 2>/dev/null || true
+  suite_pid=""
+}
+trap 'stop_suite; exit 143' TERM INT
 # shellcheck source=gate-source-dirs.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gate-source-dirs.sh" || { bad "no pude cargar gate-source-dirs.sh"; say "UNIT-GATE: FAIL"; exit 1; }
 
@@ -563,15 +571,19 @@ for repo in "${candidates[@]}"; do
     # dejaba el árbol sucio y el gate de merge lo rechazaba. Va a la carpeta de reportes del gate,
     # absoluto por si algún test cambia de directorio.
     COVERAGE_FILE="$(cd "$REPORTS" && pwd)/.coverage" \
-    "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1
-    rc=$?
+    "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
+    suite_pid=$!
+    wait "$suite_pid"; rc=$?
+    suite_pid=""
   elif [ "$runner" = "node" ]; then
     [ -d node_modules ] || { bad "$name: sin node_modules en el worktree (corre npm ci antes)"; continue; }
     coverage_xml="$REPORTS/coverage-gate/cobertura-coverage.xml"
     mkdir -p "$REPORTS/coverage-gate"; rm -f "$coverage_xml"
     say "   → npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory=$REPORTS/coverage-gate --reporter=junit --outputFile=$junit"
-    npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory="$REPORTS/coverage-gate" --reporter=junit --outputFile="$junit" > "$REPORTS/unit-gate.log" 2>&1
-    rc=$?
+    npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory="$REPORTS/coverage-gate" --reporter=junit --outputFile="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
+    suite_pid=$!
+    wait "$suite_pid"; rc=$?
+    suite_pid=""
   else
     bad "$name: no reconozco el runner (ni tests/ de pytest ni package.json)"; continue
   fi
