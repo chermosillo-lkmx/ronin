@@ -1218,7 +1218,7 @@ test("notify: el árbol cambió durante la corrida → se avisa el FAIL", async 
   const a = avisos({ heads: async () => (n++ === 0 ? limpio(SHA_A) : limpio(SHA_B)) });
   await a.tick();
   assert.equal(a.mensajes.length, 1);
-  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — el árbol cambió durante la corrida — /);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — el árbol cambió durante la corrida \(no gasta intento\) — fallo de infraestructura/);
 });
 
 test("notify: un desenlace nuevo tras re-armar (SHA nuevo) vuelve a notificar", async () => {
@@ -1405,13 +1405,62 @@ test("log del gate: la salida de la corrida se guarda en verify-<etapa>.log y el
   assert.match(a.mensajes[0][1], /\/ciclo\/verify-pre-merge\.json/);
 });
 
-test("log del gate: un timeout queda con reason \"timeout\" y gasta intento", async () => {
-  const a = avisos({ run: async () => ({ ok: false, code: null, output: "corriendo…\n[timeout]" }) });
+test("timeout del gate de merge no gasta intento y explica que es infraestructura", async () => {
+  const a = avisos({ run: async () => ({ ok: false, code: null, output: "corriendo…\n[timeout]", timedOut: true }) });
   await a.tick();
   assert.equal(a.estado()?.status, "failed");
   assert.equal(a.estado()?.reason, "timeout");
-  assert.equal(a.estado()?.attempts, 1);
-  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — timeout — /);
+  assert.equal(a.estado()?.attempts, 0);
+  assert.deepEqual(a.estado()?.shas, { api: SHA_A });
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — timeout \(no gasta intento\) — fallo de infraestructura, no de tu código; re-toca el sentinela para re-correr con el mismo commit — salida en \/ciclo\/verify-pre-merge\.log/);
+});
+
+test("timeout del gate de merge se re-arma con el mismo SHA al re-tocar el sentinela; un FAIL normal no", async () => {
+  const timeout = avisos({ heads: async () => limpio(SHA_A), sentinelAt: tocados({ "pre-merge": 300 }) });
+  timeout.setEstado({ attempts: 1, status: "failed", reason: "timeout", shas: { api: SHA_A }, at: 200, durationMs: 50, notify: "sent" });
+  await timeout.tick();
+  assert.equal(timeout.corridas.length, 1);
+  assert.equal(timeout.estado()?.status, "passed");
+  assert.equal(timeout.estado()?.attempts, 1);
+
+  const codigo = avisos({ heads: async () => limpio(SHA_A), sentinelAt: tocados({ "pre-merge": 300 }) });
+  codigo.setEstado({ attempts: 1, status: "failed", shas: { api: SHA_A }, at: 200, durationMs: 50, notify: "sent" });
+  await codigo.tick();
+  assert.equal(codigo.corridas.length, 0);
+});
+
+test("timeout de gate normal no suma intento ni se relanza sin un nuevo armado", async () => {
+  let estado: VerifyState | null = null;
+  let busy = false;
+  let corridas = 0;
+  const d = deps({
+    cycle: "/c",
+    listSessions: async () => [{ name: "cowork-x", busy }],
+    readState: () => estado,
+    writeState: (_c, _k, state) => { estado = state; },
+    run: async () => {
+      corridas++;
+      return corridas === 1
+        ? { ok: false, code: null, output: "lento\n[timeout]", timedOut: true }
+        : { ok: true, code: 0, output: "verde" };
+    },
+  });
+  const armed = new Map<string, boolean>();
+  const slots: GateSlots = { max: 99, inFlight: new Map() };
+
+  await tickOnce(d, armed, slots);
+  await Promise.all([...slots.inFlight.values()]);
+  assert.deepEqual(estado, { attempts: 0, status: "pending", reason: "timeout" });
+  await tickOnce(d, armed, slots);
+  assert.equal(corridas, 1);
+
+  busy = true;
+  await tickOnce(d, armed, slots);
+  busy = false;
+  await tickOnce(d, armed, slots);
+  await Promise.all([...slots.inFlight.values()]);
+  assert.equal(corridas, 2);
+  assert.deepEqual(estado, { attempts: 0, status: "passed" });
 });
 
 test("log del gate: también se guarda la salida de un gate normal", async () => {
@@ -1461,7 +1510,7 @@ test("provisión fallida en el gate de merge → failed con reason, sin gastar i
   assert.equal(a.estado()?.attempts, 0);
   assert.equal(a.estado()?.shas, undefined);
   assert.equal(a.mensajes.length, 1);
-  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — el entorno del worktree no se pudo preparar — /);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — el entorno del worktree no se pudo preparar \(no gasta intento\) — fallo de infraestructura/);
   assert.equal(errores.length, 1);
 });
 

@@ -11,10 +11,12 @@ el worker no corre la suite ni `unit-gate.sh` en ninguna etapa; en `tests` sólo
 dirigidos y los reporta con `reportar_pruebas`. Cuando el worker commitea, toca el sentinela de
 `pre-merge` y termina su turno, Ronin corre el gate en el **worktree de la sesión**, deja el
 veredicto en `<cycle>/verify-pre-merge.json` (la salida de la corrida, recortada, en
-`<cycle>/verify-pre-merge.log`; un timeout queda con `reason: "timeout"`) y en el medidor del
+`<cycle>/verify-pre-merge.log`; un timeout queda con `reason: "timeout"` y no gasta intento) y en el medidor del
 Harness, y le escribe al worker `UNIT-GATE: PASS` o `UNIT-GATE: FAIL` (con PASS sigue a la siguiente
 etapa; con FAIL lee el `.log`, arregla con tests dirigidos, commitea y toca el sentinela otra vez).
-`maxRetries` cuenta commits distintos: el FAIL que gasta el último dice
+Los fallos de infraestructura (timeout, provisión o árbol movido durante la corrida) no gastan
+intento y permiten re-tocar el sentinela para correr de nuevo el mismo commit. `maxRetries` cuenta
+FAIL de código en commits distintos: el FAIL que gasta el último dice
 `UNIT-GATE: FAIL — intentos agotados (n/max); pide intervención humana` y la sesión pide atención
 (`gate-agotado`). El gate sólo se re-arma mientras el worker sigue en `pre-merge`: tocado el
 sentinela de la etapa siguiente, actualizar la rama ya no vuelve a correr la suite. Una etapa

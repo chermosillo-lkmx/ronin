@@ -91,7 +91,7 @@ import { runVerify, verifyOutcome, verifyRunDecision, type VerifyResult } from "
  * - Intentos agotados: el FAIL que gasta el último intento no manda "vuelve a tocar el sentinela"
  *   (el gate ya no se re-arma) sino que pide intervención humana; flow-progress lo marca `gate-agotado`.
  * - La salida de cada corrida queda en `<cycle>/verify-<etapa>.log` (`writeLog`) y un timeout se
- *   guarda con `reason: "timeout"` (sí gasta intento).
+ *   guarda con `reason: "timeout"` sin gastar intento.
  * - Entorno que no se pudo preparar con el worker ya en el gate de merge: `failed` con su razón, sin
  *   gastar intento y avisado una vez, en vez de un silencio que lo deja esperando.
  */
@@ -105,6 +105,7 @@ export const NO_REPOS_REASON = "no encontré repos con tests en el worktree";
 export const CHANGED_REASON = "el árbol cambió durante la corrida";
 export const TIMEOUT_REASON = "timeout";
 export const PROVISION_FAILED_REASON = "el entorno del worktree no se pudo preparar";
+export const INFRA_REASONS = [TIMEOUT_REASON, PROVISION_FAILED_REASON, CHANGED_REASON] as const;
 /** La etapa del gate de unitarias previo al merge; sin `verifyCmd` se avisa SIN-GATE. */
 export const PRE_MERGE_KEY = "pre-merge";
 /**
@@ -128,6 +129,11 @@ export interface Gate {
   maxRetries: number;
   attempts: number;
   mergeGate: boolean;
+  reason?: string;
+}
+
+export function esInfra(state: VerifyState): boolean {
+  return state.status === "failed" && INFRA_REASONS.some((reason) => reason === state.reason);
 }
 
 /** sub-repo → SHA, la forma en que se persisten los HEADs probados. */
@@ -151,6 +157,7 @@ function sameHeads(antes: RepoHead[], despues: RepoHead[] | null): boolean {
  */
 function mergeGateRearms(state: VerifyState, heads: RepoHead[] | null, maxRetries: number): boolean {
   if (!heads || heads.length === 0 || heads.some((h) => h.dirty)) return false;
+  if (esInfra(state)) return true;
   if (state.status === "failed" && state.attempts >= maxRetries) return false;
   return !sameShas(state.shas, heads);
 }
@@ -205,7 +212,7 @@ export function selectGate(
       // después de la foto del veredicto (ver `retocadoTrasFoto`).
       if (retocado && !retocado(stage.key, state)) continue;
     }
-    return { key: stage.key, cmd, maxRetries, attempts: state?.attempts ?? 0, mergeGate };
+    return { key: stage.key, cmd, maxRetries, attempts: state?.attempts ?? 0, mergeGate, ...(state?.reason ? { reason: state.reason } : {}) };
   }
   return null;
 }
@@ -277,6 +284,9 @@ export function verdictMessage(stageKey: string, state: VerifyState, cycle: stri
   if (state.status === "sin-gate") return `UNIT-GATE: SIN-GATE — este flujo no tiene gate de unitarias configurado; continúa con ${siguiente}`;
   const log = `${cycle}/verify-${stageKey}.log`;
   const json = `${cycle}/verify-${stageKey}.json`;
+  if (esInfra(state)) {
+    return `UNIT-GATE: FAIL — ${state.reason} (no gasta intento) — fallo de infraestructura, no de tu código; re-toca el sentinela para re-correr con el mismo commit — salida en ${log}, veredicto en ${json}`;
+  }
   if (state.status === "failed" && maxRetries !== undefined && state.attempts >= maxRetries) {
     // El gate ya no se re-arma: pedirle que vuelva a tocar el sentinela lo dejaría esperando.
     return `UNIT-GATE: FAIL — intentos agotados (${state.attempts}/${maxRetries}); pide intervención humana — salida en ${log}, veredicto en ${json}`;
@@ -648,15 +658,19 @@ function planGate(
   armado: boolean,
   armar: () => void,
 ): Corrida | null {
-  const decision = verifyRunDecision(sesion.busy, gate.attempts, armado);
+  const pacingAttempts = gate.reason === TIMEOUT_REASON ? Math.max(gate.attempts, 1) : gate.attempts;
+  const decision = verifyRunDecision(sesion.busy, pacingAttempts, armado);
   if (decision === "arm") armar();
   if (decision !== "run") return null;
   // El desenlace sale de `gate` (el estado al decidir), nunca de una relectura posterior.
   return async () => {
     const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
     guardarLog(deps, cycle, gate.key, resultado.output);
-    const desenlace = verifyOutcome(resultado.ok, gate.attempts, gate.maxRetries);
-    const state: VerifyState = { attempts: desenlace.attempts, status: desenlace.status };
+    const timeout = porTimeout(resultado);
+    const desenlace = timeout
+      ? { attempts: gate.attempts, status: "pending" as const }
+      : verifyOutcome(resultado.ok, gate.attempts, gate.maxRetries);
+    const state: VerifyState = { attempts: desenlace.attempts, status: desenlace.status, ...(timeout ? { reason: TIMEOUT_REASON } : {}) };
     deps.writeState(cycle, gate.key, state);
     return { session: sesion.name, stageKey: gate.key, status: state.status, attempts: state.attempts, output: resultado.output };
   };
@@ -726,9 +740,10 @@ async function planMergeGate(
       return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts, at: Date.now() }, resultado.output);
     }
     // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
+    const timeout = porTimeout(resultado);
     const state: VerifyState = resultado.ok
       ? { attempts: gate.attempts, status: "passed", shas, durationMs: fin - inicio, at: fin }
-      : { attempts: gate.attempts + 1, status: "failed", shas, durationMs: fin - inicio, at: fin, ...(porTimeout(resultado) ? { reason: TIMEOUT_REASON } : {}) };
+      : { attempts: timeout ? gate.attempts : gate.attempts + 1, status: "failed", shas, durationMs: fin - inicio, at: fin, ...(timeout ? { reason: TIMEOUT_REASON } : {}) };
     return informe(state, resultado.output);
   };
 }
