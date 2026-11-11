@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
 import { DEFAULT_GATE_RETRIES, selectGate, startVerifyDriver, tickOnce, verdictMessage, type DriverDeps, type GateReport, type GateSlots, type GateStage } from "./verify-driver.js";
+import * as verifyDriver from "./verify-driver.js";
 import { readVerifyState, writeVerifyState, type VerifyState } from "./stages.js";
 
 const STAGES: GateStage[] = [
   { key: "planning", label: "Plan" },
   { key: "implementing", label: "Impl" },
-  { key: "tests", label: "Pruebas", verifyCmd: "correr-pruebas", maxRetries: 2 },
+  { key: "tests", label: "Pruebas", verifyCmd: "correr-pruebas", maxRetries: 2, heavy: true },
   { key: "curl", label: "Curl" },
   { key: "done", label: "Evidencia" },
 ];
@@ -35,7 +36,7 @@ test("selectGate: una etapa anterior al gate no lo dispara", () => {
 
 test("selectGate: al alcanzar la etapa con verifyCmd, ése es el gate", () => {
   const gate = selectGate(STAGES, "tests", sinEstado);
-  assert.deepEqual(gate, { key: "tests", cmd: "correr-pruebas", maxRetries: 2, attempts: 0, mergeGate: false });
+  assert.deepEqual(gate, { key: "tests", cmd: "correr-pruebas", maxRetries: 2, attempts: 0, mergeGate: false, heavy: true });
 });
 
 test("selectGate: el gate sigue vigente aunque el worker se haya adelantado", () => {
@@ -67,6 +68,16 @@ test("selectGate: con varios gates pendientes gana el más temprano del flujo", 
 test("selectGate: sin maxRetries declarado usa el default del driver", () => {
   const sinRetries: GateStage[] = [{ key: "tests", label: "Pruebas", verifyCmd: "a" }];
   assert.equal(selectGate(sinRetries, "tests", sinEstado)?.maxRetries, DEFAULT_GATE_RETRIES);
+});
+
+test("isHeavyStage: heavy explícito gana y, sin bandera, sólo unit-gate.sh es pesado", () => {
+  assert.equal(typeof (verifyDriver as any).isHeavyStage, "function");
+  const isHeavyStage = (verifyDriver as any).isHeavyStage as (stage: GateStage) => boolean;
+  assert.equal(isHeavyStage({ key: "a", label: "A", verifyCmd: "i18n-gate.sh", heavy: true } as GateStage), true);
+  assert.equal(isHeavyStage({ key: "b", label: "B", verifyCmd: "/repo/scripts/unit-gate.sh --all", heavy: false } as GateStage), false);
+  assert.equal(isHeavyStage({ key: "c", label: "C", verifyCmd: "env X=1 ./scripts/unit-gate.sh" } as GateStage), false);
+  assert.equal(isHeavyStage({ key: "d", label: "D", verifyCmd: "./scripts/unit-gate.sh --all" }), true);
+  assert.equal(isHeavyStage({ key: "e", label: "E", verifyCmd: "bash scripts/i18n-gate.sh" }), false);
 });
 
 // ---- tickOnce: el bucle en sí ----
@@ -322,7 +333,7 @@ test("tickOnce: con la provisión lista el gate corre normal", async () => {
 
 const MERGE: GateStage[] = [
   { key: "implementing", label: "Impl" },
-  { key: "pre-merge", label: "Gate pre-merge", verifyCmd: "unit-gate", maxRetries: 3, mergeGate: true },
+  { key: "pre-merge", label: "Gate pre-merge", verifyCmd: "unit-gate", maxRetries: 3, mergeGate: true, heavy: true },
   { key: "pr", label: "PR" },
 ];
 const limpio = (sha: string) => [{ repo: "api", sha, dirty: false }];
@@ -805,6 +816,37 @@ function flota(over: Partial<DriverDeps> & { sesiones: string[] }) {
   };
 }
 
+test("carril: un gate ligero arranca aunque el carril pesado esté lleno", async () => {
+  const pesado: GateStage[] = [{ key: "tests", label: "Unit", verifyCmd: "./scripts/unit-gate.sh" }];
+  const ligero: GateStage[] = [{ key: "tests", label: "i18n", verifyCmd: "./scripts/i18n-gate.sh" }];
+  const f = flota({ sesiones: ["heavy", "light"], flowFor: (s) => s === "heavy" ? pesado : ligero });
+  f.slots.max = 1;
+  Object.assign(f.slots, { maxLight: 1, lane: new Map() });
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["heavy", "light"]);
+  assert.deepEqual([...(f.slots as any).lane.values()], ["heavy", "light"]);
+});
+
+test("carril: max=1 encola el segundo pesado", async () => {
+  const pesado: GateStage[] = [{ key: "tests", label: "Unit", verifyCmd: "unit-gate.sh" }];
+  const f = flota({ sesiones: ["h1", "h2"], flowFor: () => pesado });
+  f.slots.max = 1;
+  Object.assign(f.slots, { maxLight: 4, lane: new Map() });
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["h1"]);
+  assert.equal(f.estado("h2")?.queued, true);
+});
+
+test("carril: maxLight=1 encola el segundo ligero", async () => {
+  const ligero: GateStage[] = [{ key: "tests", label: "i18n", verifyCmd: "i18n-gate.sh" }];
+  const f = flota({ sesiones: ["l1", "l2"], flowFor: () => ligero });
+  f.slots.max = 2;
+  Object.assign(f.slots, { maxLight: 1, lane: new Map() });
+  await f.tick();
+  assert.deepEqual(f.lanzadas, ["l1"]);
+  assert.equal(f.estado("l2")?.queued, true);
+});
+
 test("concurrencia: con max 2 y 3 sesiones listas, corren 2 y la tercera queda queued", async () => {
   const f = flota({ sesiones: ["s1", "s2", "s3"] });
   await f.tick(); // no espera a las corridas: vuelve con dos colgadas
@@ -1218,7 +1260,7 @@ test("notify: el árbol cambió durante la corrida → se avisa el FAIL", async 
   const a = avisos({ heads: async () => (n++ === 0 ? limpio(SHA_A) : limpio(SHA_B)) });
   await a.tick();
   assert.equal(a.mensajes.length, 1);
-  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — el árbol cambió durante la corrida — /);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — el árbol cambió durante la corrida \(no gasta intento\) — fallo de infraestructura/);
 });
 
 test("notify: un desenlace nuevo tras re-armar (SHA nuevo) vuelve a notificar", async () => {
@@ -1405,13 +1447,62 @@ test("log del gate: la salida de la corrida se guarda en verify-<etapa>.log y el
   assert.match(a.mensajes[0][1], /\/ciclo\/verify-pre-merge\.json/);
 });
 
-test("log del gate: un timeout queda con reason \"timeout\" y gasta intento", async () => {
-  const a = avisos({ run: async () => ({ ok: false, code: null, output: "corriendo…\n[timeout]" }) });
+test("timeout del gate de merge no gasta intento y explica que es infraestructura", async () => {
+  const a = avisos({ run: async () => ({ ok: false, code: null, output: "corriendo…\n[timeout]", timedOut: true }) });
   await a.tick();
   assert.equal(a.estado()?.status, "failed");
   assert.equal(a.estado()?.reason, "timeout");
-  assert.equal(a.estado()?.attempts, 1);
-  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — timeout — /);
+  assert.equal(a.estado()?.attempts, 0);
+  assert.deepEqual(a.estado()?.shas, { api: SHA_A });
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — timeout \(no gasta intento\) — fallo de infraestructura, no de tu código; re-toca el sentinela para re-correr con el mismo commit — salida en \/ciclo\/verify-pre-merge\.log/);
+});
+
+test("timeout del gate de merge se re-arma con el mismo SHA al re-tocar el sentinela; un FAIL normal no", async () => {
+  const timeout = avisos({ heads: async () => limpio(SHA_A), sentinelAt: tocados({ "pre-merge": 300 }) });
+  timeout.setEstado({ attempts: 1, status: "failed", reason: "timeout", shas: { api: SHA_A }, at: 200, durationMs: 50, notify: "sent" });
+  await timeout.tick();
+  assert.equal(timeout.corridas.length, 1);
+  assert.equal(timeout.estado()?.status, "passed");
+  assert.equal(timeout.estado()?.attempts, 1);
+
+  const codigo = avisos({ heads: async () => limpio(SHA_A), sentinelAt: tocados({ "pre-merge": 300 }) });
+  codigo.setEstado({ attempts: 1, status: "failed", shas: { api: SHA_A }, at: 200, durationMs: 50, notify: "sent" });
+  await codigo.tick();
+  assert.equal(codigo.corridas.length, 0);
+});
+
+test("timeout de gate normal no suma intento ni se relanza sin un nuevo armado", async () => {
+  let estado: VerifyState | null = null;
+  let busy = false;
+  let corridas = 0;
+  const d = deps({
+    cycle: "/c",
+    listSessions: async () => [{ name: "cowork-x", busy }],
+    readState: () => estado,
+    writeState: (_c, _k, state) => { estado = state; },
+    run: async () => {
+      corridas++;
+      return corridas === 1
+        ? { ok: false, code: null, output: "lento\n[timeout]", timedOut: true }
+        : { ok: true, code: 0, output: "verde" };
+    },
+  });
+  const armed = new Map<string, boolean>();
+  const slots: GateSlots = { max: 99, inFlight: new Map() };
+
+  await tickOnce(d, armed, slots);
+  await Promise.all([...slots.inFlight.values()]);
+  assert.deepEqual(estado, { attempts: 0, status: "pending", reason: "timeout" });
+  await tickOnce(d, armed, slots);
+  assert.equal(corridas, 1);
+
+  busy = true;
+  await tickOnce(d, armed, slots);
+  busy = false;
+  await tickOnce(d, armed, slots);
+  await Promise.all([...slots.inFlight.values()]);
+  assert.equal(corridas, 2);
+  assert.deepEqual(estado, { attempts: 0, status: "passed" });
 });
 
 test("log del gate: también se guarda la salida de un gate normal", async () => {
@@ -1419,6 +1510,18 @@ test("log del gate: también se guarda la salida de un gate normal", async () =>
   const d = deps({ cycle: "/c", writeLog: (_c, k, out) => void logs.push(`${k}:${out}`) });
   await tick(d, new Map());
   assert.deepEqual(logs, ["tests:verde"]);
+});
+
+test("SIN-GATE de un gate normal se persiste passed con reason sin-gate", async () => {
+  const guardado: VerifyState[] = [];
+  const d = deps({
+    cycle: "/c",
+    run: async () => ({ ok: true, code: 0, output: "· nada que gatear\nI18N-GATE: SIN-GATE\n" }),
+    writeState: (_c, _k, state) => void guardado.push(state),
+  });
+  const [informe] = await tick(d, new Map());
+  assert.deepEqual(guardado, [{ attempts: 0, status: "passed", reason: "sin-gate" }]);
+  assert.equal(informe.status, "passed");
 });
 
 test("selectGate: un gate de merge resuelto no se re-arma cuando el worker ya pasó a la etapa siguiente", () => {
@@ -1461,7 +1564,7 @@ test("provisión fallida en el gate de merge → failed con reason, sin gastar i
   assert.equal(a.estado()?.attempts, 0);
   assert.equal(a.estado()?.shas, undefined);
   assert.equal(a.mensajes.length, 1);
-  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — el entorno del worktree no se pudo preparar — /);
+  assert.match(a.mensajes[0][1], /^UNIT-GATE: FAIL — el entorno del worktree no se pudo preparar \(no gasta intento\) — fallo de infraestructura/);
   assert.equal(errores.length, 1);
 });
 

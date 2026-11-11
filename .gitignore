@@ -30,3 +30,7 @@ server/data/agent-mcp.json
 
 # artefactos de suites (JUnit/coverage) — no se publican
 reports/
+
+# evidencia de ciclos: nunca se versiona
+EVIDENCIA-*.md
+__pycache__/

@@ -11,10 +11,12 @@ el worker no corre la suite ni `unit-gate.sh` en ninguna etapa; en `tests` sólo
 dirigidos y los reporta con `reportar_pruebas`. Cuando el worker commitea, toca el sentinela de
 `pre-merge` y termina su turno, Ronin corre el gate en el **worktree de la sesión**, deja el
 veredicto en `<cycle>/verify-pre-merge.json` (la salida de la corrida, recortada, en
-`<cycle>/verify-pre-merge.log`; un timeout queda con `reason: "timeout"`) y en el medidor del
+`<cycle>/verify-pre-merge.log`; un timeout queda con `reason: "timeout"` y no gasta intento) y en el medidor del
 Harness, y le escribe al worker `UNIT-GATE: PASS` o `UNIT-GATE: FAIL` (con PASS sigue a la siguiente
 etapa; con FAIL lee el `.log`, arregla con tests dirigidos, commitea y toca el sentinela otra vez).
-`maxRetries` cuenta commits distintos: el FAIL que gasta el último dice
+Los fallos de infraestructura (timeout, provisión o árbol movido durante la corrida) no gastan
+intento y permiten re-tocar el sentinela para correr de nuevo el mismo commit. `maxRetries` cuenta
+FAIL de código en commits distintos: el FAIL que gasta el último dice
 `UNIT-GATE: FAIL — intentos agotados (n/max); pide intervención humana` y la sesión pide atención
 (`gate-agotado`). El gate sólo se re-arma mientras el worker sigue en `pre-merge`: tocado el
 sentinela de la etapa siguiente, actualizar la rama ya no vuelve a correr la suite. Una etapa
@@ -36,6 +38,37 @@ El catálogo empaquetado (`server/data/workflows.json`) lleva los mismos textos 
 idempotente: una segunda corrida no cambia nada).
 
 Las sesiones ya creadas conservan su `flow.json` congelado: el gate aplica a sesiones nuevas.
+
+## Carriles de concurrencia
+
+`gate.maxConcurrent` (default 2, rango 1–8) limita suites pesadas y
+`gate.maxConcurrentLight` (default 4, rango 1–16) limita gates ligeros. Una etapa puede declarar
+`heavy: true` o `heavy: false` junto a su `verifyCmd` en el override por repo. Sin bandera, los
+`flow.json` ya congelados se consideran pesados sólo cuando el primer token de `verifyCmd` tiene
+basename `unit-gate.sh`; los demás gates usan el carril ligero. Una sesión nunca corre dos gates a
+la vez, aunque pertenezcan a carriles distintos.
+
+Al vencer el timeout, Ronin envía `SIGTERM` al grupo completo y espera hasta 60 segundos para que
+pytest/vitest ejecute sus `finally` y teardown; sólo entonces usa `SIGKILL` si el grupo sigue vivo.
+Python muere con `SIGTERM` sin correr `finally` ni el teardown de los fixtures, así que el gate carga
+`-p pytest_ronin_sigterm` (`scripts/pytest_ronin_sigterm.py`, vía `PYTHONPATH`): convierte el primer
+`SIGTERM` en `KeyboardInterrupt` (pytest cierra la sesión y finaliza fixtures como `docker_pg`) e
+ignora los siguientes para no cortar ese teardown. El `SIGKILL` del final alcanza al grupo entero
+aunque el líder ya haya salido durante la gracia (nietos que ignoran `SIGTERM`).
+La salida producida durante ese cierre queda incluida en `verify-<etapa>.log`.
+
+### Cupo global de suites completas
+
+Antes de pytest/vitest, `unit-gate.sh` toma atómicamente uno de los slots bajo
+`UNIT_GATE_STATE_DIR/locks/`. Esto incluye corridas manuales: Ronin pasa
+`UNIT_GATE_MAX_SUITES=gate.maxConcurrent`; fuera de Ronin, el script lee `gate.maxConcurrent` de
+`$COWORK_DATA_DIR/settings.json` (por defecto `~/Library/Application Support/claude-cowork/data`,
+y default de cupo 2). Un PID muerto se recupera; un cupo ocupado imprime periódicamente
+`⏳ esperando cupo de suite completa (…)`. `UNIT_GATE_LOCK_POLL` ajusta ese periodo (default 15 s).
+
+El slot se libera al terminar la suite y también en `EXIT`, `TERM` o `INT`. La espera ocurre dentro
+del timeout del gate de Ronin; si lo agota, se trata como fallo de infraestructura y no gasta
+intento, por lo que se puede re-tocar el sentinela para correr el mismo commit.
 
 ## Qué comprueba (por cada sub‑repo con cambios respecto a `origin/main`)
 
@@ -66,6 +99,27 @@ Las sesiones ya creadas conservan su `flow.json` congelado: el gate aplica a ses
    - **4c. Trinquete**: el piso actual no puede ser menor que el del `merge-base`. También falla
      cualquier línea agregada fuera de `tests/` con `pragma: no cover`, `istanbul ignore`,
      `c8 ignore` o `v8 ignore`, así como entradas nuevas en `omit` o `coverage.exclude`.
+
+### Piso heredado de main
+
+Si la cobertura total queda debajo del piso declarado, el gate compara contra una medición
+cacheada del `merge-base`. Si la rama está igual o mejor que esa base, emite WARN por “piso heredado
+de main” y no falla la regla 4b; si bajó, falla. Las líneas nuevas sin cubrir siguen fallando sin
+excepción. Sin una medición de base, el gate falla cerrado y explica cómo sembrarla.
+
+La caché compartida vive en `UNIT_GATE_STATE_DIR/coverage/<repo>/` (por defecto
+`~/.cowork/unit-gate/coverage/<repo>/`) y guarda un JSON por SHA y otro por árbol Git. Una suite
+completa verde registra el HEAD cuando el checkout está limpio; el índice por árbol permite
+reutilizar la medición cuando el merge commit de main tiene el mismo contenido.
+
+Para sembrar main una sola vez, desde un checkout limpio:
+
+```bash
+UNIT_GATE_RECORD_BASE=1 scripts/unit-gate.sh <checkout-de-main>
+```
+
+Ese modo corre la suite completa, registra `{sha, tree, total, at}` y sale con el veredicto de la
+regla 3, sin exigir cambios de rama ni aplicar el piso que precisamente se está heredando.
 
 ### Dónde está el código de producto
 

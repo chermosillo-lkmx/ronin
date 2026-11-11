@@ -50,28 +50,30 @@ function conSettings(contenido: string | null, fn: (file: string) => void): void
   }
 }
 
-test("readGateSettings sin gate devuelve {45, 2}", () => {
-  conSettings(null, (file) => assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 2 }));
-  conSettings("{}", (file) => assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 2 }));
+test("readGateSettings sin gate devuelve los cupos pesado y ligero", () => {
+  conSettings(null, (file) => assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 2, maxConcurrentLight: 4 }));
+  conSettings("{}", (file) => assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 2, maxConcurrentLight: 4 }));
 });
 
-test("readGateSettings respeta valores válidos", () => {
-  conSettings(JSON.stringify({ gate: { timeoutMin: 90, maxConcurrent: 4 } }), (file) =>
-    assert.deepEqual(readGateSettings(file), { timeoutMin: 90, maxConcurrent: 4 }));
+test("readGateSettings respeta maxConcurrentLight válido", () => {
+  conSettings(JSON.stringify({ gate: { timeoutMin: 90, maxConcurrent: 4, maxConcurrentLight: 6 } }), (file) =>
+    assert.deepEqual(readGateSettings(file), { timeoutMin: 90, maxConcurrent: 4, maxConcurrentLight: 6 }));
 });
 
 test("readGateSettings descarta timeoutMin 1 y maxConcurrent \"3\"", () => {
   conSettings(JSON.stringify({ gate: { timeoutMin: 1, maxConcurrent: "3" } }), (file) =>
-    assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 2 }));
+    assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 2, maxConcurrentLight: 4 }));
   conSettings(JSON.stringify({ gate: { timeoutMin: 241, maxConcurrent: 9 } }), (file) =>
-    assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 2 }));
+    assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 2, maxConcurrentLight: 4 }));
   conSettings(JSON.stringify({ gate: { timeoutMin: 10.5, maxConcurrent: 1 } }), (file) =>
-    assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 1 }));
+    assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 1, maxConcurrentLight: 4 }));
+  conSettings(JSON.stringify({ gate: { maxConcurrentLight: 17 } }), (file) =>
+    assert.deepEqual(readGateSettings(file), { timeoutMin: 45, maxConcurrent: 2, maxConcurrentLight: 4 }));
 });
 
 test("saveEngine conserva el gate escrito a mano", () => {
   conSettings(JSON.stringify({ gate: { timeoutMin: 90, maxConcurrent: 4 } }), (file) => {
     saveEngine(DEFAULT_ENGINE, file);
-    assert.deepEqual(readGateSettings(file), { timeoutMin: 90, maxConcurrent: 4 });
+    assert.deepEqual(readGateSettings(file), { timeoutMin: 90, maxConcurrent: 4, maxConcurrentLight: 4 });
   });
 });

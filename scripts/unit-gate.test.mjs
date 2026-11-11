@@ -5,7 +5,7 @@
 // Correr: node --test scripts/unit-gate.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -122,19 +122,31 @@ function fixture(t) {
       return p;
     },
     run: (env = {}) => {
-      const r = spawnSync("bash", [GATE, session], {
-        encoding: "utf8",
-        env: {
+      const gateEnv = {
           ...gitEnv,
           UNIT_GATE_BASE: "origin/main",
           UNIT_GATE_MAIN_ROOT: mainRoot,
           FAKE_SUITE_JUNIT: suiteJunit,
           FAKE_SUITE_COVERAGE: suiteCoverage,
           ...env,
-        },
+      };
+      const r = spawnSync("bash", [GATE, session], {
+        encoding: "utf8",
+        env: gateEnv,
       });
       return { code: r.status, out: r.stdout + r.stderr };
     },
+    spawnRun: (env = {}) => spawn("bash", [GATE, session], {
+      env: {
+        ...gitEnv,
+        UNIT_GATE_BASE: "origin/main",
+        UNIT_GATE_MAIN_ROOT: mainRoot,
+        FAKE_SUITE_JUNIT: suiteJunit,
+        FAKE_SUITE_COVERAGE: suiteCoverage,
+        ...env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
   };
 }
 
@@ -325,6 +337,81 @@ test("10. cobertura total debajo del piso → FAIL", (t) => {
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /cobertura 79\.90 % < piso 80(?:\.00)? %/);
   assert.match(r.out, /UNIT-GATE: FAIL/);
+});
+
+function seedBaseCoverage(fx, stateDir, total) {
+  const sha = fx.git("rev-parse", "origin/main").trim();
+  const tree = fx.git("rev-parse", `${sha}^{tree}`).trim();
+  const dir = join(stateDir, "coverage", REPO);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${sha}.json`), JSON.stringify({ sha, tree, total, at: 1 }));
+  return { sha, tree };
+}
+
+test("10a. piso heredado con base cacheada igual o menor → WARN y PASS", (t) => {
+  const fx = fixture(t);
+  const stateDir = join(fx.tmp, "state");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  fx.setCoverage({ lineRate: 0.978 });
+  fx.write(".coveragerc", "[report]\nfail_under = 99.7\n");
+  seedBaseCoverage(fx, stateDir, 97.7);
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_STATE_DIR: stateDir });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /piso heredado de main: 97\.80 % < piso 99\.70 %, igual o mejor que la base [0-9a-f]{7} \(97\.70 %\)/);
+  assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
+test("10b. piso heredado con base cacheada mayor → FAIL por caída", (t) => {
+  const fx = fixture(t);
+  const stateDir = join(fx.tmp, "state");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  fx.setCoverage({ lineRate: 0.978 });
+  fx.write(".coveragerc", "[report]\nfail_under = 99.7\n");
+  seedBaseCoverage(fx, stateDir, 98.0);
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_STATE_DIR: stateDir });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /cobertura 97\.80 % < piso 99\.70 % y bajó respecto a la base 98\.00 %/);
+});
+
+test("10c. piso heredado sin medición cacheada de base → FAIL con instrucción de siembra", (t) => {
+  const fx = fixture(t);
+  const stateDir = join(fx.tmp, "state");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  fx.setCoverage({ lineRate: 0.978 });
+  fx.write(".coveragerc", "[report]\nfail_under = 99.7\n");
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_STATE_DIR: stateDir });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /si es heredado de main no hay medición cacheada de la base [0-9a-f]{7}: siembra con UNIT_GATE_RECORD_BASE=1/);
+});
+
+test("10d. suite verde con árbol limpio registra cobertura por SHA y tree", (t) => {
+  const fx = fixture(t);
+  const stateDir = join(fx.tmp, "state");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_STATE_DIR: stateDir });
+  assert.equal(r.code, 0, r.out);
+  const sha = fx.git("rev-parse", "HEAD").trim();
+  const tree = fx.git("rev-parse", "HEAD^{tree}").trim();
+  const bySha = JSON.parse(readFileSync(join(stateDir, "coverage", REPO, `${sha}.json`), "utf8"));
+  const byTree = JSON.parse(readFileSync(join(stateDir, "coverage", REPO, `tree-${tree}.json`), "utf8"));
+  assert.deepEqual(bySha, byTree);
+  assert.equal(bySha.sha, sha);
+  assert.equal(bySha.tree, tree);
+  assert.equal(bySha.total, 90);
+  assert.equal(typeof bySha.at, "number");
+});
+
+test("10e. UNIT_GATE_RECORD_BASE=1 mide un checkout limpio sin cambios", (t) => {
+  const fx = fixture(t);
+  const stateDir = join(fx.tmp, "state");
+  fx.git("checkout", "-q", "main");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const sha = fx.git("rev-parse", "HEAD").trim();
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_STATE_DIR: stateDir, UNIT_GATE_RECORD_BASE: "1" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /medición base registrada/);
+  assert.equal(JSON.parse(readFileSync(join(stateDir, "coverage", REPO, `${sha}.json`), "utf8")).total, 90);
+  assert.match(r.out, /UNIT-GATE: PASS/);
 });
 
 test("11. piso bajado respecto al merge-base → FAIL", (t) => {
@@ -922,4 +1009,103 @@ test("52. pytest --cov deja .coverage dentro de la carpeta de reportes del gate,
   const covfile2 = join(porDefecto.tmp, "covfile");
   porDefecto.run({ ...withoutExtra, FAKE_COVFILE: covfile2 });
   assert.ok(readFileSync(covfile2, "utf8").endsWith("/reports/.coverage"));
+});
+
+test("53. cupo ocupado por PID vivo espera y sólo corre al liberarse", async (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const stateDir = join(fx.tmp, "state");
+  const slot = join(stateDir, "locks", "slot-1");
+  mkdirSync(slot, { recursive: true });
+  writeFileSync(join(slot, "pid"), `${process.pid}\n`);
+  writeFileSync(join(slot, "ROOT"), "otra-corrida\n");
+  const marker = join(fx.tmp, "suite-ran");
+  const child = fx.spawnRun({
+    ...withoutExtra,
+    UNIT_GATE_STATE_DIR: stateDir,
+    UNIT_GATE_MAX_SUITES: "1",
+    UNIT_GATE_LOCK_POLL: "0.05",
+    FAKE_MARKER: marker,
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  const closed = new Promise((resolve) => child.once("close", (code) => resolve(code)));
+  const first = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve("timeout"), 3000);
+    child.stdout.on("data", () => {
+      if (output.includes("esperando cupo")) {
+        clearTimeout(timer);
+        resolve("waiting");
+      }
+    });
+    child.once("close", () => {
+      clearTimeout(timer);
+      resolve("closed");
+    });
+  });
+  assert.equal(first, "waiting", output);
+  assert.equal(existsSync(marker), false, output);
+  rmSync(slot, { recursive: true, force: true });
+  assert.equal(await closed, 0, output);
+  assert.equal(existsSync(marker), true, output);
+});
+
+test("54. cupo con PID muerto se recupera y se libera al terminar", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const stateDir = join(fx.tmp, "state");
+  const slot = join(stateDir, "locks", "slot-1");
+  mkdirSync(slot, { recursive: true });
+  writeFileSync(join(slot, "pid"), "99999999\n");
+  writeFileSync(join(slot, "ROOT"), "abandonada\n");
+  const marker = join(fx.tmp, "suite-ran");
+  const r = fx.run({
+    ...withoutExtra,
+    UNIT_GATE_STATE_DIR: stateDir,
+    UNIT_GATE_MAX_SUITES: "1",
+    FAKE_MARKER: marker,
+  });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(existsSync(marker), true, r.out);
+  assert.equal(existsSync(slot), false, "el slot propio debe liberarse al terminar");
+});
+
+test("55. la suite python carga el plugin que convierte SIGTERM en teardown", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const extra = e2eEnv(fx);
+  const r = fx.run({ ...withoutExtra, ...extra });
+  assert.equal(r.code, 0, r.out);
+  const argv = readFileSync(extra.FAKE_ARGV, "utf8").split("\n");
+  const i = argv.indexOf("-p");
+  assert.ok(argv.some((a, j) => a === "-p" && argv[j + 1] === "pytest_ronin_sigterm"), argv.join(" "));
+  assert.ok(i >= 0);
+});
+
+test("56. con el plugin, un SIGTERM al grupo corre el teardown de los fixtures de pytest", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-sigterm-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const marker = join(dir, "teardown");
+  const started = join(dir, "started");
+  writeFileSync(
+    join(dir, "test_lento.py"),
+    "import pathlib, time, pytest\n" +
+    "@pytest.fixture\n" +
+    `def recurso():\n    pathlib.Path(${JSON.stringify(started)}).touch()\n    yield\n    pathlib.Path(${JSON.stringify(marker)}).touch()\n` +
+    "def test_lento(recurso):\n    time.sleep(30)\n",
+  );
+  const child = spawn("python3", ["-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "pytest_ronin_sigterm", "test_lento.py"], {
+    cwd: dir,
+    detached: true,
+    env: { ...process.env, PYTHONPATH: dirname(GATE) },
+    stdio: "ignore",
+  });
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  const deadline = Date.now() + 15000;
+  while (!existsSync(started) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(existsSync(started), true, "pytest no arrancó el fixture");
+  process.kill(-child.pid, "SIGTERM");
+  await closed;
+  assert.equal(existsSync(marker), true, "el teardown del fixture no corrió tras SIGTERM");
 });
