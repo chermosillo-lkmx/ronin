@@ -57,12 +57,12 @@ export function runVerify(
     let done = false;
     let timedOut = false;
     let timeoutTimer: NodeJS.Timeout | undefined;
-    let killTimer: NodeJS.Timeout | undefined;
     const finish = (r: VerifyResult) => {
       if (done) return;
       done = true;
       if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (killTimer) clearTimeout(killTimer);
+      // Tras un timeout NO se cancela el SIGKILL: el líder puede salir durante la gracia y dejar
+      // nietos del grupo vivos (sin tener los pipes); el temporizador comprueba el grupo y lo remata.
       // La marca de timeout va DESPUÉS del recorte: con salida larga, recortar primero la borraba.
       resolve({ ...r, output: truncateOutput(r.output) + (r.timedOut ? "\n[timeout]" : "") });
     };
@@ -82,7 +82,7 @@ export function runVerify(
       } catch {
         /* already gone */
       }
-      killTimer = setTimeout(() => {
+      const killTimer = setTimeout(() => {
         try {
           if (child.pid) {
             process.kill(-child.pid, 0);
@@ -92,6 +92,7 @@ export function runVerify(
           /* el grupo ya terminó durante la gracia */
         }
       }, killGraceMs);
+      killTimer.unref?.();
     }, timeoutMs);
 
     // Cap accumulation (not just the final truncate) so a chatty command before a 120s timeout

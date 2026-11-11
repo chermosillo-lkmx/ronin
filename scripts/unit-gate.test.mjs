@@ -1070,3 +1070,42 @@ test("54. cupo con PID muerto se recupera y se libera al terminar", (t) => {
   assert.equal(existsSync(marker), true, r.out);
   assert.equal(existsSync(slot), false, "el slot propio debe liberarse al terminar");
 });
+
+test("55. la suite python carga el plugin que convierte SIGTERM en teardown", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const extra = e2eEnv(fx);
+  const r = fx.run({ ...withoutExtra, ...extra });
+  assert.equal(r.code, 0, r.out);
+  const argv = readFileSync(extra.FAKE_ARGV, "utf8").split("\n");
+  const i = argv.indexOf("-p");
+  assert.ok(argv.some((a, j) => a === "-p" && argv[j + 1] === "pytest_ronin_sigterm"), argv.join(" "));
+  assert.ok(i >= 0);
+});
+
+test("56. con el plugin, un SIGTERM al grupo corre el teardown de los fixtures de pytest", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-sigterm-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const marker = join(dir, "teardown");
+  const started = join(dir, "started");
+  writeFileSync(
+    join(dir, "test_lento.py"),
+    "import pathlib, time, pytest\n" +
+    "@pytest.fixture\n" +
+    `def recurso():\n    pathlib.Path(${JSON.stringify(started)}).touch()\n    yield\n    pathlib.Path(${JSON.stringify(marker)}).touch()\n` +
+    "def test_lento(recurso):\n    time.sleep(30)\n",
+  );
+  const child = spawn("python3", ["-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "pytest_ronin_sigterm", "test_lento.py"], {
+    cwd: dir,
+    detached: true,
+    env: { ...process.env, PYTHONPATH: dirname(GATE) },
+    stdio: "ignore",
+  });
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  const deadline = Date.now() + 15000;
+  while (!existsSync(started) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(existsSync(started), true, "pytest no arrancó el fixture");
+  process.kill(-child.pid, "SIGTERM");
+  await closed;
+  assert.equal(existsSync(marker), true, "el teardown del fixture no corrió tras SIGTERM");
+});

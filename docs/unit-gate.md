@@ -50,6 +50,11 @@ la vez, aunque pertenezcan a carriles distintos.
 
 Al vencer el timeout, Ronin envía `SIGTERM` al grupo completo y espera hasta 60 segundos para que
 pytest/vitest ejecute sus `finally` y teardown; sólo entonces usa `SIGKILL` si el grupo sigue vivo.
+Python muere con `SIGTERM` sin correr `finally` ni el teardown de los fixtures, así que el gate carga
+`-p pytest_ronin_sigterm` (`scripts/pytest_ronin_sigterm.py`, vía `PYTHONPATH`): convierte el primer
+`SIGTERM` en `KeyboardInterrupt` (pytest cierra la sesión y finaliza fixtures como `docker_pg`) e
+ignora los siguientes para no cortar ese teardown. El `SIGKILL` del final alcanza al grupo entero
+aunque el líder ya haya salido durante la gracia (nietos que ignoran `SIGTERM`).
 La salida producida durante ese cierre queda incluida en `verify-<etapa>.log`.
 
 ### Cupo global de suites completas

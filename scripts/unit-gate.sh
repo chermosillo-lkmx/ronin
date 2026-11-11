@@ -110,6 +110,7 @@ acquire_suite_slot() {
     sleep "$LOCK_POLL"
   done
 }
+GATE_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=gate-source-dirs.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gate-source-dirs.sh" || { bad "no pude cargar gate-source-dirs.sh"; say "UNIT-GATE: FAIL"; exit 1; }
 
@@ -717,8 +718,10 @@ for repo in "${candidates[@]}"; do
     # dejaba el árbol sucio y el gate de merge lo rechazaba. Va a la carpeta de reportes del gate,
     # absoluto por si algún test cambia de directorio.
     acquire_suite_slot
-    COVERAGE_FILE="$(cd "$REPORTS" && pwd)/.coverage" \
-    "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
+    # -p pytest_ronin_sigterm (scripts/): el SIGTERM de Ronin al cortar por timeout se vuelve
+    # KeyboardInterrupt y pytest corre el teardown de sus fixtures antes del SIGKILL.
+    COVERAGE_FILE="$(cd "$REPORTS" && pwd)/.coverage" PYTHONPATH="$GATE_SCRIPTS_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider -p pytest_ronin_sigterm "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
     suite_pid=$!
     wait "$suite_pid"; rc=$?
     suite_pid=""
