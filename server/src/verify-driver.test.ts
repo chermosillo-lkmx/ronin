@@ -1512,6 +1512,18 @@ test("log del gate: también se guarda la salida de un gate normal", async () =>
   assert.deepEqual(logs, ["tests:verde"]);
 });
 
+test("SIN-GATE de un gate normal se persiste passed con reason sin-gate", async () => {
+  const guardado: VerifyState[] = [];
+  const d = deps({
+    cycle: "/c",
+    run: async () => ({ ok: true, code: 0, output: "· nada que gatear\nI18N-GATE: SIN-GATE\n" }),
+    writeState: (_c, _k, state) => void guardado.push(state),
+  });
+  const [informe] = await tick(d, new Map());
+  assert.deepEqual(guardado, [{ attempts: 0, status: "passed", reason: "sin-gate" }]);
+  assert.equal(informe.status, "passed");
+});
+
 test("selectGate: un gate de merge resuelto no se re-arma cuando el worker ya pasó a la etapa siguiente", () => {
   const passed = (): VerifyState => ({ attempts: 0, status: "passed", shas: { api: SHA_A } });
   const failed = (): VerifyState => ({ attempts: 1, status: "failed", shas: { api: SHA_A } });

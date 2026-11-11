@@ -34,17 +34,6 @@ ok()  { say "✅ $*"; }
 # shellcheck source=gate-source-dirs.sh
 . "$(dirname "${BASH_SOURCE[0]}")/gate-source-dirs.sh" || { bad "no pude cargar gate-source-dirs.sh"; say "I18N-GATE: FAIL"; exit 1; }
 
-# El catálogo vive en las migraciones de siembra de ant-ms-i18n. Se busca primero en el
-# worktree (un ciclo puede estar sembrando códigos nuevos) y luego en el checkout principal.
-catalog_dirs=()
-for d in "$ROOT/ant-ms-i18n" "$MAIN_ROOT/ant-ms-i18n"; do
-  [ -d "$d/src/database/migrations/versions" ] && catalog_dirs+=("$d/src/database/migrations/versions")
-done
-if [ ${#catalog_dirs[@]} -eq 0 ]; then
-  bad "no encuentro las migraciones de ant-ms-i18n (ni en $ROOT ni en $MAIN_ROOT): sin catálogo no puedo verificar ningún código"
-  say "I18N-GATE: FAIL"; exit 1
-fi
-
 # Repos de servicio: los que tienen src/ (como siempre) y los que guardan su código en otro
 # directorio (gate-source-dirs.sh, p. ej. hub/). Uno con tests/ o package.json cuyo código no se
 # puede ubicar entra también: si trae cambios, falla cerrado.
@@ -60,7 +49,19 @@ for d in "$ROOT"/*/; do
   is_candidate "$d" || continue
   candidates+=("$d")
 done
-[ ${#candidates[@]} -eq 0 ] && { bad "no encontré ningún repo de servicio bajo $ROOT"; say "I18N-GATE: FAIL"; exit 1; }
+[ ${#candidates[@]} -eq 0 ] && { say "· no hay repos de servicio bajo $ROOT: nada que gatear"; say "I18N-GATE: SIN-GATE"; exit 0; }
+
+# El catálogo vive en las migraciones de siembra de ant-ms-i18n. Se busca primero en el
+# worktree (un ciclo puede estar sembrando códigos nuevos) y luego en el checkout principal.
+# Sólo se exige cuando sí existe al menos un repo que gatear.
+catalog_dirs=()
+for d in "$ROOT/ant-ms-i18n" "$MAIN_ROOT/ant-ms-i18n"; do
+  [ -d "$d/src/database/migrations/versions" ] && catalog_dirs+=("$d/src/database/migrations/versions")
+done
+if [ ${#catalog_dirs[@]} -eq 0 ]; then
+  bad "no encuentro las migraciones de ant-ms-i18n (ni en $ROOT ni en $MAIN_ROOT): sin catálogo no puedo verificar ningún código"
+  say "I18N-GATE: FAIL"; exit 1
+fi
 
 py_for() { # $1 = repo dir
   local r="$1" n; n="$(basename "$r")"

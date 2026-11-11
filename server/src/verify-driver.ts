@@ -690,10 +690,15 @@ function planGate(
     const resultado = await deps.run(gate.cmd, worktree, deps.gateConfig(repo));
     guardarLog(deps, cycle, gate.key, resultado.output);
     const timeout = porTimeout(resultado);
+    const sinGate = resultado.ok && /(?:^|\n)[^\n]*-GATE: SIN-GATE\s*$/.test(resultado.output);
     const desenlace = timeout
       ? { attempts: gate.attempts, status: "pending" as const }
       : verifyOutcome(resultado.ok, gate.attempts, gate.maxRetries);
-    const state: VerifyState = { attempts: desenlace.attempts, status: desenlace.status, ...(timeout ? { reason: TIMEOUT_REASON } : {}) };
+    const state: VerifyState = {
+      attempts: desenlace.attempts,
+      status: desenlace.status,
+      ...(timeout ? { reason: TIMEOUT_REASON } : sinGate ? { reason: "sin-gate" } : {}),
+    };
     deps.writeState(cycle, gate.key, state);
     return { session: sesion.name, stageKey: gate.key, status: state.status, attempts: state.attempts, output: resultado.output };
   };
