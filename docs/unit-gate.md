@@ -82,6 +82,27 @@ La salida producida durante ese cierre queda incluida en `verify-<etapa>.log`.
      cualquier línea agregada fuera de `tests/` con `pragma: no cover`, `istanbul ignore`,
      `c8 ignore` o `v8 ignore`, así como entradas nuevas en `omit` o `coverage.exclude`.
 
+### Piso heredado de main
+
+Si la cobertura total queda debajo del piso declarado, el gate compara contra una medición
+cacheada del `merge-base`. Si la rama está igual o mejor que esa base, emite WARN por “piso heredado
+de main” y no falla la regla 4b; si bajó, falla. Las líneas nuevas sin cubrir siguen fallando sin
+excepción. Sin una medición de base, el gate falla cerrado y explica cómo sembrarla.
+
+La caché compartida vive en `UNIT_GATE_STATE_DIR/coverage/<repo>/` (por defecto
+`~/.cowork/unit-gate/coverage/<repo>/`) y guarda un JSON por SHA y otro por árbol Git. Una suite
+completa verde registra el HEAD cuando el checkout está limpio; el índice por árbol permite
+reutilizar la medición cuando el merge commit de main tiene el mismo contenido.
+
+Para sembrar main una sola vez, desde un checkout limpio:
+
+```bash
+UNIT_GATE_RECORD_BASE=1 scripts/unit-gate.sh <checkout-de-main>
+```
+
+Ese modo corre la suite completa, registra `{sha, tree, total, at}` y sale con el veredicto de la
+regla 3, sin exigir cambios de rama ni aplicar el piso que precisamente se está heredando.
+
 ### Dónde está el código de producto
 
 `scripts/gate-source-dirs.sh` (`source_dirs <repo>`), compartido con `i18n-gate.sh`, decide por repo:

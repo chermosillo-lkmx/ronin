@@ -20,11 +20,16 @@
 #        cuyos cambios son todos e2e se da por bueno sin correr su suite unitaria
 #      UNIT_GATE_XDIST (default vacío) entero >= 1: corre pytest con «-n N» si pytest-xdist es
 #        importable; si no, en serie con aviso (sólo runner python)
+#      UNIT_GATE_STATE_DIR (default ~/.cowork/unit-gate) caché compartida de cobertura por SHA/árbol
+#      UNIT_GATE_RECORD_BASE=1 mide un checkout limpio de main, registra su cobertura y sale con
+#        el veredicto de la suite completa, sin aplicar las reglas de cambio de una rama
 set -u
 ROOT="${1:-$PWD}"
 BASE_REF="${UNIT_GATE_BASE:-origin/main}"
 MAIN_ROOT="${UNIT_GATE_MAIN_ROOT:-$HOME/code/lkmx/liebre}"
 REPORTS="${UNIT_GATE_REPORTS_DIR:-reports}"
+STATE_DIR="${UNIT_GATE_STATE_DIR:-$HOME/.cowork/unit-gate}"
+RECORD_BASE="${UNIT_GATE_RECORD_BASE:-0}"
 fail=0; checked=0
 suite_pid=""
 say() { printf '%s\n' "$*"; }
@@ -135,8 +140,8 @@ for f in missing:
 PY
 }
 
-coverage_rule() { # $1 base, $2 coverage.xml, $3 runner; usa GATE_CHANGED/GATE_SRC_CHANGED
-  GATE_BASE="$1" GATE_COVERAGE="$2" GATE_RUNNER="$3" python3 <<'PY'
+coverage_rule() { # $1 base, $2 coverage.xml, $3 runner, $4 repo; usa GATE_CHANGED/GATE_SRC_CHANGED
+  GATE_BASE="$1" GATE_COVERAGE="$2" GATE_RUNNER="$3" GATE_REPO="$4" UNIT_GATE_STATE_DIR="$STATE_DIR" python3 <<'PY'
 import configparser
 import fnmatch
 import os
@@ -153,6 +158,8 @@ runner = os.environ["GATE_RUNNER"]
 changed = [p for p in os.environ.get("GATE_CHANGED", "").splitlines() if p]
 src_changed = [p for p in os.environ.get("GATE_SRC_CHANGED", "").splitlines() if p]
 label = os.environ.get("GATE_SRC_LABEL") or "src"
+state_dir = Path(os.environ["UNIT_GATE_STATE_DIR"])
+repo_name = Path(os.environ["GATE_REPO"]).name
 
 def emit(kind, message):
     print(f"{kind}\t{message}")
@@ -268,6 +275,25 @@ def base_floor():
 
 def fmt(value):
     return f"{value.quantize(Decimal('0.01')):.2f}"
+
+def base_measurement():
+    try:
+        tree = subprocess.check_output(
+            ["git", "rev-parse", f"{base}^{{tree}}"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        tree = ""
+    cache = state_dir / "coverage" / repo_name
+    paths = [cache / f"{base}.json"]
+    if tree:
+        paths.append(cache / f"tree-{tree}.json")
+    for path in paths:
+        try:
+            data = __import__("json").loads(path.read_text())
+            return Decimal(str(data["total"]))
+        except (OSError, KeyError, TypeError, ValueError, InvalidOperation):
+            continue
+    return None
 
 def resolve_filename(filename, sources):
     raw = Path(filename)
@@ -456,7 +482,13 @@ else:
         if floor is None:
             emit("BAD", "sin piso de cobertura declarado")
         elif total < floor:
-            emit("BAD", f"cobertura {fmt(total)} % < piso {fmt(floor)} %")
+            measured = base_measurement()
+            if measured is None:
+                emit("BAD", f"cobertura {fmt(total)} % < piso {fmt(floor)} %; si es heredado de main no hay medición cacheada de la base {base[:7]}: siembra con UNIT_GATE_RECORD_BASE=1 unit-gate.sh <checkout de main>")
+            elif total >= measured:
+                emit("WARN", f"piso heredado de main: {fmt(total)} % < piso {fmt(floor)} %, igual o mejor que la base {base[:7]} ({fmt(measured)} %)")
+            else:
+                emit("BAD", f"cobertura {fmt(total)} % < piso {fmt(floor)} % y bajó respecto a la base {fmt(measured)} %")
         else:
             emit("OK", f"cobertura {fmt(total)} % ≥ piso {fmt(floor)} %")
         old_floor = base_floor()
@@ -476,6 +508,44 @@ for path in changed:
 PY
 }
 
+record_coverage() { # $1 coverage.xml, $2 repo → escribe por HEAD y árbol si el checkout está limpio
+  GATE_COVERAGE="$1" GATE_REPO="$2" UNIT_GATE_STATE_DIR="$STATE_DIR" python3 <<'PY'
+import json
+import os
+import subprocess
+import time
+import xml.etree.ElementTree as ET
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+coverage = Path(os.environ["GATE_COVERAGE"])
+repo = Path(os.environ["GATE_REPO"]).name
+status = subprocess.check_output(
+    ["git", "status", "--porcelain", "--untracked-files=normal"], text=True
+)
+if status.strip():
+    raise SystemExit(2)
+try:
+    root = ET.parse(coverage).getroot()
+    total = (Decimal(root.attrib["line-rate"]) * 100).quantize(Decimal("0.01"))
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
+except (ET.ParseError, OSError, KeyError, InvalidOperation, subprocess.CalledProcessError) as error:
+    print(error)
+    raise SystemExit(1)
+
+directory = Path(os.environ["UNIT_GATE_STATE_DIR"]) / "coverage" / repo
+directory.mkdir(parents=True, exist_ok=True)
+data = {"sha": sha, "tree": tree, "total": float(total), "at": int(time.time() * 1000)}
+body = json.dumps(data, separators=(",", ":")) + "\n"
+for target in (directory / f"{sha}.json", directory / f"tree-{tree}.json"):
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temporary.write_text(body)
+    os.replace(temporary, target)
+print(f"{sha[:7]} {total:.2f}")
+PY
+}
+
 for repo in "${candidates[@]}"; do
   name="$(basename "$repo")"
   cd "$repo" || { bad "$name: no puedo entrar"; continue; }
@@ -485,7 +555,15 @@ for repo in "${candidates[@]}"; do
   # --no-renames: un mv src/x → e2e_dev/x debe listar también la ruta vieja. El diff contra la base se captura aparte: el atajo sólo-e2e exige que haya salido 0.
   base_diff="$(git diff --name-only --no-renames "$base" HEAD 2>/dev/null)"; base_diff_rc=$?
   changed="$( { printf '%s\n' "$base_diff"; git diff --name-only --no-renames HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sed '/^$/d' | sort -u)"
-  [ -z "$changed" ] && { say "· $name: sin cambios respecto a $BASE_REF — se omite"; continue; }
+  if [ "$RECORD_BASE" = "1" ]; then
+    if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+      bad "$name: UNIT_GATE_RECORD_BASE=1 exige un checkout limpio"
+      continue
+    fi
+  elif [ -z "$changed" ]; then
+    say "· $name: sin cambios respecto a $BASE_REF — se omite"
+    continue
+  fi
   checked=$((checked+1))
   # Atajo sólo-e2e: si TODAS las rutas son e2e (e2e_dev/ o UNIT_GATE_E2E_DIRS, con o sin «/» final,
   # comparadas por prefijo de directorio) no hay código de producto que probar: se omite este sub-repo.
@@ -606,8 +684,20 @@ for repo in "${candidates[@]}"; do
     fi
   fi
 
+  recorded="$(record_coverage "$coverage_xml" "$name" 2>&1)"; record_rc=$?
+  if [ "$RECORD_BASE" = "1" ]; then
+    if [ "$record_rc" -eq 0 ]; then
+      ok "$name: medición base registrada ($recorded)"
+    else
+      bad "$name: no pude registrar la medición base ($recorded)"
+    fi
+    continue
+  elif [ "$record_rc" -ne 0 ] && [ "$record_rc" -ne 2 ]; then
+    say "   ⚠ $name: no pude cachear la cobertura del HEAD ($recorded)"
+  fi
+
   # Regla 4: líneas nuevas cubiertas, piso total y trinquete de exclusiones/umbral.
-  coverage_output="$(GATE_CHANGED="$changed" GATE_SRC_CHANGED="$src_changed" GATE_SRC_LABEL="$src_label" coverage_rule "$base" "$coverage_xml" "$runner" 2>&1)"
+  coverage_output="$(GATE_CHANGED="$changed" GATE_SRC_CHANGED="$src_changed" GATE_SRC_LABEL="$src_label" coverage_rule "$base" "$coverage_xml" "$runner" "$name" 2>&1)"
   coverage_rc=$?
   if [ "$coverage_rc" -ne 0 ]; then
     bad "$name: el analizador de cobertura falló (rc=$coverage_rc)"

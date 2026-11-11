@@ -327,6 +327,81 @@ test("10. cobertura total debajo del piso → FAIL", (t) => {
   assert.match(r.out, /UNIT-GATE: FAIL/);
 });
 
+function seedBaseCoverage(fx, stateDir, total) {
+  const sha = fx.git("rev-parse", "origin/main").trim();
+  const tree = fx.git("rev-parse", `${sha}^{tree}`).trim();
+  const dir = join(stateDir, "coverage", REPO);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${sha}.json`), JSON.stringify({ sha, tree, total, at: 1 }));
+  return { sha, tree };
+}
+
+test("10a. piso heredado con base cacheada igual o menor → WARN y PASS", (t) => {
+  const fx = fixture(t);
+  const stateDir = join(fx.tmp, "state");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  fx.setCoverage({ lineRate: 0.978 });
+  fx.write(".coveragerc", "[report]\nfail_under = 99.7\n");
+  seedBaseCoverage(fx, stateDir, 97.7);
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_STATE_DIR: stateDir });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /piso heredado de main: 97\.80 % < piso 99\.70 %, igual o mejor que la base [0-9a-f]{7} \(97\.70 %\)/);
+  assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
+test("10b. piso heredado con base cacheada mayor → FAIL por caída", (t) => {
+  const fx = fixture(t);
+  const stateDir = join(fx.tmp, "state");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  fx.setCoverage({ lineRate: 0.978 });
+  fx.write(".coveragerc", "[report]\nfail_under = 99.7\n");
+  seedBaseCoverage(fx, stateDir, 98.0);
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_STATE_DIR: stateDir });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /cobertura 97\.80 % < piso 99\.70 % y bajó respecto a la base 98\.00 %/);
+});
+
+test("10c. piso heredado sin medición cacheada de base → FAIL con instrucción de siembra", (t) => {
+  const fx = fixture(t);
+  const stateDir = join(fx.tmp, "state");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  fx.setCoverage({ lineRate: 0.978 });
+  fx.write(".coveragerc", "[report]\nfail_under = 99.7\n");
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_STATE_DIR: stateDir });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /si es heredado de main no hay medición cacheada de la base [0-9a-f]{7}: siembra con UNIT_GATE_RECORD_BASE=1/);
+});
+
+test("10d. suite verde con árbol limpio registra cobertura por SHA y tree", (t) => {
+  const fx = fixture(t);
+  const stateDir = join(fx.tmp, "state");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_STATE_DIR: stateDir });
+  assert.equal(r.code, 0, r.out);
+  const sha = fx.git("rev-parse", "HEAD").trim();
+  const tree = fx.git("rev-parse", "HEAD^{tree}").trim();
+  const bySha = JSON.parse(readFileSync(join(stateDir, "coverage", REPO, `${sha}.json`), "utf8"));
+  const byTree = JSON.parse(readFileSync(join(stateDir, "coverage", REPO, `tree-${tree}.json`), "utf8"));
+  assert.deepEqual(bySha, byTree);
+  assert.equal(bySha.sha, sha);
+  assert.equal(bySha.tree, tree);
+  assert.equal(bySha.total, 90);
+  assert.equal(typeof bySha.at, "number");
+});
+
+test("10e. UNIT_GATE_RECORD_BASE=1 mide un checkout limpio sin cambios", (t) => {
+  const fx = fixture(t);
+  const stateDir = join(fx.tmp, "state");
+  fx.git("checkout", "-q", "main");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const sha = fx.git("rev-parse", "HEAD").trim();
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_STATE_DIR: stateDir, UNIT_GATE_RECORD_BASE: "1" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /medición base registrada/);
+  assert.equal(JSON.parse(readFileSync(join(stateDir, "coverage", REPO, `${sha}.json`), "utf8")).total, 90);
+  assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
 test("11. piso bajado respecto al merge-base → FAIL", (t) => {
   const fx = fixture(t);
   fx.setSuite([OTHER_PASS, APP("passed")]);
