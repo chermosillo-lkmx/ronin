@@ -393,8 +393,9 @@ no es de un repo: `/reporte diario`, `/reporte semanal`, `/reporte <nombre>`, `/
   orden nueva y pasa por ✅. Si la pregunta ya no es la que el agente tiene pendiente, no se entrega
   nada y se avisa; tocar el botón de una pregunta superada avisa y no entrega nada.
 - **Qué se reenvía.** Una decisión —incluido un menú o diálogo— se reenvía siempre; un estado
-  `idle` sólo se reenvía si su texto contiene `?`. Los fallos intermedios del gate son silenciosos
-  mientras quedan reintentos; al agotarse, llegan como una decisión o pregunta del agente.
+  `idle` sólo se reenvía si su texto contiene `?`. Un `gate.failed` directo permanece silencioso,
+  haya o no reintentos; si al agotarlos el agente pasa a una decisión o pregunta, se reenvía por la
+  regla anterior.
 - **Avisos conservados.** ✅ terminó (uno por ciclo, con **Ver resumen**), ⏸️ atascada y ⚠️ ya no
   está activa.
 - **Comentarios.** "dame una respuesta para esto: …" devuelve un texto propuesto, con ✏️ Ajustar y
