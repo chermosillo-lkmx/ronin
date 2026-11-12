@@ -19,7 +19,7 @@ export interface SessionPortDeps {
   now(): number;
 }
 
-const MAX_QUESTION = 500;
+const MAX_QUESTION = 1500;
 
 /** Mismo criterio que el diálogo "Nueva sesión": primeras palabras en slug, con prefijo cowork-. */
 export function deriveSessionName(request: string, now: number): string {
@@ -80,8 +80,10 @@ export function toStatus(session: TmuxSessionInfo, pane?: string | null): McpSes
     const questionId = questionIdFromPane(pane, pending);
     if (questionId) status.questionId = questionId;
   }
+  const decision = level === "decision" && pane ? detectDecision(pane) : null;
   const options = level === "decision" ? menuOptions(pane) : [];
   if (options.length) status.options = options;
+  if (options.length && decision?.details?.length === options.length) status.optionDetails = decision.details;
   return status;
 }
 

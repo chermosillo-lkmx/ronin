@@ -4,6 +4,8 @@ import type { AttentionLevel, SessionAttention } from "./types.js";
 export interface Decision {
   question: string;
   options: string[];
+  /** Descripción bajo cada opción (misma posición que `options`; "" si no trae). Sólo si alguna trae texto. */
+  details?: string[];
 }
 
 const RECENT_LINES = 25;
@@ -11,6 +13,10 @@ const NUMBERED_CURSOR = /^\s*❯\s*\d+\.\s+(\S.*)$/;
 const NUMBERED_OPTION = /^\s*(?:❯\s*)?\d+\.\s+(\S.*)$/;
 const GENERIC_CONFIRM = /(?:\[y\/n\]|\(y\/n\)|\(y\/N\)|¿continuar\?)/i;
 const HORIZONTAL_RULE = /^\s*[\u2500\u2501\u2504\u2505\u2508\u2509\u254c\u254d]{3,}\s*$/u;
+const MENU_FOOTER = /^\s*Enter to select\b/i;
+/** Un párrafo de AskUserQuestion puede empezar más arriba que la ventana donde se busca el menú. */
+const PARAGRAPH_EXTRA_LINES = 20;
+const MAX_PARAGRAPH_LINES = 15;
 
 /**
  * tmux puede capturar el borde de una caja TUI junto al texto útil. Sólo cortamos una caja vecina
@@ -56,14 +62,42 @@ export function detectDecision(pane: string): Decision | null {
     const line = lines[index]!;
     if (/(?:\?|¿.*\?)\s*$/.test(line.trim())) questionIndex = index;
   }
-  const questionLine = questionIndex >= 0 ? lines[questionIndex] : undefined;
-  const question = questionLine && cleanDecisionText(questionLine);
+  if (questionIndex < 0) return null;
+  const question = cursor >= 0 && questionIndex !== generic
+    ? questionParagraph(pane, lines.length, questionIndex)
+    : cleanDecisionText(lines[questionIndex]!);
   if (!question) return null;
-  const options = cursor < 0 ? [] : lines.slice(cursor)
-    .map((line) => line.match(NUMBERED_OPTION)?.[1])
-    .filter((value): value is string => Boolean(value))
-    .map(cleanDecisionText);
-  return { question, options };
+  if (cursor < 0) return { question, options: [] };
+  const options: string[] = [];
+  const details: string[] = [];
+  for (const line of lines.slice(cursor)) {
+    const option = line.match(NUMBERED_OPTION)?.[1];
+    if (option) {
+      options.push(cleanDecisionText(option));
+      details.push("");
+    } else if (options.length && /^\s+\S/.test(line) && !HORIZONTAL_RULE.test(line) && !MENU_FOOTER.test(line)) {
+      const text = cleanDecisionText(line);
+      if (text) details[details.length - 1] = details[details.length - 1] ? `${details[details.length - 1]} ${text}` : text;
+    }
+  }
+  return details.some(Boolean) ? { question, options, details } : { question, options };
+}
+
+/**
+ * La pregunta de un menú es el párrafo que termina en la línea con «?»: Claude envuelve las
+ * preguntas largas y quedarse con la última línea dejaba sólo «proceed?». Sube por líneas
+ * contiguas hasta una vacía, una regla u otra opción, con tope para no arrastrar salida vieja.
+ */
+function questionParagraph(pane: string, windowLength: number, questionIndex: number): string {
+  const wide = recentLines(pane, RECENT_LINES + PARAGRAPH_EXTRA_LINES);
+  const end = questionIndex + (wide.length - windowLength);
+  let start = end;
+  while (start > 0 && end - start + 1 < MAX_PARAGRAPH_LINES) {
+    const previous = wide[start - 1]!;
+    if (!previous.trim() || HORIZONTAL_RULE.test(previous) || NUMBERED_OPTION.test(previous)) break;
+    start -= 1;
+  }
+  return wide.slice(start, end + 1).map(cleanDecisionText).filter(Boolean).join(" ");
 }
 
 /**

@@ -73,10 +73,10 @@ test("toStatus resume etapa actual, avance y atención", () => {
   });
 });
 
-test("toStatus marca needsInput y recorta la pregunta a 500 caracteres", () => {
-  const status = toStatus(session({ attention: { level: "decision", paneId: "%1", question: "q".repeat(600) } }));
+test("toStatus marca needsInput y recorta la pregunta a 1500 caracteres", () => {
+  const status = toStatus(session({ attention: { level: "decision", paneId: "%1", question: "q".repeat(1600) } }));
   assert.equal(status.needsInput, true);
-  assert.equal(status.question?.length, 500);
+  assert.equal(status.question?.length, 1500);
 });
 
 test("toStatus considera 'idle' con etapas pendientes como espera del usuario", () => {
@@ -107,6 +107,15 @@ test("toStatus reporta el gate fallido", () => {
     { key: "tests", label: "T", status: "failed", attempts: 2 }, { key: "done", label: "E", status: "pending" },
   ] } });
   assert.deepEqual(toStatus(failed).gate, { stage: "tests", state: "failed", attempts: 2 });
+});
+
+test("toStatus expone la pregunta larga hasta 1500 caracteres y las descripciones del menú", () => {
+  const long = "x".repeat(1400) + " ¿Sigo?";
+  const pane = [long, "", "❯ 1. Sí", "     Continúo con el merge.", "  2. No"].join("\n");
+  const status = toStatus(session({ attention: { level: "decision", paneId: "%1", question: long } }), pane);
+  assert.equal(status.question, long);
+  assert.deepEqual(status.options, ["Sí", "No"]);
+  assert.deepEqual(status.optionDetails, ["Continúo con el merge.", ""]);
 });
 
 test("toStatus marca exhausted cuando el gate de merge agotó sus intentos", () => {
@@ -250,12 +259,12 @@ test("status llena question de una sesión idle con etapas pendientes desde la �
   assert.equal(status!.question, "Listo el plan. ¿Lo implemento?");
 });
 
-test("status acota a 500 caracteres la question de una sesión idle", async () => {
+test("status acota a 1500 caracteres la question de una sesión idle", async () => {
   const idle = session({ attention: { level: "idle", paneId: "%7" } });
-  const long = [`⏺ ${"p".repeat(700)}`, "", "❯ ", "  ⏵⏵ bypass permissions on (shift+tab to cycle)"].join("\n");
+  const long = [`⏺ ${"p".repeat(1700)}`, "", "❯ ", "  ⏵⏵ bypass permissions on (shift+tab to cycle)"].join("\n");
   const { deps: d } = deps({ inventory: async () => [idle] }, { "%7": long });
   const [status] = await createSessionPort(d).status();
-  assert.equal(status!.question, "p".repeat(500));
+  assert.equal(status!.question, "p".repeat(1500));
 });
 
 test("status no pone question a una sesión idle que ya terminó su flujo", async () => {

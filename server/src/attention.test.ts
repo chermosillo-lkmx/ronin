@@ -99,6 +99,60 @@ test("detectDecision: detecta una decisión aunque una captura antigua tenga una
   assert.notEqual(detectDecision(pane), null);
 });
 
+const GATE_FAIL_DIALOG = [
+  "⏺ Bash(…)",
+  "  ⎿  Running in the background (↓ to manage)",
+  "",
+  "────────────────────────────────────────────────────────────────────",
+  " ☐ Gate FAIL",
+  "",
+  "The unit gate failed on PR #2634 (SHA 43829eaa2), and all 3 causes are outside this",
+  "PR. (1) The real_db ratchet is already red on main because of 11",
+  "reports/equity/*_real_db.py files from #2636. (2) test_fx_fix_series_real_pg failed",
+  "on a migration-lock timeout under -n 4; run on its own it passes 5/5. (3) Total",
+  "coverage is 99.60 % against a 99.70 % floor; the PR's diff is 100 % covered, and",
+  "132 of the missing lines are changes_in_equity_get_service.py from #2636, whose",
+  "real_db tests skip. Re-running the gate with a commit won't fix (1). How do we",
+  "proceed?",
+  "",
+  "❯ 1. Manual verdict + base",
+  "     I measure the base with UNIT_GATE_RECORD_BASE=1 on a clean worktree of",
+  "     origin/main outside the session (~18 min). If my total ≥ base and the only red",
+  "     is inherited, I record a manual verdict for you to approve.",
+  "  2. Wait for main fix",
+  "     Someone moves the equity tests to real_pg on main. Then I merge main, commit and",
+  "     touch the sentinel again.",
+  "  3. Fix equity in this PR",
+  "     I move the 11 equity files to real_pg inside PR #2634. This is out of the",
+  "     ticket's scope and grows the diff.",
+  "  4. Type something.",
+  "────────────────────────────────────────────────────────────────────",
+  "  5. Chat about this",
+  "",
+  "Enter to select · ↑/↓ to navigate · Esc to cancel",
+].join("\n");
+
+test("detectDecision: la pregunta es el párrafo completo sobre el menú, no sólo su última línea", () => {
+  const decision = detectDecision(GATE_FAIL_DIALOG);
+  assert.ok(decision);
+  assert.match(decision.question, /^The unit gate failed on PR #2634 \(SHA 43829eaa2\), and all 3 causes are outside this PR\. \(1\) The real_db ratchet/);
+  assert.match(decision.question, /Re-running the gate with a commit won't fix \(1\)\. How do we proceed\?$/);
+  assert.doesNotMatch(decision.question, /Gate FAIL|Running in the background/);
+  assert.deepEqual(decision.options, ["Manual verdict + base", "Wait for main fix", "Fix equity in this PR", "Type something.", "Chat about this"]);
+});
+
+test("detectDecision: conserva la descripción de cada opción en details", () => {
+  const decision = detectDecision(GATE_FAIL_DIALOG);
+  assert.ok(decision);
+  assert.deepEqual(decision.details, [
+    "I measure the base with UNIT_GATE_RECORD_BASE=1 on a clean worktree of origin/main outside the session (~18 min). If my total ≥ base and the only red is inherited, I record a manual verdict for you to approve.",
+    "Someone moves the equity tests to real_pg on main. Then I merge main, commit and touch the sentinel again.",
+    "I move the 11 equity files to real_pg inside PR #2634. This is out of the ticket's scope and grows the diff.",
+    "",
+    "",
+  ]);
+});
+
 test("detectDecision: no trunca guiones ni barras normales dentro de una opción", () => {
   const pane = [
     "¿Qué camino seguimos?",

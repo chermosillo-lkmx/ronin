@@ -14,6 +14,8 @@ export interface McpSessionStatus {
   questionId?: string;
   /** Etiquetas del menú numerado, sólo cuando la decisión es un menú; se responde con su número (1..n). */
   options?: string[];
+  /** Descripción de cada opción del menú (misma posición que `options`), sólo si alguna la trae. */
+  optionDetails?: string[];
   /** Gate de verificación en juego: fallido, o el de merge en cola/corriendo (aunque su etapa esté cumplida). `exhausted`: agotó sus intentos. */
   gate: { stage: string; state: "failed" | "queued" | "running"; attempts?: number; exhausted?: boolean } | null;
 }
