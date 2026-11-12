@@ -1,5 +1,5 @@
 export interface McpCatalog { repos: string[]; workflows: Array<{ id: string; name: string; stages: string[] }> }
-export interface McpLaunchInput { repo: string; workflowId: string; request: string; name?: string; origin?: string }
+export interface McpLaunchInput { repo: string; workflowId: string; request: string; name?: string; origin?: string; orchestrator?: string }
 export interface McpLaunchResult { name: string; branch?: string; worktree?: string }
 export interface McpSessionStatus {
   name: string;
@@ -50,6 +50,12 @@ export const SESSION_TOOLS = [
         request: { type: "string", description: "Petición para el agente (máx. 8 KB)." },
         name: { type: "string", description: "Nombre de sesión; debe iniciar con cowork-. Si falta, se deriva de la petición." },
         origen: { type: "string", description: "Referencia externa, p. ej. clickup:<taskId>." },
+        orquestador: {
+          type: "string",
+          maxLength: 100,
+          pattern: "^[A-Za-z0-9._:-]+$",
+          description: "Etiqueta del orquestador externo: la sesión queda coordinada externamente y Telegram no la sigue.",
+        },
       },
       required: ["repo", "workflowId", "request"],
       additionalProperties: false,
@@ -96,8 +102,10 @@ export async function callSessionTool(name: string, args: Record<string, unknown
     const input: McpLaunchInput = { repo: str(args, "repo"), workflowId: str(args, "workflowId"), request };
     const sessionName = optionalStr(args, "name");
     const origin = optionalStr(args, "origen");
+    const orchestrator = optionalStr(args, "orquestador");
     if (sessionName !== undefined) input.name = sessionName;
     if (origin !== undefined) input.origin = origin;
+    if (orchestrator !== undefined) input.orchestrator = orchestrator;
     return JSON.stringify(await port.launch(input));
   }
   if (name === "estado_sesiones") {

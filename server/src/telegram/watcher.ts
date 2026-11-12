@@ -24,6 +24,7 @@ const record = (value: unknown): Record<string, unknown> | null =>
 function followedRepo(raw: unknown, config: TelegramConfig): string | null {
   const rec = record(raw);
   if (!rec) return null;
+  if (Object.hasOwn(rec, "orchestrator")) return null;
   if (rec.mode !== "workflow" || (rec.channel !== "telegram" && rec.channel !== "ui")) return null;
   const { repo, createdAt } = rec;
   if (typeof repo !== "string" || !repo || typeof createdAt !== "number" || !Number.isFinite(createdAt)) return null;
@@ -49,6 +50,18 @@ export function isSessionFollowed(
   } catch {
     return false;
   }
+}
+
+type RealQuestionStatus = McpSessionStatus & {
+  attention: "decision" | "idle";
+  questionId: string;
+  question: string;
+};
+
+/** Una decisión siempre pregunta; un idle sólo si su texto contiene una pregunta explícita. */
+export function isRealQuestion(status: McpSessionStatus): status is RealQuestionStatus {
+  if (!status.needsInput || !status.questionId || typeof status.question !== "string" || !status.question.trim()) return false;
+  return status.attention === "decision" || (status.attention === "idle" && status.question.includes("?"));
 }
 
 export interface WatcherDeps {
@@ -137,9 +150,8 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
     await outbound.send({ ...where(config, repo), text, keyboard: summaryKeyboard(name) });
   };
 
-  async function sendQuestion(s: McpSessionStatus, entry: FollowedSession, config: TelegramConfig): Promise<void> {
-    const questionId = s.questionId as string;
-    const question = s.question as string;
+  async function sendQuestion(s: RealQuestionStatus, entry: FollowedSession, config: TelegramConfig): Promise<void> {
+    const { questionId, question } = s;
     const options = s.options ?? [];
     const key = randomBytes(6).toString("hex");
     const keyboard = options.length
@@ -181,7 +193,15 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
       /* sin registro legible: no se sigue */
     }
     const repo = followedRepo(raw, config);
-    if (!repo) return;
+    if (!repo) {
+      const rec = record(raw);
+      if (rec && Object.hasOwn(rec, "orchestrator") && current(s.name)) {
+        idleSeen.delete(s.name);
+        shellTicks.delete(s.name);
+        store.updateState((state) => { delete state.sessions[s.name]; });
+      }
+      return;
+    }
     if (!current(s.name)) {
       store.updateState((state) => {
         if (!Object.hasOwn(state.sessions, s.name)) state.sessions[s.name] = { session: s.name, repo };
@@ -207,18 +227,6 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
         notice(name, repo, config, `✅ ${name} terminó su flujo (${s.stagesDone}/${s.stagesTotal} etapas).`));
     }
 
-    if (s.gate?.state === "failed") {
-      const gateKey = `${s.gate.stage}:${s.gate.attempts ?? 0}`;
-      if (entry().gateKey !== gateKey) {
-        const previous = entry().gateKey;
-        await reserved(name, (e) => { e.gateKey = gateKey; },
-          (e) => { if (e.gateKey === gateKey) { if (previous === undefined) delete e.gateKey; else e.gateKey = previous; } },
-          notice(name, repo, config, `❌ El gate de ${name} falló en la etapa ${s.gate.stage}${s.gate.attempts ? ` (intento ${s.gate.attempts})` : ""}.`));
-      }
-    } else if (entry().gateKey !== undefined) {
-      patch(name, (e) => { delete e.gateKey; });
-    }
-
     if (s.attention === "shell" && !done) {
       const ticks = (shellTicks.get(name) ?? 0) + 1;
       shellTicks.set(name, ticks);
@@ -231,7 +239,7 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
       if (entry().stuck) patch(name, (e) => { delete e.stuck; });
     }
 
-    const askable = s.needsInput && Boolean(s.questionId) && typeof s.question === "string" && s.question.trim() !== "";
+    const askable = isRealQuestion(s);
     if (!s.needsInput && entry().lastQuestionId !== undefined) patch(name, (e) => { delete e.lastQuestionId; });
     if (!askable) {
       idleSeen.delete(name);
@@ -241,7 +249,7 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
     if (s.attention === "idle") {
       const seen = idleSeen.get(name);
       const ticks = seen && seen.questionId === s.questionId ? seen.ticks + 1 : 1;
-      idleSeen.set(name, { questionId: s.questionId as string, ticks });
+      idleSeen.set(name, { questionId: s.questionId, ticks });
       if (ticks < CONFIRM_TICKS) return;
     }
     idleSeen.delete(name);
@@ -251,6 +259,16 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
   async function vanished(entry: FollowedSession, config: TelegramConfig): Promise<void> {
     idleSeen.delete(entry.session);
     shellTicks.delete(entry.session);
+    try {
+      const raw = readRecord(entry.session);
+      const rec = record(raw);
+      if (rec && Object.hasOwn(rec, "orchestrator")) {
+        store.updateState((state) => { delete state.sessions[entry.session]; });
+        return;
+      }
+    } catch {
+      /* un registro ilegible conserva el manejo de sesión desaparecida */
+    }
     if (!entry.gone && !entry.finished) {
       const sent = await reserved(entry.session, (e) => { e.gone = true; }, (e) => { delete e.gone; },
         notice(entry.session, entry.repo, config, `⚠️ ${entry.session} ya no existe (la sesión se cerró o murió).`));

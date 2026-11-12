@@ -1041,7 +1041,7 @@ test("POST /api/sessions rechaza una petición de más de 8 KiB antes de lanzar"
   assert.deepEqual(response, { status: 400, body: { error: "la petición no puede superar 8 KB", code: "REQUEST_TOO_LONG" } });
 });
 
-test("POST /api/sessions limpia NUL y espacios antes de medir y lanzar una petición", async () => {
+test("POST /api/sessions limpia la petición y pasa body.orchestrator al lanzamiento", async () => {
   const token = ensureCapabilityToken();
   const received: unknown[] = [];
   const app = createApp({
@@ -1053,10 +1053,10 @@ test("POST /api/sessions limpia NUL y espacios antes de medir y lanzar una petic
   });
   const response = await invokeRequest(app, "POST", "/api/sessions", {
     headers: { "x-ronin-capability": token },
-    body: { repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", request: `\0`.repeat(8 * 1024 + 1) + "  arregla CU-86e2\0  " },
+    body: { repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", request: `\0`.repeat(8 * 1024 + 1) + "  arregla CU-86e2\0  ", orchestrator: "claude-cowork" },
   });
   assert.equal(response.status, 201);
-  assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", mode: undefined, agent: undefined, request: "arregla CU-86e2", channel: "ui" }]);
+  assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", mode: undefined, agent: undefined, request: "arregla CU-86e2", channel: "ui", orchestrator: "claude-cowork" }]);
 });
 
 test("POST /api/sessions sólo reenvía inputs que sean un objeto plano de strings", async () => {

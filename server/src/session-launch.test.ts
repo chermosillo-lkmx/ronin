@@ -268,6 +268,32 @@ test("origen de más de 200 caracteres se rechaza con ORIGIN_INVALID", () => {
   );
 });
 
+test("orchestrator válido se persiste en launch.json", async () => {
+  const deps = launchDeps({ deliverPrompt: async () => {} });
+  const input = { repo: "monorepo", workflowId: "wf-test", name: "cowork-orquestada", orchestrator: "claude.cowork:main-1" };
+  await launchManagedSession(input, deps);
+  const launch = deps.readWrite?.("/cycles/cowork-orquestada/launch.json") as Record<string, unknown>;
+  assert.equal(launch.orchestrator, "claude.cowork:main-1");
+});
+
+test("orchestrator válido también se persiste para una terminal", async () => {
+  const deps = launchDeps();
+  await launchManagedSession({ repo: "monorepo", name: "cowork-terminal-orquestada", mode: "terminal", agent: "claude", orchestrator: "claude-cowork" }, deps);
+  const launch = deps.readWrite?.("/cycles/cowork-terminal-orquestada/launch.json") as Record<string, unknown>;
+  assert.equal(launch.orchestrator, "claude-cowork");
+});
+
+test("orchestrator vacío, inseguro o de más de 100 caracteres se rechaza con ORCHESTRATOR_INVALID", () => {
+  for (const orchestrator of ["", "claude/cowork", "a".repeat(101)]) {
+    const input = { repo: "monorepo", workflowId: "wf-test", name: "cowork-x", orchestrator };
+    assert.throws(
+      () => validateManagedSessionLaunch(input, { listRepos: () => ["monorepo"] }),
+      (error: unknown) => error instanceof SessionLaunchError && String(error.code) === "ORCHESTRATOR_INVALID",
+      orchestrator,
+    );
+  }
+});
+
 const BLOCK = "Memoria del repo monorepo (aprendizajes aprobados por el usuario; verifícalos si algo no cuadra):\n- [trampa] no expandas {repo} aquí";
 
 test("memoria: el bloque se antepone literal al prompt y queda en launch.json", async () => {

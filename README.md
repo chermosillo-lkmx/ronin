@@ -178,8 +178,10 @@ cabecera `X-Ronin-Capability` con el contenido de `<data dir>/capability-token` 
 arrancar, `0600`; el data dir es `COWORK_DATA_DIR` o `server/data`).
 
 - `listar_repos_y_workflows()` → `{ repos, workflows: [{ id, name, stages }] }`
-- `crear_sesion(repo, workflowId, request, name?, origen?)` → `{ name, branch, worktree }`. Solo
-  repos configurados y workflows del catálogo; `origen` (p. ej. `clickup:<taskId>`) queda en `launch.json`.
+- `crear_sesion(repo, workflowId, request, name?, origen?, orquestador?)` →
+  `{ name, branch, worktree }`. Solo repos configurados y workflows del catálogo; `origen` (p. ej.
+  `clickup:<taskId>`) queda en `launch.json`. `orquestador` identifica al coordinador externo y
+  excluye esa sesión del seguimiento de Telegram.
 - `estado_sesiones(names?)` → etapa actual, avance, atención, `needsInput`, pregunta, `options`
   (sólo en menús numerados) y gate fallido.
 - `responder_sesion(name, text)` → escribe en el pane que pidió atención (tope de 16 KB, igual que
@@ -191,6 +193,25 @@ arrancar, `0600`; el data dir es `COWORK_DATA_DIR` o `server/data`).
   `texto`, que también aprueba). Errores: `MEMORY_NOT_FOUND` y `MEMORY_INVALID`. Ninguna de las dos
   existe con `scope=agent`: un worker no ve ni puede llamar las herramientas de memoria (el token
   compartido sigue siendo un riesgo residual; ver arriba).
+
+También se puede lanzar una sesión coordinada externamente por HTTP:
+
+```bash
+TOKEN="$(<"${COWORK_DATA_DIR:-server/data}/capability-token")"
+curl -X POST http://localhost:8787/api/sessions \
+  -H "X-Ronin-Capability: $TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "repo": "mi-repo",
+    "workflowId": "mi-workflow",
+    "name": "cowork-tarea",
+    "request": "Implementa la tarea",
+    "orchestrator": "cli-orquestadora"
+  }'
+```
+
+Por MCP, el campo equivalente es `orquestador` en `crear_sesion`. La etiqueta sólo admite
+`[A-Za-z0-9._:-]` y un máximo de 100 caracteres.
 
 ### Memoria por repo
 
@@ -371,16 +392,24 @@ no es de un repo: `/reporte diario`, `/reporte semanal`, `/reporte <nombre>`, `/
   enviado con **Responder** de Telegram sobre la pregunta. Cualquier otro texto en el tema es una
   orden nueva y pasa por ✅. Si la pregunta ya no es la que el agente tiene pendiente, no se entrega
   nada y se avisa; tocar el botón de una pregunta superada avisa y no entrega nada.
-- **Avisos.** Fin de sesión, fallo de gate, sesión muerta o atascada, con botón para ver el resumen.
+- **Qué se reenvía.** Una decisión —incluido un menú o diálogo— se reenvía siempre; un estado
+  `idle` sólo se reenvía si su texto contiene `?`. Un `gate.failed` directo permanece silencioso,
+  haya o no reintentos; si al agotarlos el agente pasa a una decisión o pregunta, se reenvía por la
+  regla anterior.
+- **Avisos conservados.** ✅ terminó (uno por ciclo, con **Ver resumen**), ⏸️ atascada y ⚠️ ya no
+  está activa.
 - **Comentarios.** "dame una respuesta para esto: …" devuelve un texto propuesto, con ✏️ Ajustar y
   🔨 Convertir en sesión. Ronin no publica nada en ningún lado.
 
 ### Qué sesiones se siguen
 
-Las lanzadas desde Telegram y desde la app de Ronin, de repos con tema y creadas **después** de
-activar la integración (cada lanzamiento registra su origen en `launch.json`). No se siguen las
-creadas por MCP (por ejemplo, las de Kitsune), las adoptadas, las externas ni las de repos sin tema.
-Consecuencia: una respuesta desde el celular puede llegar a trabajo iniciado en el escritorio.
+Las sesiones normales lanzadas desde Telegram y desde la app de Ronin, de repos con tema y creadas
+**después** de activar la integración (cada lanzamiento registra su origen en `launch.json`). No se
+siguen las creadas por MCP (por ejemplo, las de Kitsune), las adoptadas, las externas, las de repos
+sin tema ni ninguna cuyo `launch.json` tenga `orchestrator`; estas últimas tampoco generan avisos de
+Telegram. La sesión orquestadora no queda silenciada por ello: si es una sesión normal de Ronin que
+cumple estas reglas, sí sigue hablando con Telegram. Consecuencia: una respuesta desde el celular
+puede llegar a trabajo iniciado en el escritorio.
 
 ### Condiciones
 
