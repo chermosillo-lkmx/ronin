@@ -302,6 +302,26 @@ test("gate agotado se avisa una sola vez aunque la pregunta sintética cambie de
   cleanup();
 });
 
+test("la pregunta lista cada opción con su descripción cuando el menú las trae", async () => {
+  const { h, watcher, cleanup } = setup();
+  h.statuses = [asking({
+    question: "Total coverage is 99.60 %. How do we proceed?",
+    options: ["Manual verdict + base", "Wait for main fix"],
+    optionDetails: ["I measure the base on a clean worktree.", ""],
+  })];
+  await watcher.tick();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].text, [
+    "❓ cowork-a pregunta:",
+    "",
+    "Total coverage is 99.60 %. How do we proceed?",
+    "",
+    "1. Manual verdict + base — I measure the base on a clean worktree.",
+    "2. Wait for main fix",
+  ].join("\n"));
+  cleanup();
+});
+
 test("sesión gone o desaparecida: aviso único y se poda", async () => {
   const { h, watcher, cleanup } = setup();
   h.statuses = [status(), status({ name: "cowork-b" })];

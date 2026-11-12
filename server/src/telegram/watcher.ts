@@ -169,12 +169,17 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
         else e.lastQuestionId = previous;
       },
       async () => {
-        const text = `❓ ${s.name} pregunta:\n\n${question}`;
+        const details = s.optionDetails ?? [];
+        const listing = details.some(Boolean)
+          ? `\n\n${options.map((option, index) => `${index + 1}. ${option}${details[index] ? ` — ${details[index]}` : ""}`).join("\n")}`
+          : "";
+        const body = `${question}${listing}`;
+        const text = `❓ ${s.name} pregunta:\n\n${body}`;
         let messageId: number;
         if (text.length <= MAX_INLINE_CHARS) {
           messageId = (await outbound.send({ ...target, text, keyboard })).message_id;
         } else {
-          await outbound.sendLong({ ...target, title: `❓ ${s.name} pregunta`, text: question });
+          await outbound.sendLong({ ...target, title: `❓ ${s.name} pregunta`, text: body });
           // `sendLong` no devuelve ID: el mensaje corto con los botones es el destino de Responder.
           const short = `❓ ${s.name} pregunta (texto completo arriba). Responde a este mensaje.`;
           messageId = (await outbound.send({ ...target, text: short, keyboard })).message_id;
