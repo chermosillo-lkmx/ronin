@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import type { McpSessionPort, McpSessionStatus } from "../mcp-sessions.js";
 import { readLaunchRecord } from "../sessions.js";
-import { cycleDirForSession, readEvidence } from "../stages.js";
+import { cycleDirForSession, readEvidence, readFlow } from "../stages.js";
+import { DEFAULT_GATE_RETRIES } from "../verify-driver.js";
 import type { InlineButton } from "./api.js";
 import { summaryButton } from "./conversation.js";
 import { redactSecrets, type Outbound } from "./outbound.js";
@@ -12,7 +13,6 @@ export const WATCH_INTERVAL_MS = 15_000;
 const MAX_INLINE_CHARS = 3800;
 const MAX_BUTTON_LABEL_CHARS = 60;
 const MAX_LOGGED_ERROR_CHARS = 200;
-const DEFAULT_GATE_ATTEMPTS = 2;
 /** Pasado esto, una pregunta enviada se olvida: su botón deja de valer y Responder es una orden nueva. */
 export const QUESTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Ticks seguidos que hacen falta para dar por real un idle o un shell. */
@@ -65,6 +65,7 @@ export interface WatcherDeps {
   port: Pick<McpSessionPort, "status">;
   readRecord?: (name: string) => unknown | null;
   hasSummary?: (name: string) => boolean;
+  gateMaxRetries?: (name: string, stage: string) => number | null;
   /** Token del bot, capability y `vars`: nada de eso llega a un registro. */
   secrets: () => string[];
   now?: () => number;
@@ -78,6 +79,12 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
   const { store, outbound, port } = deps;
   const readRecord = deps.readRecord ?? readLaunchRecord;
   const hasSummary = deps.hasSummary ?? ((name: string) => Boolean(readEvidence(cycleDirForSession(name)).summary));
+  const gateMaxRetries = deps.gateMaxRetries ?? ((name: string, stage: string): number => {
+    const configured = readFlow(cycleDirForSession(name))?.stages.find((candidate) => candidate.key === stage)?.maxRetries;
+    return typeof configured === "number" && Number.isInteger(configured) && configured >= 0 && configured <= 10
+      ? configured
+      : DEFAULT_GATE_RETRIES;
+  });
   const now = deps.now ?? Date.now;
   const log = deps.log ?? ((message: string) => console.warn(`[telegram] ${message}`));
   const logFailure = (what: string, error: unknown): void => {
@@ -215,13 +222,19 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
         notice(name, repo, config, `✅ ${name} terminó su flujo (${s.stagesDone}/${s.stagesTotal} etapas).`));
     }
 
-    if (s.gate?.state === "failed" && (s.gate.attempts ?? 0) >= DEFAULT_GATE_ATTEMPTS) {
-      const gateKey = `${s.gate.stage}:${s.gate.attempts ?? 0}`;
+    const gate = s.gate;
+    const gateExhausted = gate?.state === "failed"
+      && (s.attention === "decision" || (
+        typeof gate.attempts === "number"
+        && gate.attempts >= (gateMaxRetries(name, gate.stage) ?? DEFAULT_GATE_RETRIES)
+      ));
+    if (gate && gateExhausted && !isRealQuestion(s)) {
+      const gateKey = `${gate.stage}:${gate.attempts ?? 0}`;
       if (entry().gateKey !== gateKey) {
         const previous = entry().gateKey;
         await reserved(name, (e) => { e.gateKey = gateKey; },
           (e) => { if (e.gateKey === gateKey) { if (previous === undefined) delete e.gateKey; else e.gateKey = previous; } },
-          notice(name, repo, config, `❌ El gate de ${name} falló en la etapa ${s.gate.stage}${s.gate.attempts ? ` (intento ${s.gate.attempts})` : ""}.`));
+          notice(name, repo, config, `❌ El gate de ${name} falló en la etapa ${gate.stage}${gate.attempts ? ` (intento ${gate.attempts})` : ""}.`));
       }
     } else if (entry().gateKey !== undefined) {
       patch(name, (e) => { delete e.gateKey; });
