@@ -19,7 +19,7 @@ function status(over: Partial<McpSessionStatus> = {}): McpSessionStatus {
 const asking = (over: Partial<McpSessionStatus> = {}) =>
   status({ attention: "decision", needsInput: true, questionId: "q1", question: "¿Sigo?", ...over });
 
-function setup(opts: { dir?: string; secrets?: () => string[]; gateMaxRetries?: (name: string, stage: string) => number | null } = {}) {
+function setup(opts: { dir?: string; secrets?: () => string[] } = {}) {
   const dir = opts.dir ?? mkdtempSync(join(tmpdir(), "watcher-"));
   const store: TelegramStore = createTelegramStore(dir);
   if (!opts.dir) store.updateConfig(CONFIG);
@@ -49,7 +49,6 @@ function setup(opts: { dir?: string; secrets?: () => string[]; gateMaxRetries?: 
     port: { status: async () => { if (h.statusError) throw new Error("boom"); return h.statuses; } },
     readRecord: (name) => h.records[name] ?? null,
     hasSummary: () => h.summary,
-    ...(opts.gateMaxRetries ? { gateMaxRetries: opts.gateMaxRetries } : {}),
     secrets: opts.secrets ?? (() => []),
     now: () => AFTER + 5000,
     log: (message) => { h.logs.push(message); },
@@ -249,21 +248,14 @@ test("sin resumen no hay botón; stagesTotal 0 no cuenta como terminado", async 
   cleanup();
 });
 
-test("un gate con maxRetries 3 no avisa en el intento 2; agotado llega como decision", async () => {
-  const { h, watcher, cleanup } = setup({ gateMaxRetries: () => 3 });
-  h.statuses = [status({ gate: { stage: "tests", state: "failed", attempts: 2 } })];
-  await watcher.tick();
-  await watcher.tick();
-  assert.equal(h.sent.length, 0);
-  h.statuses = [asking({
-    question: "El gate tests agotó sus intentos (3); hace falta intervención humana",
-    gate: { stage: "tests", state: "failed", attempts: 3 },
-  })];
-  await watcher.tick();
-  await watcher.tick();
-  assert.equal(h.sent.length, 1, "la decision agotada se reenvía una sola vez");
-  assert.match(h.sent[0].text, /^❓/);
-  assert.match(h.sent[0].text, /tests/);
+test("gate failed nunca avisa: ni intento 1 con reintentos, ni intento 2 de maxRetries 3", async () => {
+  const { h, watcher, cleanup } = setup();
+  for (const attempts of [1, 2, 3]) {
+    h.statuses = [status({ gate: { stage: "tests", state: "failed", attempts } })];
+    await watcher.tick();
+    await watcher.tick();
+    assert.equal(h.sent.length, 0, `intento ${attempts}`);
+  }
   cleanup();
 });
 
