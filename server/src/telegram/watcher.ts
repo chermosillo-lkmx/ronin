@@ -150,7 +150,7 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
     await outbound.send({ ...where(config, repo), text, keyboard: summaryKeyboard(name) });
   };
 
-  async function sendQuestion(s: RealQuestionStatus, entry: FollowedSession, config: TelegramConfig): Promise<void> {
+  async function sendQuestion(s: RealQuestionStatus, entry: FollowedSession, config: TelegramConfig, gateKey?: string): Promise<void> {
     const { questionId, question } = s;
     const options = s.options ?? [];
     const key = randomBytes(6).toString("hex");
@@ -161,8 +161,9 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
     const previous = entry.lastQuestionId;
     await reserved(
       s.name,
-      (e) => { e.lastQuestionId = questionId; },
+      (e) => { e.lastQuestionId = questionId; if (gateKey !== undefined) e.gateKey = gateKey; },
       (e) => {
+        if (gateKey !== undefined && e.gateKey === gateKey) delete e.gateKey;
         if (e.lastQuestionId !== questionId) return;
         if (previous === undefined) delete e.lastQuestionId;
         else e.lastQuestionId = previous;
@@ -239,8 +240,16 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
       if (entry().stuck) patch(name, (e) => { delete e.stuck; });
     }
 
+    // La pregunta sintética del gate agotado cambia de questionId en cada turno del agente (se calcula
+    // sobre el pane): se avisa una vez por etapa e intentos y se olvida sólo cuando el gate deja de fallar.
+    const exhaustedKey = s.gate?.state === "failed" && s.gate.exhausted ? `${s.gate.stage}:${s.gate.attempts ?? 0}` : undefined;
+    if (s.gate?.state !== "failed" && entry().gateKey !== undefined) patch(name, (e) => { delete e.gateKey; });
     const askable = isRealQuestion(s);
     if (!s.needsInput && entry().lastQuestionId !== undefined) patch(name, (e) => { delete e.lastQuestionId; });
+    if (askable && s.attention === "decision" && exhaustedKey !== undefined && entry().gateKey === exhaustedKey) {
+      idleSeen.delete(name);
+      return;
+    }
     if (!askable) {
       idleSeen.delete(name);
       return;
@@ -253,7 +262,7 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
       if (ticks < CONFIRM_TICKS) return;
     }
     idleSeen.delete(name);
-    await sendQuestion(s, entry(), config);
+    await sendQuestion(s, entry(), config, s.attention === "decision" ? exhaustedKey : undefined);
   }
 
   async function vanished(entry: FollowedSession, config: TelegramConfig): Promise<void> {
