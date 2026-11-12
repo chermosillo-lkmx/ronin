@@ -6,7 +6,7 @@ import { test } from "node:test";
 import type { McpSessionStatus } from "../mcp-sessions.js";
 import type { SendMessageParams } from "./api.js";
 import { createTelegramStore, type TelegramConfig, type TelegramStore } from "./store.js";
-import { createWatcher, isFollowed, isSessionFollowed } from "./watcher.js";
+import { createWatcher, isFollowed, isRealQuestion, isSessionFollowed } from "./watcher.js";
 
 const ACTIVATED = "2026-01-01T00:00:00.000Z";
 const AFTER = Date.parse(ACTIVATED) + 1000;
@@ -61,6 +61,7 @@ test("sigue telegram y ui; no sigue MCP, terminal, sin tema ni anteriores a acti
     ["telegram", record(), true],
     ["ui", record({ channel: "ui" }), true],
     ["mcp", record({ channel: "mcp" }), false],
+    ["con orquestador", record({ orchestrator: "claude-cowork" }), false],
     ["sin canal", record({ channel: undefined }), false],
     ["terminal", record({ mode: "terminal" }), false],
     ["repo sin tema", record({ repo: "otro" }), false],
@@ -124,7 +125,14 @@ test("sin questionId no se envía nada", async () => {
   cleanup();
 });
 
-test("espera dos ticks seguidos antes de enviar una pregunta idle", async () => {
+test("sólo idle con '?' y cualquier decision cuentan como pregunta real", () => {
+  assert.equal(isRealQuestion(asking({ attention: "idle", question: "¿Sigo?" })), true);
+  assert.equal(isRealQuestion(asking({ attention: "idle", question: "Listo para continuar" })), false);
+  assert.equal(isRealQuestion(asking({ question: "Elige una opción" })), true);
+  assert.equal(isRealQuestion(asking({ attention: "working" })), false);
+});
+
+test("idle con '?' requiere dos ticks seguidos y luego envía una pregunta", async () => {
   const { h, watcher, cleanup } = setup();
   h.statuses = [asking({ attention: "idle" })];
   await watcher.tick();
@@ -136,6 +144,46 @@ test("espera dos ticks seguidos antes de enviar una pregunta idle", async () => 
   assert.equal(h.sent.length, 0, "el hueco reinicia la cuenta");
   await watcher.tick();
   assert.equal(h.sent.length, 1);
+  cleanup();
+});
+
+test("idle sin signo de interrogación no envía el texto como pregunta", async () => {
+  const { h, watcher, cleanup } = setup();
+  h.statuses = [asking({ attention: "idle", question: "Listo para continuar" })];
+  await watcher.tick();
+  await watcher.tick();
+  await watcher.tick();
+  await watcher.tick();
+  assert.equal(h.sent.length, 0);
+  cleanup();
+});
+
+test("decision sin signo de interrogación se envía de inmediato", async () => {
+  const { h, watcher, cleanup } = setup();
+  h.statuses = [asking({ question: "Elige una opción" })];
+  await watcher.tick();
+  assert.equal(h.sent.length, 1);
+  cleanup();
+});
+
+test("una sesión con orquestador no se sigue aunque tenga una pregunta real", async () => {
+  const { h, watcher, cleanup } = setup();
+  h.records["cowork-a"] = record({ orchestrator: "claude-cowork" });
+  h.statuses = [asking()];
+  await watcher.tick();
+  assert.equal(h.sent.length, 0);
+  cleanup();
+});
+
+test("una sesión con orquestador previamente seguida desaparece sin aviso", async () => {
+  const { h, watcher, cleanup } = setup();
+  h.store.updateState((state) => {
+    state.sessions["cowork-a"] = { session: "cowork-a", repo: "alpha" };
+  });
+  h.records["cowork-a"] = record({ orchestrator: "claude-cowork" });
+  await watcher.tick();
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.store.readState().sessions["cowork-a"], undefined);
   cleanup();
 });
 
@@ -200,18 +248,20 @@ test("sin resumen no hay botón; stagesTotal 0 no cuenta como terminado", async 
   cleanup();
 });
 
-test("aviso único por gate fallido", async () => {
+test("el primer fallo del gate no avisa; el segundo sí y una sola vez", async () => {
   const { h, watcher, cleanup } = setup();
   h.statuses = [status({ gate: { stage: "tests", state: "failed", attempts: 1 } })];
   await watcher.tick();
   await watcher.tick();
-  assert.equal(h.sent.length, 1);
-  assert.match(h.sent[0].text, /tests/);
+  assert.equal(h.sent.length, 0);
   h.statuses = [status({ gate: { stage: "tests", state: "running", attempts: 2 } })];
   await watcher.tick();
+  assert.equal(h.sent.length, 0, "running del segundo intento tampoco revela un aviso del primero");
   h.statuses = [status({ gate: { stage: "tests", state: "failed", attempts: 2 } })];
   await watcher.tick();
-  assert.equal(h.sent.length, 2);
+  await watcher.tick();
+  assert.equal(h.sent.length, 1);
+  assert.match(h.sent[0].text, /tests/);
   cleanup();
 });
 

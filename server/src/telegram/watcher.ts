@@ -12,6 +12,7 @@ export const WATCH_INTERVAL_MS = 15_000;
 const MAX_INLINE_CHARS = 3800;
 const MAX_BUTTON_LABEL_CHARS = 60;
 const MAX_LOGGED_ERROR_CHARS = 200;
+const DEFAULT_GATE_ATTEMPTS = 2;
 /** Pasado esto, una pregunta enviada se olvida: su botón deja de valer y Responder es una orden nueva. */
 export const QUESTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Ticks seguidos que hacen falta para dar por real un idle o un shell. */
@@ -24,6 +25,7 @@ const record = (value: unknown): Record<string, unknown> | null =>
 function followedRepo(raw: unknown, config: TelegramConfig): string | null {
   const rec = record(raw);
   if (!rec) return null;
+  if (Object.hasOwn(rec, "orchestrator")) return null;
   if (rec.mode !== "workflow" || (rec.channel !== "telegram" && rec.channel !== "ui")) return null;
   const { repo, createdAt } = rec;
   if (typeof repo !== "string" || !repo || typeof createdAt !== "number" || !Number.isFinite(createdAt)) return null;
@@ -49,6 +51,12 @@ export function isSessionFollowed(
   } catch {
     return false;
   }
+}
+
+/** Una decisión siempre pregunta; un idle sólo si su texto contiene una pregunta explícita. */
+export function isRealQuestion(status: McpSessionStatus): boolean {
+  if (!status.needsInput || !status.questionId || typeof status.question !== "string" || !status.question.trim()) return false;
+  return status.attention === "decision" || (status.attention === "idle" && status.question.includes("?"));
 }
 
 export interface WatcherDeps {
@@ -207,7 +215,7 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
         notice(name, repo, config, `✅ ${name} terminó su flujo (${s.stagesDone}/${s.stagesTotal} etapas).`));
     }
 
-    if (s.gate?.state === "failed") {
+    if (s.gate?.state === "failed" && (s.gate.attempts ?? 0) >= DEFAULT_GATE_ATTEMPTS) {
       const gateKey = `${s.gate.stage}:${s.gate.attempts ?? 0}`;
       if (entry().gateKey !== gateKey) {
         const previous = entry().gateKey;
@@ -231,7 +239,7 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
       if (entry().stuck) patch(name, (e) => { delete e.stuck; });
     }
 
-    const askable = s.needsInput && Boolean(s.questionId) && typeof s.question === "string" && s.question.trim() !== "";
+    const askable = isRealQuestion(s);
     if (!s.needsInput && entry().lastQuestionId !== undefined) patch(name, (e) => { delete e.lastQuestionId; });
     if (!askable) {
       idleSeen.delete(name);
@@ -251,6 +259,16 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
   async function vanished(entry: FollowedSession, config: TelegramConfig): Promise<void> {
     idleSeen.delete(entry.session);
     shellTicks.delete(entry.session);
+    try {
+      const raw = readRecord(entry.session);
+      const rec = record(raw);
+      if (rec && Object.hasOwn(rec, "orchestrator")) {
+        store.updateState((state) => { delete state.sessions[entry.session]; });
+        return;
+      }
+    } catch {
+      /* un registro ilegible conserva el manejo de sesión desaparecida */
+    }
     if (!entry.gone && !entry.finished) {
       const sent = await reserved(entry.session, (e) => { e.gone = true; }, (e) => { delete e.gone; },
         notice(entry.session, entry.repo, config, `⚠️ ${entry.session} ya no existe (la sesión se cerró o murió).`));
