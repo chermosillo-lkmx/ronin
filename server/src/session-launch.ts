@@ -25,7 +25,8 @@ export type SessionLaunchErrorCode =
   | "MANAGED_SESSION_PREFIX_REQUIRED"
   | "SESSION_ALREADY_EXISTS"
   | "BASE_BRANCH_UNRESOLVED"
-  | "ORIGIN_INVALID";
+  | "ORIGIN_INVALID"
+  | "ORCHESTRATOR_INVALID";
 
 export class SessionLaunchError extends Error {
   constructor(readonly code: SessionLaunchErrorCode, message: string) {
@@ -44,6 +45,8 @@ export interface ManagedSessionLaunchInput {
   inputs?: Record<string, string>;
   /** Referencia externa que originó la sesión (p. ej. `clickup:<taskId>`). Solo informativa. */
   origin?: string;
+  /** Nombre del proceso que coordina esta sesión. Solo informativo. */
+  orchestrator?: string;
   /** Canal que lanzó la sesión; lo fija el servidor (nunca el cuerpo HTTP). Las sesiones MCP no lo fijan. */
   channel?: "telegram" | "ui";
 }
@@ -53,6 +56,8 @@ export const MAX_WORKFLOW_INPUT_VALUE_BYTES = 4 * 1024;
 
 const ORIGIN_PATTERN = /^[A-Za-z0-9._:/-]+$/;
 const MAX_ORIGIN_LENGTH = 200;
+const ORCHESTRATOR_PATTERN = /^[A-Za-z0-9._:-]+$/;
+const MAX_ORCHESTRATOR_LENGTH = 100;
 
 export type SessionLaunchMode = "workflow" | "terminal";
 export type TerminalAgent = "claude" | "codex";
@@ -131,6 +136,9 @@ export function validateManagedSessionLaunch(input: ManagedSessionLaunchInput, d
   if (input.origin !== undefined && (typeof input.origin !== "string" || input.origin.length > MAX_ORIGIN_LENGTH || !ORIGIN_PATTERN.test(input.origin))) {
     throw new SessionLaunchError("ORIGIN_INVALID", "el origen de la sesión no es válido");
   }
+  if (input.orchestrator !== undefined && (typeof input.orchestrator !== "string" || input.orchestrator.length > MAX_ORCHESTRATOR_LENGTH || !ORCHESTRATOR_PATTERN.test(input.orchestrator))) {
+    throw new SessionLaunchError("ORCHESTRATOR_INVALID", "el orquestador de la sesión no es válido");
+  }
   const mode = input.mode ?? "workflow";
   if (mode !== "workflow" && mode !== "terminal") {
     throw new SessionLaunchError("MODE_INVALID", "el modo de sesión no es válido");
@@ -190,7 +198,11 @@ export function sanitizeWorkflowInputs(workflow: WorkflowConfig, raw: unknown): 
 }
 
 function terminalLaunchRecord(input: ManagedSessionLaunchInput, cwd: string, agent: TerminalAgent) {
-  return { version: 1, repo: input.repo, name: input.name, mode: "terminal" as const, agent, cwd, createdAt: Date.now() };
+  return {
+    version: 1, repo: input.repo, name: input.name, mode: "terminal" as const, agent, cwd,
+    ...(input.orchestrator !== undefined ? { orchestrator: input.orchestrator } : {}),
+    createdAt: Date.now(),
+  };
 }
 
 /**

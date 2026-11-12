@@ -800,6 +800,7 @@ app.post("/api/sessions", async (req, res) => {
       request,
       channel: "ui",
       ...(inputs !== undefined ? { inputs } : {}),
+      ...(req.body?.orchestrator !== undefined ? { orchestrator: req.body.orchestrator } : {}),
     });
     const inventory = await readInventory();
     const session = inventory.sessions.find((item) => item.name === launched.name) ?? null;

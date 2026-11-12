@@ -23,12 +23,15 @@ async function call(name: string, args: unknown, port?: McpSessionPort) {
   return { text: result.content[0].text, isError: result.isError === true };
 }
 
-test("tools/list incluye las cuatro herramientas de sesión además de las de pruebas", async () => {
+test("tools/list incluye las herramientas de sesión y crear_sesion expone orquestador", async () => {
   const response = await handleMcp({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { harness });
-  const names = (response?.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name);
+  const tools = (response?.result as { tools: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }> }).tools;
+  const names = tools.map((tool) => tool.name);
   for (const name of ["reportar_pruebas", "estado_pruebas", "listar_repos_y_workflows", "crear_sesion", "estado_sesiones", "responder_sesion"]) {
     assert.ok(names.includes(name), name);
   }
+  const crearSesion = tools.find((tool) => tool.name === "crear_sesion");
+  assert.ok(crearSesion?.inputSchema?.properties?.orquestador, "crear_sesion expone orquestador");
 });
 
 test("sin puerto de sesiones, las herramientas responden error legible", async () => {
@@ -44,11 +47,11 @@ test("listar_repos_y_workflows devuelve el catálogo como JSON", async () => {
   assert.deepEqual(JSON.parse(result.text), { repos: ["todo-api"], workflows: [{ id: "wf-1", name: "plan-tdd-evidencia", stages: ["planning", "implementing", "tests", "done"] }] });
 });
 
-test("crear_sesion pasa repo, workflow, petición, nombre y origen al puerto", async () => {
+test("crear_sesion pasa repo, workflow, petición, nombre, origen y orquestador al puerto", async () => {
   const { port, calls } = fakePort();
-  const result = await call("crear_sesion", { repo: "todo-api", workflowId: "wf-1", request: "valida títulos", name: "cowork-valida", origen: "clickup:86abc1234" }, port);
+  const result = await call("crear_sesion", { repo: "todo-api", workflowId: "wf-1", request: "valida títulos", name: "cowork-valida", origen: "clickup:86abc1234", orquestador: "claude-cowork" }, port);
   assert.equal(result.isError, false);
-  assert.deepEqual(calls.launch, [{ repo: "todo-api", workflowId: "wf-1", request: "valida títulos", name: "cowork-valida", origin: "clickup:86abc1234" }]);
+  assert.deepEqual(calls.launch, [{ repo: "todo-api", workflowId: "wf-1", request: "valida títulos", name: "cowork-valida", origin: "clickup:86abc1234", orchestrator: "claude-cowork" }]);
   assert.deepEqual(JSON.parse(result.text), { name: "cowork-valida", branch: "ronin/cowork-x", worktree: "/wt/cowork-x" });
 });
 
