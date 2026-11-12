@@ -52,8 +52,14 @@ export function isSessionFollowed(
   }
 }
 
+type RealQuestionStatus = McpSessionStatus & {
+  attention: "decision" | "idle";
+  questionId: string;
+  question: string;
+};
+
 /** Una decisión siempre pregunta; un idle sólo si su texto contiene una pregunta explícita. */
-export function isRealQuestion(status: McpSessionStatus): boolean {
+export function isRealQuestion(status: McpSessionStatus): status is RealQuestionStatus {
   if (!status.needsInput || !status.questionId || typeof status.question !== "string" || !status.question.trim()) return false;
   return status.attention === "decision" || (status.attention === "idle" && status.question.includes("?"));
 }
@@ -144,9 +150,8 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
     await outbound.send({ ...where(config, repo), text, keyboard: summaryKeyboard(name) });
   };
 
-  async function sendQuestion(s: McpSessionStatus, entry: FollowedSession, config: TelegramConfig): Promise<void> {
-    const questionId = s.questionId as string;
-    const question = s.question as string;
+  async function sendQuestion(s: RealQuestionStatus, entry: FollowedSession, config: TelegramConfig): Promise<void> {
+    const { questionId, question } = s;
     const options = s.options ?? [];
     const key = randomBytes(6).toString("hex");
     const keyboard = options.length
@@ -188,7 +193,15 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
       /* sin registro legible: no se sigue */
     }
     const repo = followedRepo(raw, config);
-    if (!repo) return;
+    if (!repo) {
+      const rec = record(raw);
+      if (rec && Object.hasOwn(rec, "orchestrator") && current(s.name)) {
+        idleSeen.delete(s.name);
+        shellTicks.delete(s.name);
+        store.updateState((state) => { delete state.sessions[s.name]; });
+      }
+      return;
+    }
     if (!current(s.name)) {
       store.updateState((state) => {
         if (!Object.hasOwn(state.sessions, s.name)) state.sessions[s.name] = { session: s.name, repo };
@@ -236,7 +249,7 @@ export function createWatcher(deps: WatcherDeps): { tick(): Promise<void> } {
     if (s.attention === "idle") {
       const seen = idleSeen.get(name);
       const ticks = seen && seen.questionId === s.questionId ? seen.ticks + 1 : 1;
-      idleSeen.set(name, { questionId: s.questionId as string, ticks });
+      idleSeen.set(name, { questionId: s.questionId, ticks });
       if (ticks < CONFIRM_TICKS) return;
     }
     idleSeen.delete(name);

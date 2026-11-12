@@ -187,6 +187,19 @@ test("una sesión con orquestador previamente seguida desaparece sin aviso", asy
   cleanup();
 });
 
+test("una sesión previamente seguida se poda si pasa a tener orquestador aunque siga presente", async () => {
+  const { h, watcher, cleanup } = setup();
+  h.store.updateState((state) => {
+    state.sessions["cowork-a"] = { session: "cowork-a", repo: "alpha" };
+  });
+  h.records["cowork-a"] = record({ orchestrator: "claude-cowork" });
+  h.statuses = [status()];
+  await watcher.tick();
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.store.readState().sessions["cowork-a"], undefined);
+  cleanup();
+});
+
 test("un menú decision se envía de inmediato con un botón por opción", async () => {
   const { h, watcher, cleanup } = setup();
   h.statuses = [asking({ options: ["Sí", "No", "Tal vez"] })];
