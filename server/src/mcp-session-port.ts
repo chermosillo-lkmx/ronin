@@ -67,7 +67,7 @@ export function toStatus(session: TmuxSessionInfo, pane?: string | null): McpSes
     attention: level,
     needsInput,
     gate: failed
-      ? { stage: failed.key, state: "failed", ...(failed.attempts !== undefined ? { attempts: failed.attempts } : {}) }
+      ? { stage: failed.key, state: "failed", ...(failed.attempts !== undefined ? { attempts: failed.attempts } : {}), ...(failed.attention === "gate-agotado" ? { exhausted: true } : {}) }
       : enMarcha ? { stage: enMarcha.key, state: enMarcha.gate as "queued" | "running" } : null,
   };
   if (session.attention?.question) status.question = session.attention.question.slice(0, MAX_QUESTION);

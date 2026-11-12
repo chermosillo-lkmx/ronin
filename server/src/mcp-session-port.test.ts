@@ -109,6 +109,14 @@ test("toStatus reporta el gate fallido", () => {
   assert.deepEqual(toStatus(failed).gate, { stage: "tests", state: "failed", attempts: 2 });
 });
 
+test("toStatus marca exhausted cuando el gate de merge agotó sus intentos", () => {
+  const agotado = session({ flow: { workflow: "w", done: 5, total: 8, stages: [
+    { key: "pre-merge", label: "G", status: "failed", attempts: 3, gate: "failed", attention: "gate-agotado" },
+    { key: "pr", label: "PR", status: "current" },
+  ] } });
+  assert.deepEqual(toStatus(agotado).gate, { stage: "pre-merge", state: "failed", attempts: 3, exhausted: true });
+});
+
 test("toStatus reporta el gate de merge en cola o corriendo aunque su etapa esté cumplida", () => {
   const conGate = (gate: "queued" | "running") => session({ flow: { workflow: "w", done: 2, total: 3, stages: [
     { key: "implementing", label: "I", status: "done" }, { key: "pre-merge", label: "G", status: "done", gate },

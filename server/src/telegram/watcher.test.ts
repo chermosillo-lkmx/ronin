@@ -272,6 +272,36 @@ test("gate failed nunca avisa: ni intento 1 con reintentos, ni intento 2 de maxR
   cleanup();
 });
 
+test("gate agotado se avisa una sola vez aunque la pregunta sintética cambie de id entre turnos", async () => {
+  const { h, watcher, cleanup } = setup();
+  const exhausted = (questionId: string, attempts = 3) => status({
+    attention: "decision", needsInput: true, questionId,
+    question: `El gate pre-merge agotó sus intentos (${attempts}); hace falta intervención humana`,
+    gate: { stage: "pre-merge", state: "failed", attempts, exhausted: true },
+  });
+  // El orquestador responde y el agente trabaja; cada turno nuevo deja otro questionId en el pane.
+  for (const id of ["q1", "q2", "q3"]) {
+    h.statuses = [exhausted(id)];
+    await watcher.tick();
+    await watcher.tick();
+    h.statuses = [status({ gate: { stage: "pre-merge", state: "failed", attempts: 3, exhausted: true } })];
+    await watcher.tick();
+  }
+  assert.equal(h.sent.length, 1);
+  assert.match(h.sent[0].text, /agotó sus intentos \(3\)/);
+  // Otro agotamiento (más intentos tras relanzar) sí se avisa una vez más.
+  h.statuses = [exhausted("q9", 4)];
+  await watcher.tick();
+  assert.equal(h.sent.length, 2);
+  // Si el gate deja de estar fallido y vuelve a agotarse con la misma clave, se avisa de nuevo.
+  h.statuses = [status()];
+  await watcher.tick();
+  h.statuses = [exhausted("q10", 4)];
+  await watcher.tick();
+  assert.equal(h.sent.length, 3);
+  cleanup();
+});
+
 test("sesión gone o desaparecida: aviso único y se poda", async () => {
   const { h, watcher, cleanup } = setup();
   h.statuses = [status(), status({ name: "cowork-b" })];
