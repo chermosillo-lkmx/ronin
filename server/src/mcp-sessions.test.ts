@@ -25,13 +25,18 @@ async function call(name: string, args: unknown, port?: McpSessionPort) {
 
 test("tools/list incluye las herramientas de sesión y crear_sesion expone orquestador", async () => {
   const response = await handleMcp({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { harness });
-  const tools = (response?.result as { tools: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }> }).tools;
+  const tools = (response?.result as { tools: Array<{ name: string; inputSchema?: { properties?: Record<string, { type?: string; maxLength?: number; pattern?: string; description?: string }> } }> }).tools;
   const names = tools.map((tool) => tool.name);
   for (const name of ["reportar_pruebas", "estado_pruebas", "listar_repos_y_workflows", "crear_sesion", "estado_sesiones", "responder_sesion"]) {
     assert.ok(names.includes(name), name);
   }
   const crearSesion = tools.find((tool) => tool.name === "crear_sesion");
-  assert.ok(crearSesion?.inputSchema?.properties?.orquestador, "crear_sesion expone orquestador");
+  const orquestador = crearSesion?.inputSchema?.properties?.orquestador;
+  assert.deepEqual(
+    { type: orquestador?.type, maxLength: orquestador?.maxLength, pattern: orquestador?.pattern },
+    { type: "string", maxLength: 100, pattern: "^[A-Za-z0-9._:-]+$" },
+  );
+  assert.match(orquestador?.description ?? "", /coordinada externamente.*Telegram no la sigue/i);
 });
 
 test("sin puerto de sesiones, las herramientas responden error legible", async () => {

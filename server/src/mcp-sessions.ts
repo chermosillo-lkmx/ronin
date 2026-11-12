@@ -50,7 +50,12 @@ export const SESSION_TOOLS = [
         request: { type: "string", description: "Petición para el agente (máx. 8 KB)." },
         name: { type: "string", description: "Nombre de sesión; debe iniciar con cowork-. Si falta, se deriva de la petición." },
         origen: { type: "string", description: "Referencia externa, p. ej. clickup:<taskId>." },
-        orquestador: { type: "string", description: "Nombre del proceso que coordina la sesión." },
+        orquestador: {
+          type: "string",
+          maxLength: 100,
+          pattern: "^[A-Za-z0-9._:-]+$",
+          description: "Etiqueta del orquestador externo: la sesión queda coordinada externamente y Telegram no la sigue.",
+        },
       },
       required: ["repo", "workflowId", "request"],
       additionalProperties: false,
