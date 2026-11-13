@@ -15,7 +15,7 @@ export interface MainApp {
   getPath?(name: "userData"): string;
   isPackaged?: boolean;
   exit?(code: number): void;
-  on?(event: "before-quit" | "window-all-closed", listener: (event?: { preventDefault(): void }) => void): unknown;
+  on?(event: "before-quit" | "window-all-closed" | "activate", listener: (event?: { preventDefault(): void }) => void): unknown;
 }
 
 export interface SchemeProtocol {
@@ -26,6 +26,8 @@ export interface MainDependencies extends Omit<DesktopDependencies, "protocol"> 
   app: MainApp;
   protocol: DesktopDependencies["protocol"] & SchemeProtocol;
   runSmoke?: (deps: DesktopDependencies, options?: { resultFile?: string }) => Promise<void>;
+  /** Inyectable para tests; por defecto `process.platform`. */
+  platform?: NodeJS.Platform;
 }
 
 export function resolveDesktopRoot(appPath: string | undefined, cwd: string): string {
@@ -96,9 +98,25 @@ export async function startMain(deps: MainDependencies, argv: string[] = process
     event?.preventDefault();
     void controller.shutdown().finally(() => deps.app.quit());
   });
+  const platform = deps.platform ?? process.platform;
   deps.app.on?.("window-all-closed", () => {
-    if (process.platform !== "darwin") deps.app.quit();
+    if (platform !== "darwin") deps.app.quit();
   });
+  if (platform === "darwin") {
+    // Convención de macOS: el botón rojo oculta la ventana (backend, terminales y estado del
+    // renderer siguen vivos) y el clic en el icono del Dock la vuelve a mostrar. Sólo ⌘Q
+    // (before-quit ⇒ quitting) deja que la ventana se cierre de verdad.
+    const appWindow = controller.window;
+    appWindow.on?.("close", (event) => {
+      if (quitting || appWindow.isDestroyed?.()) return;
+      event.preventDefault();
+      appWindow.hide?.();
+    });
+    deps.app.on?.("activate", () => {
+      if (appWindow.isDestroyed?.()) return;
+      appWindow.show?.();
+    });
+  }
   return controller;
 }
 

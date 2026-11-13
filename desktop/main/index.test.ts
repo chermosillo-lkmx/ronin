@@ -181,3 +181,66 @@ test("la entrada de Electron informa por stderr si el arranque asíncrono falla"
     process.exitCode = previousExitCode;
   }
 });
+
+function fakeWindowHarness(platform: NodeJS.Platform) {
+  const appListeners = new Map<string, (event?: { preventDefault(): void }) => void>();
+  const windowListeners = new Map<string, (event: { preventDefault(): void }) => void>();
+  const events: string[] = [];
+  const app = {
+    whenReady: async () => {},
+    quit: () => { events.push("quit"); },
+    on: (event: string, listener: (value?: { preventDefault(): void }) => void) => { appListeners.set(event, listener); },
+  };
+  const webContents = { on: () => {}, setWindowOpenHandler: () => {} };
+  const window = {
+    webContents,
+    loadURL: async () => {},
+    destroy: () => { events.push("destroy"); },
+    isDestroyed: () => false,
+    hide: () => { events.push("hide"); },
+    show: () => { events.push("show"); },
+    on: (event: string, listener: (value: { preventDefault(): void }) => void) => { windowListeners.set(event, listener); },
+  };
+  const starting = startMain({
+    app: app as any,
+    platform,
+    protocol: { registerSchemesAsPrivileged: () => {}, handle: () => {} },
+    createWindow: () => window as any,
+    createSupervisor: () => ({ port: 45678, start: async () => {}, close: async () => {} }) as any,
+    shell: { openExternal: () => {} },
+    fetch: async () => new Response("ok"),
+    readiness: { fetch: async () => ({ ok: true, status: 200, headers: { get: () => "text/html" } }), sleep: async () => {}, now: () => 0 },
+    distDir: "/tmp/dist", preloadPath: "/preload.js",
+  }, []);
+  return { starting, appListeners, windowListeners, events };
+}
+
+test("en macOS cerrar la ventana la oculta y el clic en el Dock la vuelve a mostrar", async () => {
+  const { starting, appListeners, windowListeners, events } = fakeWindowHarness("darwin");
+  await starting;
+
+  const close = { prevented: false, preventDefault() { this.prevented = true; } };
+  windowListeners.get("close")!(close);
+  assert.equal(close.prevented, true);
+  assert.deepEqual(events, ["hide"]);
+
+  appListeners.get("activate")!();
+  assert.deepEqual(events, ["hide", "show"]);
+});
+
+test("en macOS ⌘Q deja cerrar la ventana de verdad", async () => {
+  const { starting, appListeners, windowListeners } = fakeWindowHarness("darwin");
+  await starting;
+
+  appListeners.get("before-quit")!({ preventDefault() {} });
+  const close = { prevented: false, preventDefault() { this.prevented = true; } };
+  windowListeners.get("close")!(close);
+  assert.equal(close.prevented, false);
+});
+
+test("fuera de macOS cerrar la ventana no la oculta", async () => {
+  const { starting, windowListeners } = fakeWindowHarness("linux");
+  await starting;
+
+  assert.equal(windowListeners.has("close"), false);
+});

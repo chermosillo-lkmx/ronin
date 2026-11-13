@@ -12,7 +12,10 @@ export interface DesktopWindow {
   loadURL(url: string): Promise<void>;
   destroy(): void;
   isDestroyed?(): boolean;
+  hide?(): void;
+  show?(): void;
   on?(event: "did-finish-load", listener: () => void): unknown;
+  on?(event: "close", listener: (event: { preventDefault(): void }) => void): unknown;
 }
 
 export interface ProtocolLike {
