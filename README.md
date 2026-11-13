@@ -25,6 +25,9 @@
 - **Skills aprendidas**: cuando un flujo termina con sus gates deterministas en verde, Ronin puede
   proponer un `SKILL.md` reutilizable; lo lees completo, lo apruebas con su hash y cada sesión nueva del
   repo recibe un índice de sus skills asociadas.
+- **Performance por workflow**: cuánto tarda cada tipo de ciclo, por etapa y en gates, y si va más
+  lento que el periodo anterior.
+- **Telegram**: lanzar sesiones y responder a los agentes desde un grupo con un tema por repo.
 - Aplicación de escritorio (Electron) empaquetable para macOS, Windows y Linux.
 
 ### Nueva sesión con petición
@@ -42,6 +45,23 @@ Un workflow puede abrir una ventana Driver de cuatro panes (`driver | worker` ar
 ### Reportes (📊)
 
 Los reportes diario/semanal se construyen a partir de sesiones, evidencia y commits locales.
+
+### Performance (◔)
+
+![Vista Performance con tres workflows, la carga de la máquina y un ciclo en curso](assets/readme/performance.png)
+
+Ronin registra cada ciclo en un diario append-only por mes (`<dataDir>/cycle-metrics-YYYY-MM.jsonl`):
+lanzamiento, cada etapa, cada gate y una muestra periódica de la máquina. La vista lo agrupa por
+workflow y por **día, semana o mes**:
+
+- Duración promedio del ciclo, desglosada por etapa, y la duración de los gates como línea punteada.
+- Tiempo en cola de gate, corridas y fallos por ciclo, CPU y RSS pico de la sesión.
+- Cambio contra el periodo anterior con datos; a partir de **±20 %** se marca como degradado (▲ rojo)
+  o mejorado (▼ verde).
+- Carga y swap de la máquina en las últimas 24 h, y los ciclos que siguen **en curso**.
+
+El diario sobrevive al cierre de la sesión y al borrado de `/tmp/cowork-cycle-*`. `COWORK_PERF=0`
+apaga el registro; la vista sigue leyendo lo ya registrado.
 
 ### Pruebas (⚗ test harness)
 - **Calendario de actividad por repositorio**, al estilo del grafo de contribuciones: una fila por
@@ -290,6 +310,8 @@ Cada etapa declara **quién la ejecuta** y **con qué modelo**, y el prompt se g
 
 ### Vista Harness del editor
 
+![Vista Harness del workflow tmux-worker-loop con dos gates por comando encendidos](assets/readme/harness.png)
+
 La cuarta vista del editor presenta una lista compacta por etapa: cada fila mantiene visibles ejecutor,
 instrucción, gate y revisión, y se despliega in situ para editarlos. En el shell de escritorio (Ronin)
 vive en `Workflows` → segmento `Grafo/Stepper/JSON/Harness`, sobre el catálogo de workflows. El catálogo
@@ -361,6 +383,8 @@ long polling (`getUpdates`): solo hay conexiones salientes, no se expone ningún
 > un bot y un segundo usuario reales **está pendiente**. Ver `EVIDENCIA-telegram-dev.md`.
 
 ### Configurar (wizard ✈)
+
+![Primer paso del wizard de Telegram: crear el bot con BotFather y pegar el token](assets/readme/telegram.png)
 
 El icono ✈ de la barra lateral abre el wizard la primera vez; después muestra el estado (conectado,
 grupo, repos con tema, último error).
