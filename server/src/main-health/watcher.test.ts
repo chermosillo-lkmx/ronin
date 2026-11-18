@@ -45,10 +45,12 @@ function attribution(red: MainHealthMeasurement): MainHealthAttribution {
 function memoryStore(now = 10_000) {
   const measurements = new Map<string, MainHealthMeasurement>();
   const errors = new Map<string, MainHealthError>();
+  const operational = new Map<string, string>();
   const key = (repo: string, sha: string) => `${repo}@${sha}`;
   return {
     measurements,
     errors,
+    operational,
     readMeasurement: (repo: string, sha: string) => measurements.get(key(repo, sha)) ?? null,
     readError: (repo: string, sha: string) => errors.get(key(repo, sha)) ?? null,
     hasRecentError(repo: string, sha: string) {
@@ -56,6 +58,7 @@ function memoryStore(now = 10_000) {
       return value !== undefined && now - value.at >= 0 && now - value.at < 60 * 60_000;
     },
     listMeasurements: (repo: string) => [...measurements.values()].filter((item) => item.repo === repo),
+    confirmOperationalMeasurement: (repo: string, sha: string) => { operational.set(repo, sha); },
   };
 }
 
@@ -147,7 +150,8 @@ test("ensureMeasured retorna estado claro, resuelve main y no mide repos fuera d
     reason: "repo-not-configured",
     repo: "ajeno",
   });
-  assert.equal(gitCalls, 1);
+  await watcher.idle();
+  assert.equal(gitCalls, 2, "main se resuelve y se revalida antes de publicar");
 });
 
 test("la ventana del error reciente usa el reloj inyectado y el error leído del store", async () => {
@@ -555,7 +559,7 @@ test("stop aborta el signal del comentario auxiliar activo", async () => {
   assert.equal(commentSignal?.aborted, true);
 });
 
-test("cache hit se reconcilia en la cola sin medir y recupera apertura/cierre", async () => {
+test("cache hit de main se reconcilia en la cola sin medir y recupera apertura/cierre", async () => {
   const store = memoryStore();
   store.measurements.set(`repo@${SHA_A}`, measurement("repo", SHA_A, "red"));
   store.measurements.set(`repo@${SHA_B}`, measurement("repo", SHA_B, "green"));
@@ -582,22 +586,132 @@ test("cache hit se reconcilia en la cola sin medir y recupera apertura/cierre", 
       return closed;
     },
   };
+  let remote = SHA_A;
+  deps.git.lsRemoteMain = async () => remote;
   deps.notifier = {
     opened: async () => { notified.push("open"); },
     closed: async () => { notified.push("close"); },
   };
   const watcher = createMainHealthWatcher(deps);
 
-  assert.equal((await watcher.ensureMeasured("repo", SHA_A)).status, "cached");
+  assert.equal((await watcher.ensureMeasured("repo")).status, "cached");
   await watcher.idle();
   assert.equal(opens, 1);
   assert.equal(current?.firstRedSha, SHA_A);
-  assert.equal((await watcher.ensureMeasured("repo", SHA_B)).status, "cached");
+  remote = SHA_B;
+  assert.equal((await watcher.ensureMeasured("repo")).status, "cached");
   await watcher.idle();
 
   assert.equal(measures, 0);
   assert.equal(closes, 1);
   assert.deepEqual(notified, ["open", "close"]);
+});
+
+test("baseline histórico rojo no abre y verde no cierra el incidente operacional", async () => {
+  const store = memoryStore();
+  store.measurements.set(`repo@${SHA_A}`, measurement("repo", SHA_A, "red"));
+  store.measurements.set(`repo@${SHA_B}`, measurement("repo", SHA_B, "green"));
+  const deps = baseDeps(["repo"], store);
+  let current: Incident | null = null;
+  let opens = 0;
+  let closes = 0;
+  let fixers = 0;
+  deps.incidents = {
+    readIncident: () => current,
+    openIncident: (input) => {
+      opens += 1;
+      current = { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+      return current;
+    },
+    heartbeatOwner: async () => false,
+    ensureFixer: async () => { fixers += 1; return { status: "disabled" as const, session: null }; },
+    closeIncident: async () => { closes += 1; current = null; return null; },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.ensureMeasured("repo", SHA_A);
+  await watcher.idle();
+  assert.equal(opens, 0, "un rojo baseline no abre incidente");
+  assert.equal(fixers, 0, "un rojo baseline no lanza fixer");
+
+  current = {
+    id: `repo@${SHA_C.slice(0, 7)}`,
+    repo: "repo",
+    firstRedSha: SHA_C,
+    openedAt: 1,
+    summary: "main rojo",
+    attribution: attribution(measurement("repo", SHA_C, "red")),
+  };
+  await watcher.ensureMeasured("repo", SHA_B);
+  await watcher.idle();
+  assert.equal(closes, 0, "un verde baseline no cierra main rojo actual");
+  assert.equal(current?.firstRedSha, SHA_C);
+  assert.equal(store.operational.size, 0, "baseline nunca publica el puntero operacional");
+});
+
+test("main promueve un baseline en vuelo del mismo SHA y lo evalúa una sola vez", async () => {
+  const store = memoryStore();
+  const deps = baseDeps(["repo"], store);
+  let release!: () => void;
+  let started!: () => void;
+  const measuring = new Promise<void>((resolve) => { started = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let gitCalls = 0;
+  let opens = 0;
+  deps.git.lsRemoteMain = async () => { gitCalls += 1; return SHA_A; };
+  deps.measure = async () => {
+    started();
+    await gate;
+    store.measurements.set(`repo@${SHA_A}`, measurement("repo", SHA_A, "red"));
+  };
+  deps.incidents = {
+    ...noopIncidents(),
+    openIncident: (input) => {
+      opens += 1;
+      return { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+    },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  assert.equal((await watcher.ensureMeasured("repo", SHA_A)).status, "queued");
+  await measuring;
+  assert.deepEqual(await watcher.ensureMeasured("repo"), {
+    status: "queued", repo: "repo", sha: SHA_A, deduplicated: true,
+  });
+  release();
+  await watcher.idle();
+
+  assert.equal(gitCalls, 2, "resuelve main y lo revalida antes de publicar");
+  assert.equal(store.operational.get("repo"), SHA_A);
+  assert.equal(opens, 1);
+});
+
+test("job operacional no publica ni evalúa si origin/main avanzó durante la medición", async () => {
+  const store = memoryStore();
+  const deps = baseDeps(["repo"], store);
+  let remote = SHA_A;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let opens = 0;
+  deps.git.lsRemoteMain = async () => remote;
+  deps.measure = async () => {
+    await gate;
+    store.measurements.set(`repo@${SHA_A}`, measurement("repo", SHA_A, "red"));
+  };
+  deps.incidents = {
+    ...noopIncidents(),
+    openIncident: (input) => { opens += 1; return { id: "inesperado", openedAt: 1, ...input }; },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  assert.equal((await watcher.ensureMeasured("repo")).status, "queued");
+  remote = SHA_B;
+  release();
+  await watcher.idle();
+
+  assert.equal(store.operational.size, 0);
+  assert.equal(opens, 0);
+  assert.ok(store.measurements.has(`repo@${SHA_A}`), "la medición baseline queda disponible para gate");
 });
 
 test("evaluate abre una vez, delega fixer, respeta commentOnPr=false y luego cierra", async () => {
@@ -671,10 +785,11 @@ test("fallos de notify, comentario y fixer no rompen evaluación ni la cola", as
     const sha = args[2]!;
     store.measurements.set(`${repo}@${sha}`, measurement(repo, sha, "red"));
   };
+  deps.git.lsRemoteMain = async (repoDir) => repoDir.endsWith("/alpha") ? SHA_A : SHA_B;
   const watcher = createMainHealthWatcher(deps);
 
-  await watcher.ensureMeasured("alpha", SHA_A);
-  await watcher.ensureMeasured("beta", SHA_B);
+  await watcher.ensureMeasured("alpha");
+  await watcher.ensureMeasured("beta");
   await watcher.idle();
 
   assert.deepEqual(opened, ["alpha", "beta"]);
@@ -726,10 +841,11 @@ test("auxiliares colgados no bloquean core ni idle y se deduplican mientras sigu
     const sha = args[2]!;
     store.measurements.set(`${repo}@${sha}`, measurement(repo, sha, repo === "alpha" ? "red" : "green"));
   };
+  deps.git.lsRemoteMain = async (repoDir) => repoDir.endsWith("/alpha") ? SHA_A : SHA_B;
   const watcher = createMainHealthWatcher(deps);
 
-  await watcher.ensureMeasured("alpha", SHA_A);
-  await watcher.ensureMeasured("beta", SHA_B);
+  await watcher.ensureMeasured("alpha");
+  await watcher.ensureMeasured("beta");
   const idle = watcher.idle();
   await started;
   let idleDone = false;

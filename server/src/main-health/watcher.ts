@@ -73,7 +73,7 @@ export interface MainHealthTimers {
 }
 
 type WatcherStore = Pick<MainHealthStore,
-  "readMeasurement" | "readError" | "listMeasurements"
+  "readMeasurement" | "readError" | "listMeasurements" | "confirmOperationalMeasurement"
 >;
 
 export interface MainHealthWatcherDeps {
@@ -229,8 +229,15 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     handle.unref();
     return () => clearTimeout(handle);
   });
-  const pending = new Set<string>();
-  const queue: Array<{ repo: string; sha: string; measure: boolean; generation: number }> = [];
+  interface MeasurementJob {
+    repo: string;
+    sha: string;
+    measure: boolean;
+    operational: boolean;
+    generation: number;
+  }
+  const pending = new Map<string, MeasurementJob>();
+  const queue: MeasurementJob[] = [];
   const idleWaiters: Array<() => void> = [];
   type AuxiliaryKind = "heartbeat" | "fixer" | "comment";
   interface AuxiliaryRun {
@@ -519,7 +526,7 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     return run;
   }
 
-  async function runJob(job: { repo: string; sha: string; measure: boolean; generation: number }): Promise<void> {
+  async function runJob(job: MeasurementJob): Promise<void> {
     if (stopping || job.generation !== lifecycleGeneration) return;
     if (job.measure) {
       const config = deps.gateConfig(job.repo);
@@ -544,6 +551,10 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     const result = deps.store.readMeasurement(job.repo, job.sha);
     if (!result || !isMainHealthMeasurement(result) || result.repo !== job.repo || result.sha !== job.sha) return;
     if (stopping || job.generation !== lifecycleGeneration) return;
+    if (!job.operational) return;
+    const currentMain = await resolveMain(job.repo);
+    if (stopping || job.generation !== lifecycleGeneration || currentMain !== job.sha) return;
+    deps.store.confirmOperationalMeasurement(job.repo, job.sha);
     await evaluate(job.repo, result);
   }
 
@@ -572,12 +583,17 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     }
   }
 
-  function enqueue(repo: string, sha: string, measure: boolean): boolean {
+  function enqueue(repo: string, sha: string, measure: boolean, operational: boolean): boolean {
     if (stopping) return false;
     const key = `${repo}@${sha}`;
-    if (pending.has(key)) return false;
-    pending.add(key);
-    queue.push({ repo, sha, measure, generation: lifecycleGeneration });
+    const existing = pending.get(key);
+    if (existing) {
+      if (operational) existing.operational = true;
+      return false;
+    }
+    const job = { repo, sha, measure, operational, generation: lifecycleGeneration };
+    pending.set(key, job);
+    queue.push(job);
     void pump();
     return true;
   }
@@ -597,13 +613,14 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     const settings = deps.readSettings();
     const rejection = repoRejection(settings, repo);
     if (rejection) return { status: "ignored", reason: rejection, repo };
+    const operational = requestedSha === undefined;
     const sha = requestedSha ?? await resolveMain(repo);
     if (stopping || generation !== lifecycleGeneration) return { status: "ignored", reason: "stopping", repo };
     if (!sha) return { status: "unavailable", reason: "main-unavailable", repo };
     if (!CANONICAL_SHA.test(sha)) return { status: "unavailable", reason: "invalid-sha", repo };
     const cached = deps.store.readMeasurement(repo, sha);
     if (cached) {
-      enqueue(repo, sha, false);
+      enqueue(repo, sha, false, operational);
       return { status: "cached", measurement: cached };
     }
     const error = deps.store.readError(repo, sha);
@@ -611,7 +628,7 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     if (errorAge >= 0 && errorAge < 60 * 60_000) {
       return { status: "suppressed", reason: "recent-error", repo, sha };
     }
-    return enqueue(repo, sha, true)
+    return enqueue(repo, sha, true, operational)
       ? { status: "queued", repo, sha }
       : { status: "queued", repo, sha, deduplicated: true };
   }
