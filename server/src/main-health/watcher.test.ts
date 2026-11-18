@@ -642,6 +642,63 @@ test("notify close espera a que notify open del mismo repo termine sin bloquear 
   assert.deepEqual(events, ["open:start", "open:end", "close"]);
 });
 
+test("deadline aborta notify open antes de iniciar notify close y evita entrega tardía", async () => {
+  const deps = baseDeps(["repo"]);
+  const deadlines: Array<{ callback: () => void; cancelled: boolean }> = [];
+  Object.assign(deps, {
+    auxiliaryLeaseMs: 500,
+    scheduleAuxiliaryDeadline: (callback: () => void, ms: number) => {
+      assert.equal(ms, 500);
+      const deadline = { callback, cancelled: false };
+      deadlines.push(deadline);
+      return () => { deadline.cancelled = true; };
+    },
+  });
+  let current: Incident | null = null;
+  let finishOpen!: () => void;
+  const events: string[] = [];
+  deps.incidents = {
+    readIncident: () => current,
+    openIncident: (input) => {
+      current = { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+      return current;
+    },
+    heartbeatOwner: async () => false,
+    ensureFixer: async () => ({ status: "disabled" as const }),
+    closeIncident: async () => {
+      const closed = current;
+      current = null;
+      return closed;
+    },
+  };
+  deps.notifier = {
+    opened: async (_incident, signal) => new Promise<void>((resolve, reject) => {
+      events.push("open:start");
+      finishOpen = () => {
+        if (!signal?.aborted) events.push("open:sent");
+        resolve();
+      };
+      signal?.addEventListener("abort", () => {
+        events.push("open:abort");
+        reject(new DOMException("cancelado", "AbortError"));
+      }, { once: true });
+    }),
+    closed: async () => { events.push("close:start"); },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
+  assert.deepEqual(events, ["open:start"]);
+  deadlines[0]!.callback();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["open:start", "open:abort", "close:start"]);
+
+  finishOpen();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["open:start", "open:abort", "close:start"], "el envío abortado no entrega tarde");
+});
+
 test("heartbeat usa cadencia menor al lease e independiente de la medición", async () => {
   const deps = baseDeps(["repo"]);
   deps.readSettings = () => baseSettings(["repo"], { intervalMin: 60, leaseMin: 30 });
@@ -754,7 +811,7 @@ test("close invalida fixer y comentario encolados antes de que inicien", async (
   assert.equal(comments, 0);
 });
 
-test("stop descarta avisos aún no iniciados y restart no los deja suprimidos", async () => {
+test("stop aborta notify activo, descarta close y una promesa vieja no toca la lane reiniciada", async () => {
   const deps = baseDeps(["repo"]);
   const timers: Array<() => void> = [];
   deps.timers = {
@@ -763,8 +820,8 @@ test("stop descarta avisos aún no iniciados y restart no los deja suprimidos", 
   };
   deps.git.lsRemoteMain = async () => null;
   let current: Incident | null = null;
-  let releaseFirst!: () => void;
-  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let rejectFirst!: (error: Error) => void;
+  let firstSignal: AbortSignal | undefined;
   const events: string[] = [];
   deps.incidents = {
     readIncident: () => current,
@@ -781,9 +838,12 @@ test("stop descarta avisos aún no iniciados y restart no los deja suprimidos", 
     },
   };
   deps.notifier = {
-    opened: async (incident) => {
+    opened: async (incident, signal) => {
       events.push(`open:${incident.id}:start`);
-      if (incident.firstRedSha === SHA_A) await firstGate;
+      if (incident.firstRedSha === SHA_A) {
+        firstSignal = signal;
+        await new Promise<void>((_resolve, reject) => { rejectFirst = reject; });
+      }
       events.push(`open:${incident.id}:end`);
     },
     closed: async (incident) => { events.push(`close:${incident.id}`); },
@@ -794,15 +854,18 @@ test("stop descarta avisos aún no iniciados y restart no los deja suprimidos", 
   await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
   await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
   watcher.stop();
+  assert.equal(firstSignal?.aborted, true);
   watcher.start();
   await watcher.evaluate("repo", measurement("repo", SHA_C, "red"));
-  assert.deepEqual(events, [`open:repo@${SHA_A.slice(0, 7)}:start`]);
-  releaseFirst();
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, [
+    `open:repo@${SHA_A.slice(0, 7)}:start`,
+    `open:repo@${SHA_C.slice(0, 7)}:start`,
+    `open:repo@${SHA_C.slice(0, 7)}:end`,
+  ], "restart crea una lane nueva sin esperar la promesa abortada");
+  rejectFirst(new DOMException("cancelado", "AbortError"));
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(events, [
     `open:repo@${SHA_A.slice(0, 7)}:start`,
-    `open:repo@${SHA_A.slice(0, 7)}:end`,
     `open:repo@${SHA_C.slice(0, 7)}:start`,
     `open:repo@${SHA_C.slice(0, 7)}:end`,
   ]);

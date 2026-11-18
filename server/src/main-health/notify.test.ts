@@ -123,3 +123,26 @@ test("tema ausente o inválido conserva el fallback al chat raíz", async () => 
   assert.equal(sent.length, 5);
   assert.ok(sent.every((message) => message.threadId === undefined));
 });
+
+test("propaga AbortSignal y un envío ya abortado es no-op", async () => {
+  const signals: Array<AbortSignal | undefined> = [];
+  const notifier = createMainHealthNotifier({
+    store: {
+      readToken: () => "token",
+      readConfig: () => ({ chatId: -100, topics: {} }),
+    },
+    runtime: {
+      getApi: () => ({
+        sendMessage: async (message) => { signals.push(message.signal); },
+      }),
+    },
+  });
+  const active = new AbortController();
+  const aborted = new AbortController();
+  aborted.abort();
+
+  await notifier.opened(incident(), active.signal);
+  await notifier.closed(incident(true), aborted.signal);
+
+  assert.deepEqual(signals, [active.signal]);
+});

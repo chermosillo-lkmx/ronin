@@ -10,7 +10,7 @@ interface NotifyStore {
 }
 
 interface NotifyApi {
-  sendMessage(message: { chatId: number; threadId?: number; text: string }): Promise<unknown>;
+  sendMessage(message: { chatId: number; threadId?: number; text: string; signal?: AbortSignal }): Promise<unknown>;
 }
 
 interface NotifyRuntime {
@@ -23,8 +23,8 @@ export interface MainHealthNotifierDeps {
 }
 
 export interface MainHealthNotifier {
-  opened(incident: Incident): Promise<void>;
-  closed(incident: Incident): Promise<void>;
+  opened(incident: Incident, signal?: AbortSignal): Promise<void>;
+  closed(incident: Incident, signal?: AbortSignal): Promise<void>;
 }
 
 /**
@@ -32,7 +32,8 @@ export interface MainHealthNotifier {
  * El texto es deliberadamente fijo y no incluye logs, resumen ni atribución del incidente.
  */
 export function createMainHealthNotifier(deps: MainHealthNotifierDeps): MainHealthNotifier {
-  async function send(incident: Incident, action: "abierto" | "cerrado"): Promise<void> {
+  async function send(incident: Incident, action: "abierto" | "cerrado", signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
     let token: string | null;
     let config: ReturnType<NotifyStore["readConfig"]>;
     let api: NotifyApi | null;
@@ -53,11 +54,12 @@ export function createMainHealthNotifier(deps: MainHealthNotifierDeps): MainHeal
       chatId: config.chatId,
       ...(Number.isInteger(threadId) && threadId > 0 ? { threadId } : {}),
       text,
+      signal,
     });
   }
 
   return {
-    opened: (incident) => send(incident, "abierto"),
-    closed: (incident) => send(incident, "cerrado"),
+    opened: (incident, signal) => send(incident, "abierto", signal),
+    closed: (incident, signal) => send(incident, "cerrado", signal),
   };
 }

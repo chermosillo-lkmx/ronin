@@ -228,10 +228,23 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     cancelDeadline?: () => void;
   }
   const auxiliaryRuns = new Map<string, AuxiliaryRun>();
-  const notificationLanes = new Map<string, {
-    running: string | null;
-    queued: Array<{ key: string; effect: () => Promise<unknown> }>;
-  }>();
+  interface NotificationTask {
+    key: string;
+    generation: number;
+    effect: (signal: AbortSignal) => Promise<unknown>;
+  }
+  interface NotificationRun {
+    key: string;
+    generation: number;
+    controller: AbortController;
+    cancelDeadline?: () => void;
+  }
+  interface NotificationLane {
+    generation: number;
+    running: NotificationRun | null;
+    queued: NotificationTask[];
+  }
+  const notificationLanes = new Map<string, NotificationLane>();
   let pumping = false;
   let tickRun: Promise<void> | null = null;
   let evaluationTail: Promise<void> = Promise.resolve();
@@ -317,35 +330,62 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     }
   }
 
+  function finishNotification(repo: string, lane: NotificationLane, run: NotificationRun): void {
+    run.cancelDeadline?.();
+    if (notificationLanes.get(repo) !== lane || lane.running !== run) return;
+    lane.running = null;
+    pumpNotifications(repo);
+  }
+
   function pumpNotifications(repo: string): void {
     const lane = notificationLanes.get(repo);
     if (!lane || lane.running) return;
-    const task = lane.queued.shift();
+    let task = lane.queued.shift();
+    while (task && task.generation !== lane.generation) task = lane.queued.shift();
     if (!task) {
       notificationLanes.delete(repo);
       return;
     }
-    lane.running = task.key;
+    const run: NotificationRun = {
+      key: task.key,
+      generation: task.generation,
+      controller: new AbortController(),
+    };
+    lane.running = run;
     let result: Promise<unknown>;
     try {
-      result = Promise.resolve(task.effect());
+      result = Promise.resolve(task.effect(run.controller.signal));
     } catch (error) {
       log(error);
-      lane.running = null;
-      pumpNotifications(repo);
+      finishNotification(repo, lane, run);
       return;
     }
+    if (notificationLanes.get(repo) === lane && lane.running === run) {
+      try {
+        run.cancelDeadline = scheduleAuxiliaryDeadline(() => {
+          if (notificationLanes.get(repo) !== lane || lane.running !== run) return;
+          run.controller.abort();
+          finishNotification(repo, lane, run);
+        }, auxiliaryLeaseMs);
+      } catch (error) {
+        log(error);
+        run.controller.abort();
+        finishNotification(repo, lane, run);
+      }
+    }
     void result.catch(log).finally(() => {
-      if (lane.running === task.key) lane.running = null;
-      pumpNotifications(repo);
+      finishNotification(repo, lane, run);
     });
   }
 
-  function enqueueNotification(repo: string, key: string, effect: () => Promise<unknown>): void {
-    const lane = notificationLanes.get(repo) ?? { running: null, queued: [] };
-    if (!notificationLanes.has(repo)) notificationLanes.set(repo, lane);
-    if (lane.running === key || lane.queued.some((task) => task.key === key)) return;
-    lane.queued.push({ key, effect });
+  function enqueueNotification(repo: string, key: string, effect: (signal: AbortSignal) => Promise<unknown>): void {
+    const current = notificationLanes.get(repo);
+    const lane = current?.generation === lifecycleGeneration
+      ? current
+      : { generation: lifecycleGeneration, running: null, queued: [] };
+    if (current !== lane) notificationLanes.set(repo, lane);
+    if (lane.running?.key === key || lane.queued.some((task) => task.key === key)) return;
+    lane.queued.push({ key, generation: lifecycleGeneration, effect });
     pumpNotifications(repo);
   }
 
@@ -385,7 +425,7 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
         summary: `main rojo: ${failures} prueba${failures === 1 ? "" : "s"} fallida${failures === 1 ? "" : "s"}`,
         attribution: report,
       });
-      enqueueNotification(repo, `notify-open:${incident.id}`, () => deps.notifier.opened(incident));
+      enqueueNotification(repo, `notify-open:${incident.id}`, (signal) => deps.notifier.opened(incident, signal));
       if (settings.commentOnPr) {
         launchAuxiliary(
           `comment:${incident.id}`,
@@ -413,7 +453,11 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     if (closed) {
       const droppedOpen = cancelQueuedOpenNotification(repo, closed.id);
       if (!droppedOpen) {
-        enqueueNotification(repo, `notify-close:${closed.id}:${closed.closedAt ?? "closed"}`, () => deps.notifier.closed(closed));
+        enqueueNotification(
+          repo,
+          `notify-close:${closed.id}:${closed.closedAt ?? "closed"}`,
+          (signal) => deps.notifier.closed(closed, signal),
+        );
       }
     }
   }
@@ -562,10 +606,12 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     lifecycleGeneration += 1;
     for (const run of auxiliaryRuns.values()) run.cancelDeadline?.();
     auxiliaryRuns.clear();
-    for (const [repo, lane] of notificationLanes) {
+    for (const lane of notificationLanes.values()) {
       lane.queued.length = 0;
-      if (!lane.running) notificationLanes.delete(repo);
+      lane.running?.cancelDeadline?.();
+      lane.running?.controller.abort();
     }
+    notificationLanes.clear();
     if (started) {
       started = false;
       timers.clearInterval(measurementInterval);
