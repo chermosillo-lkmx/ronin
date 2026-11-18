@@ -37,8 +37,8 @@ const COMMENT =
   "(comando shell que ejecuta el gate por-stage) — sólo se honra aquí (gitignored, mismo trust boundary " +
   "que startCommand/vars); en el workflow global (git-tracked) se ignora. Editable desde ⚙ Configuración → Workflows o a mano.";
 
-/** Override por repo del gate de pruebas: timeout (min) y workers de pytest-xdist. */
-export interface RepoGate { timeoutMin?: number; xdist?: number; }
+/** Override por repo del gate de pruebas: timeout, workers de pytest-xdist y PostgreSQL real opt-in. */
+export interface RepoGate { timeoutMin?: number; xdist?: number; realPg?: boolean; }
 
 interface RepoEntry {
   workflow?: WorkflowConfig; // validated on load; absent → inherit default
@@ -70,7 +70,11 @@ function sanitizeGate(raw: unknown): RepoGate | undefined {
   const r = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const timeoutMin = boundedInt(r.timeoutMin, GATE_TIMEOUT_RANGE);
   const xdist = boundedInt(r.xdist, { min: 1, max: 32 });
-  const gate: RepoGate = { ...(timeoutMin !== undefined ? { timeoutMin } : {}), ...(xdist !== undefined ? { xdist } : {}) };
+  const gate: RepoGate = {
+    ...(timeoutMin !== undefined ? { timeoutMin } : {}),
+    ...(xdist !== undefined ? { xdist } : {}),
+    ...(r.realPg === true ? { realPg: true } : {}),
+  };
   return Object.keys(gate).length ? gate : undefined;
 }
 
