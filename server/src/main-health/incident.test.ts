@@ -1639,6 +1639,7 @@ test("ensureFixer no lanza cuando otro proceso ganó el claim remoto", async () 
       pid: () => 701,
       now: () => 7_000,
       settings: { aliases: {}, autoFix: true, remoteClaim: true },
+      workflowId: () => "wf-claim-remoto",
       tmux: { hasSession: async () => false },
       git: gitPort,
       launch: { launchManagedSession: async () => { launches += 1; return { name: "no-debe-ocurrir" }; } },
