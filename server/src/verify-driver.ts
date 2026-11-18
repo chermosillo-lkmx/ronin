@@ -838,7 +838,7 @@ async function planMergeGate(
     // Un FAIL tampoco cuenta si el árbol se movió: lo probado ya no es el HEAD (p.ej. un paso
     // intermedio de un rebase) y gastar el intento ahí agotaba ciclos sin que nadie lo pidiera.
     if (!sameHeads(heads, await deps.heads(worktree))) {
-      return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts, at: Date.now() }, resultado.output, inicio);
+      return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts, at: fin }, resultado.output, inicio);
     }
     // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
     const timeout = porTimeout(resultado);

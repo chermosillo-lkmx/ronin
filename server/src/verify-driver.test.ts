@@ -1979,6 +1979,37 @@ test("tickOnce: mergeGate FAIL con el árbol cambiado a media corrida no gasta i
   }
 });
 
+test("árbol cambiado fija at/endedAt al terminar run y excluye la relectura Git", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-perf-"));
+  const now = mock.method(Date, "now", (() => {
+    let value = 100;
+    return () => {
+      const current = value;
+      value += 100;
+      return current;
+    };
+  })());
+  try {
+    let reads = 0;
+    const states: VerifyState[] = [];
+    const outcomes: Array<{ startedAt: number; endedAt: number }> = [];
+    const { d } = mergeDeps({
+      cycle: dir,
+      heads: async () => (++reads === 1 ? limpio(SHA_A) : limpio(SHA_B)),
+      writeState: (_cycle, _stage, state) => { states.push(state); },
+      onGateOutcome: (outcome) => { outcomes.push(outcome); },
+    });
+    await tick(d, new Map());
+    assert.equal(states.at(-1)?.reason, "el árbol cambió durante la corrida");
+    assert.equal(states.at(-1)?.at, 200);
+    assert.equal(outcomes[0]?.startedAt, 100);
+    assert.equal(outcomes[0]?.endedAt, 200);
+  } finally {
+    now.mock.restore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("perf: cada desenlace de gate llega a onGateOutcome con duración real, y el pid del gate a su sesión", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ronin-gate-perf-"));
   try {
