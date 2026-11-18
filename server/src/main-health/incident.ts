@@ -14,7 +14,6 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
-import { writeJsonAtomic } from "../atomic.js";
 import { launchManagedSession as launchRealSession } from "../session-launch.js";
 import { DEFAULT_MAIN_HEALTH_SETTINGS, type MainHealthSettings } from "../settings.js";
 import { hasSession } from "../tmux.js";
@@ -109,6 +108,8 @@ export interface IncidentManagerDeps {
   now?: () => number;
   pid?: () => number;
   pidAlive?: (pid: number) => boolean;
+  processStartToken?: () => string;
+  processIdentity?: (pid: number) => { host: string; startToken: string } | null;
   mutexToken?: () => string;
   mutexLeaseMs?: number;
   operationLeaseMs?: number;
@@ -129,6 +130,7 @@ const SAFE_SHA = /^[A-Fa-f0-9]{7,64}$/;
 const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_ALIAS = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const SAFE_MUTEX_TOKEN = /^[A-Za-z0-9-]{8,128}$/;
+const PROCESS_START_TOKEN = `${Math.round(Date.now() - process.uptime() * 1_000)}`;
 
 function safeRepo(repo: string): boolean {
   return repo.length <= 61
@@ -198,7 +200,10 @@ type IncidentOperationKind = "claim" | "launch";
 interface IncidentOperationLease {
   token: string;
   pid: number;
+  host?: string;
+  processStartToken?: string;
   kind: IncidentOperationKind;
+  state?: "active" | "completed";
   createdAt: number;
   heartbeat: number;
 }
@@ -206,6 +211,8 @@ interface IncidentOperationLease {
 interface IncidentCloseLease {
   token: string;
   pid: number;
+  host?: string;
+  processStartToken?: string;
   createdAt: number;
   heartbeat: number;
 }
@@ -232,7 +239,12 @@ function isOperationLease(value: unknown): value is IncidentOperationLease {
     && SAFE_MUTEX_TOKEN.test(value.token)
     && Number.isInteger(value.pid)
     && (value.pid as number) > 0
+    && (value.host === undefined || (typeof value.host === "string" && value.host.length > 0))
+    && (value.processStartToken === undefined
+      || (typeof value.processStartToken === "string" && value.processStartToken.length > 0))
+    && ((value.host === undefined) === (value.processStartToken === undefined))
     && (value.kind === "claim" || value.kind === "launch")
+    && (value.state === undefined || value.state === "active" || value.state === "completed")
     && typeof value.createdAt === "number"
     && Number.isFinite(value.createdAt)
     && typeof value.heartbeat === "number"
@@ -245,6 +257,10 @@ function isCloseLease(value: unknown): value is IncidentCloseLease {
     && SAFE_MUTEX_TOKEN.test(value.token)
     && Number.isInteger(value.pid)
     && (value.pid as number) > 0
+    && (value.host === undefined || (typeof value.host === "string" && value.host.length > 0))
+    && (value.processStartToken === undefined
+      || (typeof value.processStartToken === "string" && value.processStartToken.length > 0))
+    && ((value.host === undefined) === (value.processStartToken === undefined))
     && typeof value.createdAt === "number"
     && Number.isFinite(value.createdAt)
     && typeof value.heartbeat === "number"
@@ -331,6 +347,12 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   const operationPollMs = Math.max(1, deps.operationPollMs ?? 10);
   const protocolWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
   const host = deps.host ?? hostname;
+  const localProcessIdentity = {
+    host: host(),
+    startToken: (deps.processStartToken ?? (() => PROCESS_START_TOKEN))(),
+  };
+  const processIdentity = deps.processIdentity
+    ?? ((candidatePid: number) => candidatePid === pid() ? localProcessIdentity : null);
   const leaseMs = (deps.leaseMin ?? deps.settings?.leaseMin ?? DEFAULT_MAIN_HEALTH_SETTINGS.leaseMin) * 60_000;
   const tmux = deps.tmux ?? { hasSession };
   const git = deps.git ?? createSpawnGitPort();
@@ -341,7 +363,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   const autoFix = deps.settings?.autoFix ?? DEFAULT_MAIN_HEALTH_SETTINGS.autoFix;
   const fixerRuns = new Map<string, Promise<EnsureFixerResult>>();
   const closingRuns = new Map<string, Promise<Incident | null>>();
-  const atomicWrite = deps.atomicWrite ?? writeJsonAtomic;
+  const atomicWrite = deps.atomicWrite ?? writeJsonFullyAtomic;
   const fs: IncidentFs = {
     close: deps.fs?.close ?? closeSync,
     fsync: deps.fs?.fsync ?? fsyncSync,
@@ -450,6 +472,33 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
       const written = fs.write(fd, data, offset, data.byteLength - offset, offset);
       if (!Number.isInteger(written) || written <= 0) throw new Error("escritura incompleta en filesystem");
       offset += written;
+    }
+  }
+
+  /** Escribe JSON completo y sólo después reemplaza el destino con rename atómico. */
+  function writeJsonFullyAtomic(target: string, value: unknown): void {
+    const temporary = `${target}.atomic-${pid()}-${randomUUID()}`;
+    let fd: number | undefined;
+    let prepared = false;
+    try {
+      fd = fs.open(temporary, "wx");
+      writeFully(fd, `${JSON.stringify(value)}\n`);
+      fs.fsync(fd);
+      prepared = true;
+    } finally {
+      try {
+        if (fd !== undefined) fs.close(fd);
+      } finally {
+        if (!prepared) {
+          try { fs.unlink(temporary); } catch { /* nunca se publica un JSON parcial */ }
+        }
+      }
+    }
+    try {
+      fs.rename(temporary, target);
+    } catch (error) {
+      try { fs.unlink(temporary); } catch { /* conserva el error original de rename */ }
+      throw error;
     }
   }
 
@@ -574,9 +623,15 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   }
 
   function protocolLeaseIsLive(lease: IncidentOperationLease | IncidentCloseLease): boolean {
+    if ("kind" in lease && lease.state === "completed") return false;
     // Un heartbeat atrasado no prueba que la operación terminó: mientras el PID
     // exista, retirar el marker permitiría que el efecto externo se reanudara sin fence.
-    return pidAlive(lease.pid) || now() - lease.heartbeat < operationLeaseMs;
+    if (!pidAlive(lease.pid)) return now() - lease.heartbeat < operationLeaseMs;
+    if (lease.host && lease.processStartToken) {
+      const current = processIdentity(lease.pid);
+      if (current && (current.host !== lease.host || current.startToken !== lease.processStartToken)) return false;
+    }
+    return true;
   }
 
   function waitForProtocol(): Promise<void> {
@@ -682,7 +737,16 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
       const incident = readIncident(repo);
       if (!incident || incident.closingAt !== undefined || readCloseLease(repo)) return null;
       const timestamp = now();
-      const lease: IncidentOperationLease = { token, pid: pid(), kind, createdAt: timestamp, heartbeat: timestamp };
+      const lease: IncidentOperationLease = {
+        token,
+        pid: pid(),
+        host: localProcessIdentity.host,
+        processStartToken: localProcessIdentity.startToken,
+        kind,
+        state: "active",
+        createdAt: timestamp,
+        heartbeat: timestamp,
+      };
       const target = operationFile(repo, token);
       const temporary = `${target}.tmp-${lease.pid}-${token}`;
       if (!publishJsonExclusive(target, temporary, lease)) throw new Error(`operación duplicada: ${token}`);
@@ -701,14 +765,31 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     repo: string,
     operation: { lease: IncidentOperationLease; stopHeartbeat: () => void },
   ): Promise<void> {
+    const completion = await withProtocolMutex(repo, () => {
+      const target = operationFile(repo, operation.lease.token);
+      const current = readOperationLease(target);
+      if (!sameLease(current, operation.lease)) return false;
+      atomicWrite(target, { ...current, state: "completed", heartbeat: now() });
+      return true;
+    });
+    if (!completion.incidentExists || !completion.value) {
+      operation.stopHeartbeat();
+      return;
+    }
+    // Desde aquí close puede retirar el marker aun si este PID sigue vivo.
     operation.stopHeartbeat();
     await withProtocolMutex(repo, () => {
       const target = operationFile(repo, operation.lease.token);
-      if (!sameLease(readOperationLease(target), operation.lease)) return;
-      try {
-        fs.unlink(target);
-      } catch (error) {
-        if (errorCode(error) !== "ENOENT") throw error;
+      const current = readOperationLease(target);
+      if (!sameLease(current, operation.lease) || current?.state !== "completed") return;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          fs.unlink(target);
+          return;
+        } catch (error) {
+          if (errorCode(error) === "ENOENT") return;
+          if (attempt === 1) return;
+        }
       }
     });
   }
@@ -723,14 +804,28 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         const current = readCloseLease(repo);
         if (!current) {
           const timestamp = now();
-          const candidate: IncidentCloseLease = { token, pid: pid(), createdAt: timestamp, heartbeat: timestamp };
+          const candidate: IncidentCloseLease = {
+            token,
+            pid: pid(),
+            host: localProcessIdentity.host,
+            processStartToken: localProcessIdentity.startToken,
+            createdAt: timestamp,
+            heartbeat: timestamp,
+          };
           const target = closeLeaseFile(repo);
           if (publishJsonExclusive(target, `${target}.tmp-${candidate.pid}-${token}`, candidate)) return candidate;
         } else if (!protocolLeaseIsLive(current)) {
           const stale = join(incidentDir(repo), `close.lease.stale-${current.pid}-${current.token}-${now()}`);
           fs.rename(closeLeaseFile(repo), stale);
           const timestamp = now();
-          const candidate: IncidentCloseLease = { token, pid: pid(), createdAt: timestamp, heartbeat: timestamp };
+          const candidate: IncidentCloseLease = {
+            token,
+            pid: pid(),
+            host: localProcessIdentity.host,
+            processStartToken: localProcessIdentity.startToken,
+            createdAt: timestamp,
+            heartbeat: timestamp,
+          };
           const target = closeLeaseFile(repo);
           if (publishJsonExclusive(target, `${target}.tmp-${candidate.pid}-${token}`, candidate)) return candidate;
         }

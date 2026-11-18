@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -496,17 +496,23 @@ test("recupera mutex vencido aunque el PID haya sido reutilizado y siga vivo", (
 test("publicación indivisible del mutex nunca deja JSON parcial visible", () => {
   withRoot((root) => {
     const directory = join(root, "incidents", "api");
+    let failWrites = false;
     const manager = createIncidentManager({
       root,
       pid: () => 44,
       mutexToken: () => "token-falla-44444444",
       fs: {
-        write() {
-          throw new Error("falla al preparar mutex");
+        write(fd, buffer, offset, length, position) {
+          if (failWrites) throw new Error("falla al preparar mutex");
+          const data = typeof buffer === "string" ? Buffer.from(buffer) : buffer as Uint8Array;
+          const start = typeof offset === "number" ? offset : 0;
+          const requested = typeof length === "number" ? length : data.byteLength - start;
+          return writeSync(fd, data, start, requested, typeof position === "number" ? position : null);
         },
       },
     });
     manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    failWrites = true;
 
     assert.throws(() => manager.claimOwner("api", "cowork-a"), /falla al preparar mutex/);
     assert.equal(existsSync(join(directory, "owner.mutex.json")), false);
@@ -1125,6 +1131,148 @@ test("close nunca roba una operación cuyo PID sigue vivo aunque venza el heartb
     operationAlive = false;
     const closed = await closing;
     assert.equal(closed?.repo, "api");
+  });
+});
+
+test("close recupera marker stale cuando el PID vivo pertenece a otro nacimiento", async () => {
+  await withRootAsync(async (root) => {
+    let pidStillAlive = true;
+    const manager = createIncidentManager({
+      root,
+      now: () => 10_000,
+      pid: () => 1_311,
+      pidAlive: () => pidStillAlive,
+      processStartToken: () => "birth-new",
+      processIdentity: () => ({ host: "host-a", startToken: "birth-new" }),
+      host: () => "host-a",
+      operationLeaseMs: 100,
+      operationPollMs: 1,
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    const directory = join(root, "incidents", "api");
+    const operationToken = "reused-pid-operation";
+    writeFileSync(join(directory, `operation-${operationToken}.json`), JSON.stringify({
+      token: operationToken,
+      pid: 1_311,
+      host: "host-a",
+      processStartToken: "birth-old",
+      kind: "claim",
+      createdAt: 1_000,
+      heartbeat: 1_000,
+    }));
+
+    let settled = false;
+    const closing = manager.closeIncident("api");
+    void closing.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const recoveredWhilePidWasAlive = settled;
+    pidStillAlive = false;
+    await closing;
+
+    assert.equal(recoveredWhilePidWasAlive, true);
+  });
+});
+
+test("release reintenta unlink transitorio y no deja marker vivo bloqueando close", async () => {
+  await withRootAsync(async (root) => {
+    let operationUnlinkAttempts = 0;
+    const claimSha = "c".repeat(40);
+    const manager = createIncidentManager({
+      root,
+      pidAlive: () => true,
+      fs: {
+        unlink(path) {
+          if (/\/operation-[^/]+\.json$/.test(String(path))) {
+            operationUnlinkAttempts += 1;
+            if (operationUnlinkAttempts <= 2) {
+              const error = new Error("unlink transitorio") as NodeJS.ErrnoException;
+              error.code = "EIO";
+              throw error;
+            }
+          }
+          unlinkSync(path);
+        },
+      },
+      git: {
+        async run(args) {
+          if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+          if (args[0] === "commit-tree") return `${claimSha}\n`;
+          if (args[0] === "ls-remote") return `${claimSha}\trefs/heads/fix/main-health-api\n`;
+          if (args[0] === "push") return "";
+          throw new Error(`Git inesperado: ${args.join(" ")}`);
+        },
+      },
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    await manager.claimRemote("api", "/repo");
+    const closed = await manager.closeIncident("api", "/repo");
+
+    assert.equal(operationUnlinkAttempts, 3);
+    assert.equal(closed?.repo, "api");
+  });
+});
+
+test("incident y heartbeat de protocolo completan short writes con JSON legible", async () => {
+  await withRootAsync(async (root) => {
+    let incidentSnapshot: unknown;
+    let heartbeatSnapshot: unknown;
+    let reportPush: () => void = () => {};
+    let releasePush: () => void = () => {};
+    const pushStarted = new Promise<void>((resolve) => { reportPush = resolve; });
+    const pushGate = new Promise<void>((resolve) => { releasePush = resolve; });
+    const manager = createIncidentManager({
+      root,
+      operationLeaseMs: 1,
+      fs: {
+        write(fd, buffer, offset, length, position) {
+          const data = typeof buffer === "string" ? Buffer.from(buffer) : buffer as Uint8Array;
+          const start = typeof offset === "number" ? offset : 0;
+          const requested = typeof length === "number" ? length : data.byteLength - start;
+          return writeSync(fd, data, start, Math.min(requested, 3), typeof position === "number" ? position : null);
+        },
+        rename(oldPath, newPath) {
+          const oldName = String(oldPath);
+          const newName = String(newPath);
+          if (oldName.includes(".atomic-") && newName.endsWith("/incident.json")) {
+            incidentSnapshot = JSON.parse(readFileSync(oldPath, "utf8"));
+          }
+          if (oldName.includes(".atomic-") && /\/operation-[^/]+\.json$/.test(newName)) {
+            const parsed = JSON.parse(readFileSync(oldPath, "utf8"));
+            if (parsed.state === "active") heartbeatSnapshot = parsed;
+          }
+          renameSync(oldPath, newPath);
+        },
+      },
+      git: {
+        async run(args) {
+          if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+          if (args[0] === "commit-tree") return `${"c".repeat(40)}\n`;
+          if (args[0] === "push") {
+            reportPush();
+            await pushGate;
+            return "";
+          }
+          throw new Error(`Git inesperado: ${args.join(" ")}`);
+        },
+      },
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    const claiming = manager.claimRemote("api", "/repo");
+    await pushStarted;
+    for (let turn = 0; turn < 1_000 && !heartbeatSnapshot; turn += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    releasePush();
+    await claiming;
+
+    assert.equal((incidentSnapshot as { repo?: string } | undefined)?.repo, "api");
+    assert.equal((heartbeatSnapshot as { state?: string } | undefined)?.state, "active");
+    assert.deepEqual(
+      readdirSync(join(root, "incidents", "api")).filter((entry) => entry.includes(".atomic-")),
+      [],
+    );
   });
 });
 
