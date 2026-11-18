@@ -121,6 +121,23 @@ UNIT_GATE_RECORD_BASE=1 scripts/unit-gate.sh <checkout-de-main>
 Ese modo corre la suite completa, registra `{sha, tree, total, at}` y sale con el veredicto de la
 regla 3, sin exigir cambios de rama ni aplicar el piso que precisamente se está heredando.
 
+### Tests rojos heredados de main
+
+Cuando una rama encuentra tests rojos, el gate consulta la medición de su `merge-base` en
+`MAIN_HEALTH_DIR/<repo-remoto>/<sha>.json` (por defecto
+`~/.cowork/main-health/<repo>/<sha>.json`). El nombre del repo sale de `origin`, no del nombre del
+worktree. Si todos los failures y errors de la rama ya estaban rojos en esa base, los reporta como
+`heredado de main`, muestra el incidente y su dueño cuando existen, y continúa con las reglas de
+tests tocados y cobertura. Esto no vuelve permisivo al gate: un test rojo nuevo falla, y una rama
+con rojas heredadas también falla si su cobertura total baja respecto a la medición de la base.
+El HEAD de una rama con rojas heredadas no se registra como nueva base.
+
+Sin medición, el gate intenta crearla con `scripts/main-health.sh <repo> --sha <merge-base>` y el
+lock de esa herramienta evita duplicar la suite. Para desactivar esa medición automática —por
+ejemplo, en pruebas herméticas— se usa `UNIT_GATE_MAIN_HEALTH_AUTO=0`; en ese modo la ausencia de
+la medición falla cerrado. `MAIN_HEALTH_DIR` permite aislar tanto la lectura como la escritura de
+esta caché.
+
 ### Dónde está el código de producto
 
 `scripts/gate-source-dirs.sh` (`source_dirs <repo>`), compartido con `i18n-gate.sh`, decide por repo:
