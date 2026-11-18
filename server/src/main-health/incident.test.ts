@@ -84,24 +84,25 @@ test("resuelve root configurable y rechaza repo o SHA inseguros", () => {
   });
 });
 
-test("rechaza incident.json cuyo id no corresponde al repo y SHA", () => {
-  withRoot((root) => {
+test("rechaza incident.json cuyo id no corresponde al repo y SHA", async () => {
+  await withRootAsync(async (root) => {
     const manager = createIncidentManager({ root });
     const incident = manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
     writeFileSync(join(root, "incidents", "api", "incident.json"), JSON.stringify({ ...incident, id: "../../escape" }));
 
     assert.equal(manager.readIncident("api"), null);
+    assert.equal(await manager.closeIncident("api"), null);
   });
 });
 
-test("cierra y archiva el incidente actual; cerrar de nuevo es no-op", () => {
-  withRoot((root) => {
+test("cierra y archiva el incidente actual; cerrar de nuevo es no-op", async () => {
+  await withRootAsync(async (root) => {
     let now = 2_000;
     const manager = createIncidentManager({ root, now: () => now });
     const opened = manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
     now = 3_000;
 
-    const closed = manager.closeIncident("api");
+    const closed = await manager.closeIncident("api");
 
     assert.deepEqual(closed, { ...opened, closedAt: 3_000 });
     assert.equal(manager.readIncident("api"), null);
@@ -109,7 +110,7 @@ test("cierra y archiva el incidente actual; cerrar de nuevo es no-op", () => {
       JSON.parse(readFileSync(join(root, "incidents", "api.closed", `${opened.id}-3000`, "incident.json"), "utf8")),
       closed,
     );
-    assert.equal(manager.closeIncident("api"), null);
+    assert.equal(await manager.closeIncident("api"), null);
   });
 });
 
@@ -589,8 +590,11 @@ test("claim remoto crea una sola rama y anota al ganador cuando el push es recha
     assert.match(message, /111/);
     assert.match(message, /2023-11-14T22:13:20.000Z/);
     assert.equal(git(remoteDir, "rev-parse", "refs/heads/fix/main-health-api"), accepted.claimSha);
+    assert.equal(first.readIncident("api")?.claimSha, accepted.claimSha);
+    assert.equal(first.readIncident("api")?.claimBranch, "fix/main-health-api");
 
-    const second = createIncidentManager({ root: join(root, "health"), now: () => 1_700_000_001_000, pid: () => 222, host: () => "host-b" });
+    const second = createIncidentManager({ root: join(root, "health-contender"), now: () => 1_700_000_001_000, pid: () => 222, host: () => "host-b" });
+    second.openIncident({ repo: "api", firstRedSha: redSha, summary: "rojo", attribution: { ...ATTRIBUTION, redSha } });
     const rejected = await second.claimRemote("api", repoDir);
     assert.deepEqual(rejected, {
       accepted: false,
@@ -601,6 +605,119 @@ test("claim remoto crea una sola rama y anota al ganador cuando el push es recha
     assert.notEqual(rejected.claimSha, accepted.claimSha);
     assert.equal(second.readIncident("api")?.remoteOwner, accepted.claimSha);
     assert.equal(git(remoteDir, "rev-parse", "refs/heads/fix/main-health-api"), accepted.claimSha);
+  });
+});
+
+test("ensureFixer reutiliza claim propio si el primer launch falla", async () => {
+  await withRootAsync(async (root) => {
+    const claimSha = "c".repeat(40);
+    let commits = 0;
+    let pushes = 0;
+    let launches = 0;
+    const sessions = new Set<string>();
+    const gitPort: IncidentGitPort = {
+      async run(args) {
+        if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+        if (args[0] === "commit-tree") { commits += 1; return `${claimSha}\n`; }
+        if (args[0] === "push") { pushes += 1; return ""; }
+        if (args[0] === "ls-remote") return `${claimSha}\trefs/heads/fix/main-health-api\n`;
+        throw new Error(`Git inesperado: ${args.join(" ")}`);
+      },
+    };
+    const manager = createIncidentManager({
+      root,
+      pid: () => 801,
+      settings: { aliases: {}, autoFix: true, remoteClaim: true },
+      tmux: { hasSession: async (session) => sessions.has(session) },
+      git: gitPort,
+      launch: {
+        async launchManagedSession(input) {
+          launches += 1;
+          if (launches === 1) throw new Error("launch temporal");
+          const name = `cowork-${input.name}`;
+          sessions.add(name);
+          return { name };
+        },
+      },
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    await assert.rejects(() => manager.ensureFixer("api", "/repo"), /launch temporal/);
+    const second = await manager.ensureFixer("api", "/repo");
+
+    assert.deepEqual(second, { status: "launched", session: "cowork-main-health-api" });
+    assert.equal(commits, 1);
+    assert.equal(pushes, 1);
+    assert.equal(launches, 2);
+    assert.equal(manager.readIncident("api")?.claimSha, claimSha);
+    assert.equal(manager.readIncident("api")?.remoteOwner, undefined);
+  });
+});
+
+test("claim propio vuelve a publicar el mismo SHA si la rama remota desaparece", async () => {
+  await withRootAsync(async (root) => {
+    const claimSha = "c".repeat(40);
+    let remoteSha: string | null = null;
+    let commits = 0;
+    let pushes = 0;
+    const manager = createIncidentManager({
+      root,
+      git: {
+        async run(args) {
+          if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+          if (args[0] === "commit-tree") { commits += 1; return `${claimSha}\n`; }
+          if (args[0] === "push") { pushes += 1; remoteSha = args[2]!.split(":", 1)[0]!; return ""; }
+          if (args[0] === "ls-remote") return remoteSha ? `${remoteSha}\trefs/heads/fix/main-health-api\n` : "";
+          throw new Error(`Git inesperado: ${args.join(" ")}`);
+        },
+      },
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    const first = await manager.claimRemote("api", "/repo");
+    remoteSha = null;
+    const repeated = await manager.claimRemote("api", "/repo");
+
+    assert.deepEqual(repeated, first);
+    assert.equal(commits, 1);
+    assert.equal(pushes, 2);
+  });
+});
+
+test("close retira sólo claim propio y un incidente posterior puede reclamar", async () => {
+  await withRootAsync(async (root) => {
+    const repoDir = join(root, "repo-close");
+    const remoteDir = join(root, "remote-close.git");
+    git(root, "init", "--bare", remoteDir);
+    git(root, "init", "-b", "main", repoDir);
+    git(repoDir, "config", "user.name", "Ada Tester");
+    git(repoDir, "config", "user.email", "ada@example.com");
+    writeFileSync(join(repoDir, "README.md"), "uno\n");
+    git(repoDir, "add", "README.md");
+    git(repoDir, "commit", "-m", "chore: uno");
+    const firstRed = git(repoDir, "rev-parse", "HEAD");
+    git(repoDir, "remote", "add", "origin", remoteDir);
+    const manager = createIncidentManager({ root: join(root, "health"), pid: () => 901 });
+    manager.openIncident({ repo: "api", firstRedSha: firstRed, summary: "rojo uno", attribution: { ...ATTRIBUTION, redSha: firstRed } });
+    const firstClaim = await manager.claimRemote("api", repoDir);
+
+    await assert.rejects(() => manager.closeIncident("api"), /repoDir.*claim/i);
+    assert.equal(manager.readIncident("api")?.claimSha, firstClaim.claimSha);
+
+    await manager.closeIncident("api", repoDir);
+
+    assert.equal(git(repoDir, "ls-remote", "origin", "refs/heads/fix/main-health-api"), "");
+    writeFileSync(join(repoDir, "README.md"), "dos\n");
+    git(repoDir, "commit", "-am", "chore: dos");
+    const secondRed = git(repoDir, "rev-parse", "HEAD");
+    manager.openIncident({ repo: "api", firstRedSha: secondRed, summary: "rojo dos", attribution: { ...ATTRIBUTION, redSha: secondRed } });
+    const secondClaim = await manager.claimRemote("api", repoDir);
+    assert.equal(secondClaim.accepted, true);
+    assert.notEqual(secondClaim.claimSha, firstClaim.claimSha);
+
+    git(repoDir, "push", "--force", "origin", `${secondRed}:refs/heads/fix/main-health-api`);
+    await manager.closeIncident("api", repoDir);
+    assert.equal(git(repoDir, "ls-remote", "origin", "refs/heads/fix/main-health-api").split(/\s+/)[0], secondRed);
   });
 });
 

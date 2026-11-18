@@ -575,6 +575,37 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     atomicWrite(join(incidentDir(incident.repo), "incident.json"), incident);
   }
 
+  async function readRemoteClaim(repoDir: string, branch: string): Promise<string | null> {
+    const output = (await git.run(
+      ["ls-remote", "origin", `refs/heads/${branch}`],
+      repoDir,
+      { env: gitEnv },
+    )).trim();
+    if (!output) return null;
+    const remoteSha = output.split(/\s+/, 1)[0] ?? "";
+    if (!SAFE_SHA.test(remoteSha)) throw new Error("Git devolvió un owner remoto inválido");
+    return remoteSha;
+  }
+
+  function persistOwnClaim(incident: Incident, claimSha: string, branch: string): Incident {
+    const current = readIncident(incident.repo);
+    if (!current || current.id !== incident.id) throw new Error(`el incidente cambió durante el claim: ${incident.repo}`);
+    const stored: Incident = {
+      ...current,
+      claimSha,
+      claimBranch: branch,
+    };
+    delete stored.remoteOwner;
+    storeIncident(stored);
+    return stored;
+  }
+
+  function persistRemoteOwner(incident: Incident, remoteOwner: string): void {
+    const current = readIncident(incident.repo);
+    if (!current || current.id !== incident.id) throw new Error(`el incidente cambió durante el claim: ${incident.repo}`);
+    storeIncident({ ...current, remoteOwner });
+  }
+
   function rewriteOwnedOwner(repo: string, expected: IncidentOwner, session: string): boolean {
     if (!SAFE_SESSION.test(session)) throw new Error(`sesión inválida devuelta por launch: ${session}`);
     const mutex = acquireOwnerMutex(repo, expected.pid);
@@ -617,6 +648,32 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     const incident = readIncident(repo);
     if (!incident) throw new Error(`no hay incidente abierto: ${repo}`);
     const branch = `fix/main-health-${repo}`;
+    if (incident.claimSha && incident.claimBranch) {
+      const remoteOwner = await readRemoteClaim(repoDir, branch);
+      if (remoteOwner === incident.claimSha) {
+        if (incident.remoteOwner) persistOwnClaim(incident, incident.claimSha, branch);
+        return { accepted: true, branch, claimSha: incident.claimSha };
+      }
+      if (remoteOwner) {
+        persistRemoteOwner(incident, remoteOwner);
+        return { accepted: false, branch, claimSha: incident.claimSha, remoteOwner };
+      }
+      try {
+        await git.run(["push", "origin", `${incident.claimSha}:refs/heads/${branch}`], repoDir, { env: gitEnv });
+        persistOwnClaim(incident, incident.claimSha, branch);
+        return { accepted: true, branch, claimSha: incident.claimSha };
+      } catch (error) {
+        if (!isRemoteClaimConflict(error)) throw error;
+        const winner = await readRemoteClaim(repoDir, branch);
+        if (winner === incident.claimSha) {
+          persistOwnClaim(incident, incident.claimSha, branch);
+          return { accepted: true, branch, claimSha: incident.claimSha };
+        }
+        if (!winner) throw new Error("claim remoto rechazado sin owner resoluble");
+        persistRemoteOwner(incident, winner);
+        return { accepted: false, branch, claimSha: incident.claimSha, remoteOwner: winner };
+      }
+    }
     const timestamp = now();
     const isoDate = new Date(timestamp).toISOString();
     const tree = (await git.run(["rev-parse", `${incident.firstRedSha}^{tree}`], repoDir)).trim();
@@ -648,13 +705,19 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     assertSha(claimSha);
     try {
       await git.run(["push", "origin", `${claimSha}:refs/heads/${branch}`], repoDir, { env: gitEnv });
+      // El claim durable debe existir antes de que ensureFixer intente lanzar la sesión.
+      persistOwnClaim(incident, claimSha, branch);
       return { accepted: true, branch, claimSha };
     } catch (error) {
       if (!isRemoteClaimConflict(error)) throw error;
-      const remoteLine = (await git.run(["ls-remote", "origin", `refs/heads/${branch}`], repoDir, { env: gitEnv })).trim();
-      const remoteOwner = remoteLine.split(/\s+/, 1)[0] ?? "";
-      if (!SAFE_SHA.test(remoteOwner)) throw new Error("claim remoto rechazado sin owner resoluble");
-      storeIncident({ ...incident, remoteOwner });
+      const remoteOwner = await readRemoteClaim(repoDir, branch);
+      if (!remoteOwner) throw new Error("claim remoto rechazado sin owner resoluble");
+      const current = readIncident(repo);
+      if (current?.id === incident.id && current.claimSha === remoteOwner && current.claimBranch === branch) {
+        persistOwnClaim(current, remoteOwner, branch);
+        return { accepted: true, branch, claimSha: remoteOwner };
+      }
+      persistRemoteOwner(incident, remoteOwner);
       return { accepted: false, branch, claimSha, remoteOwner };
     }
   }
@@ -721,7 +784,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         workflowId: "claude-plan-codex-impl",
         name: logicalName,
         mode: "workflow",
-        request: fixerRequest(incident, branch),
+        request: fixerRequest(readIncident(repo) ?? incident, branch),
       });
       if (!rewriteOwnedOwner(repo, ownership.owner, launched.name)) {
         throw new Error(`se perdió el owner antes de registrar la sesión ${launched.name}`);
@@ -779,15 +842,35 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
       .sort((left, right) => left.repo.localeCompare(right.repo));
   }
 
-  function closeIncident(repo: string): Incident | null {
+  async function closeIncident(repo: string, repoDir?: string): Promise<Incident | null> {
     if (!safeRepo(repo)) return null;
     const current = readIncident(repo);
     if (!current) return null;
+    if (current.claimSha && current.claimBranch) {
+      if (!repoDir) throw new Error(`repoDir es obligatorio para cerrar un claim propio: ${repo}`);
+      const remoteOwner = await readRemoteClaim(repoDir, current.claimBranch);
+      if (remoteOwner === current.claimSha) {
+        const ref = `refs/heads/${current.claimBranch}`;
+        try {
+          await git.run([
+            "push",
+            `--force-with-lease=${ref}:${current.claimSha}`,
+            "origin",
+            `:${ref}`,
+          ], repoDir, { env: gitEnv });
+        } catch (error) {
+          if (!isRemoteClaimConflict(error)) throw error;
+          const afterConflict = await readRemoteClaim(repoDir, current.claimBranch);
+          if (afterConflict === current.claimSha) throw error;
+        }
+      }
+    }
     const closed: Incident = { ...current, closedAt: now() };
     atomicWrite(join(incidentDir(repo), "incident.json"), closed);
     const archiveParent = join(incidentsRoot, `${repo}.closed`);
     fs.mkdir(archiveParent, { recursive: true });
-    fs.rename(incidentDir(repo), join(archiveParent, `${current.id}-${closed.closedAt}`));
+    const archiveId = `${repo}@${current.firstRedSha.slice(0, 7)}`;
+    fs.rename(incidentDir(repo), join(archiveParent, `${archiveId}-${closed.closedAt}`));
     return clone(closed);
   }
 
