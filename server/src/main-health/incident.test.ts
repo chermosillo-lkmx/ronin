@@ -634,6 +634,7 @@ test("ensureFixer reutiliza claim propio si el primer launch falla", async () =>
     const manager = createIncidentManager({
       root,
       pid: () => 801,
+      workflowId: () => "wf-reintento",
       settings: { aliases: {}, autoFix: true, remoteClaim: true },
       tmux: { hasSession: async (session) => sessions.has(session) },
       git: gitPort,
@@ -641,7 +642,7 @@ test("ensureFixer reutiliza claim propio si el primer launch falla", async () =>
         async launchManagedSession(input) {
           launches += 1;
           if (launches === 1) throw new Error("launch temporal");
-          const name = `cowork-${input.name}`;
+          const name = input.name;
           sessions.add(name);
           return { name };
         },
@@ -950,6 +951,7 @@ test("close externo espera launch y rewrite de owner antes de archivar", async (
       now: () => now,
       pid: () => 1_101,
       pidAlive: () => true,
+      workflowId: () => "wf-close",
       settings: { aliases: {}, autoFix: true, remoteClaim: false },
       tmux: { hasSession: async (session) => sessions.has(session) },
       launch: {
@@ -957,7 +959,7 @@ test("close externo espera launch y rewrite de owner antes de archivar", async (
           launches += 1;
           reportLaunch();
           await launchGate;
-          const session = `cowork-${input.name}`;
+          const session = input.name;
           sessions.add(session);
           return { name: session };
         },
@@ -1518,6 +1520,7 @@ test("ensureFixer adopta sesión por alias aun con autoFix apagado", async () =>
       root,
       pid: () => 501,
       now: () => 5_000,
+      workflowId: () => { throw new Error("no debe resolver workflow al adoptar"); },
       settings: { aliases: { "repo-largo": "api" }, autoFix: false, remoteClaim: true },
       tmux: { hasSession: async (session) => session === "cowork-main-health-api" },
       launch: { launchManagedSession: async (input) => { launches.push(input); return { name: `cowork-${input.name}` }; } },
@@ -1540,12 +1543,13 @@ test("ensureFixer lanza una sola vez con request completo cuando remoteClaim est
       root,
       pid: () => 601,
       now: () => 6_000,
+      workflowId: () => "wf-estable-resuelto",
       settings: { aliases: { "repo-largo": "api" }, autoFix: true, remoteClaim: false },
       tmux: { hasSession: async (session) => sessions.has(session) },
       launch: {
         launchManagedSession: async (input) => {
           launches.push(input);
-          const name = `cowork-${input.name}`;
+          const name = input.name;
           sessions.add(name);
           return { name };
         },
@@ -1561,8 +1565,8 @@ test("ensureFixer lanza una sola vez con request completo cuando remoteClaim est
     assert.equal(launches.length, 1);
     assert.deepEqual({ ...launches[0], request: undefined }, {
       repo: "repo-largo",
-      workflowId: "claude-plan-codex-impl",
-      name: "main-health-api",
+      workflowId: "wf-estable-resuelto",
+      name: "cowork-main-health-api",
       mode: "workflow",
       request: undefined,
     });
@@ -1570,6 +1574,37 @@ test("ensureFixer lanza una sola vez con request completo cuando remoteClaim est
     assert.match(launches[0].request, /fix\/main-health-repo-largo/);
     assert.match(launches[0].request, /sin medición verde previa/);
     assert.equal(manager.readOwner("repo-largo")?.session, "cowork-main-health-api");
+  });
+});
+
+test("ensureFixer falla cerrado sin workflow y libera owner para reintento", async () => {
+  await withRootAsync(async (root) => {
+    let resolved: string | null = null;
+    let launches = 0;
+    const manager = createIncidentManager({
+      root,
+      pid: () => 602,
+      workflowId: () => resolved,
+      settings: { aliases: {}, autoFix: true, remoteClaim: false },
+      tmux: { hasSession: async () => false },
+      launch: {
+        launchManagedSession: async (input) => {
+          launches += 1;
+          return { name: input.name };
+        },
+      },
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    await assert.rejects(() => manager.ensureFixer("api", "/repo"), /workflow.*no disponible/i);
+    assert.equal(launches, 0);
+    assert.equal(manager.readOwner("api"), null, "un resolver fallido no deja ownership bloqueado");
+
+    resolved = "wf-recuperado";
+    assert.deepEqual(await manager.ensureFixer("api", "/repo"), {
+      status: "launched", session: "cowork-main-health-api",
+    });
+    assert.equal(launches, 1);
   });
 });
 

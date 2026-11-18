@@ -13,6 +13,7 @@ import { VERIFY_GATE } from "./config.js";
 import { createApp, runConfiguredClaude, startServer } from "./index.js";
 import * as indexModule from "./index.js";
 import type { MainHealthWatcher } from "./main-health/watcher.js";
+import { createIncidentManager } from "./main-health/incident.js";
 import type { TelegramRuntime } from "./telegram/service.js";
 import type { Update } from "./telegram/api.js";
 import { createTelegramStore } from "./telegram/store.js";
@@ -575,6 +576,154 @@ test("launch temprano de Telegram espera listen y la configuración MCP lista", 
   ]);
   assert.equal(startedCommand, 'claude --mcp-config "/tmp/agent ready.json"');
   await handle.close();
+});
+
+test("fixer temprano usa el launch preparado y espera readiness con workflow estable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ronin-main-health-launch-"));
+  const listenReady = deferred<any>();
+  const events: string[] = [];
+  let fixing!: Promise<unknown>;
+  let launchedInput: Record<string, unknown> | undefined;
+  let startedCommand = "";
+  const server = {
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 44001 }),
+    close: (callback: (error?: Error) => void) => callback(),
+  };
+  try {
+    const starting = startServer({
+      deps: {
+        createApp: (options) => createApp({
+          ...options,
+          telegram: fakeTelegram(events),
+          createMainHealthRuntime: (_app: unknown, launch: any) => {
+            const manager = createIncidentManager({
+              root,
+              workflowId: () => "wf-estable-fixture",
+              settings: { aliases: {}, autoFix: true, remoteClaim: false },
+              tmux: { hasSession: async () => false },
+              launch: { launchManagedSession: launch },
+            });
+            manager.openIncident({
+              repo: "api",
+              firstRedSha: "a".repeat(40),
+              summary: "main rojo",
+              attribution: {
+                status: "no_prior_green",
+                reason: "sin verde",
+                redSha: "a".repeat(40),
+                greenSha: null,
+                commits: [],
+                culpritShas: [],
+                newRed: [],
+                unattributedRed: [],
+              },
+            });
+            const router = Router();
+            return {
+              router,
+              watcher: fakeMainHealthWatcher({
+                start: () => { fixing = manager.ensureFixer("api", "/repo"); void fixing.catch(() => undefined); },
+              }),
+            };
+          },
+        } as any),
+        startBackground: async (app) => {
+          app.locals.mainHealthWatcher.start();
+          return async () => { await app.locals.mainHealthWatcher.stop(); };
+        },
+        listen: async () => listenReady.promise,
+        launchManagedSession: (async (input: Record<string, unknown>, injected: any) => {
+          events.push("launch:real");
+          launchedInput = input;
+          startedCommand = injected.startCommandFor("claude");
+          return { name: input.name };
+        }) as any,
+        writeMcpConfig: () => "/tmp/main health mcp.json",
+      },
+    });
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(launchedInput, undefined, "el fixer no cruza readiness antes de listen/MCP");
+    listenReady.resolve(server);
+    const handle = await starting;
+    await fixing;
+    assert.equal(launchedInput?.workflowId, "wf-estable-fixture");
+    assert.equal(launchedInput?.name, "cowork-main-health-api");
+    assert.equal(startedCommand, 'claude --mcp-config "/tmp/main health mcp.json"');
+    await handle.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolver main-health obtiene por nombre el ID estable del catálogo", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ronin-main-health-workflow-"));
+  try {
+    const { createWorkflowCatalogItem } = await import("./workflow-catalog.js");
+    const item = createWorkflowCatalogItem("claude-plan-codex-impl", {
+      stages: [{ key: "plan", label: "Plan", icon: "P" }],
+      verifyAfter: [],
+    }, directory);
+    const resolveWorkflowId = (indexModule as any).resolveMainHealthWorkflowId;
+    assert.equal(typeof resolveWorkflowId, "function");
+    assert.equal(resolveWorkflowId(directory), item.id);
+    assert.notEqual(resolveWorkflowId(directory), "claude-plan-codex-impl");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fallo de boot rechaza fixer temprano sin llamar launch real", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ronin-main-health-launch-fail-"));
+  let fixing!: Promise<unknown>;
+  let launches = 0;
+  try {
+    const starting = startServer({
+      deps: {
+        createApp: (options) => createApp({
+          ...options,
+          telegram: fakeTelegram(),
+          createMainHealthRuntime: (_app: unknown, launch: any) => {
+            const manager = createIncidentManager({
+              root,
+              workflowId: () => "wf-estable-fixture",
+              settings: { aliases: {}, autoFix: true, remoteClaim: false },
+              tmux: { hasSession: async () => false },
+              launch: { launchManagedSession: launch },
+            });
+            manager.openIncident({
+              repo: "api",
+              firstRedSha: "a".repeat(40),
+              summary: "main rojo",
+              attribution: {
+                status: "no_prior_green", reason: "sin verde", redSha: "a".repeat(40), greenSha: null,
+                commits: [], culpritShas: [], newRed: [], unattributedRed: [],
+              },
+            });
+            return {
+              router: Router(),
+              watcher: fakeMainHealthWatcher({
+                start: () => { fixing = manager.ensureFixer("api", "/repo"); void fixing.catch(() => undefined); },
+              }),
+            };
+          },
+        } as any),
+        startBackground: async (app) => {
+          app.locals.mainHealthWatcher.start();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          throw new Error("boot roto");
+        },
+        listen: async () => { throw new Error("no debe escuchar"); },
+        launchManagedSession: (async () => { launches += 1; return { name: "no" }; }) as any,
+      },
+    });
+
+    await assert.rejects(starting, /boot roto/);
+    await assert.rejects(fixing, /servidor no disponible/);
+    assert.equal(launches, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("fallo de startup rechaza launch temprano y después detiene Telegram", async () => {

@@ -75,7 +75,7 @@ import { createProposalStore, type ProposalStore } from "./workflow-insights/sto
 import { generateKb, readKbGenerationState, scanKb, zipKb } from "./kb.js";
 import { cleanupSession, realCleanupDeps, type CleanupReport } from "./session-cleanup.js";
 import { attributeMainHealth } from "./main-health/attribution.js";
-import { createIncidentManager } from "./main-health/incident.js";
+import { createIncidentManager, type IncidentLaunchPort } from "./main-health/incident.js";
 import { createMainHealthNotifier } from "./main-health/notify.js";
 import { createMainHealthRouter } from "./main-health/routes.js";
 import { createMainHealthStore } from "./main-health/store.js";
@@ -192,6 +192,11 @@ export interface CreateAppOptions {
   telegramDeps?: Partial<TelegramRuntimeDeps>;
   /** Runtime main-health ya aislado; evita filesystem/Git/tmux reales en pruebas. */
   mainHealth?: { watcher: MainHealthWatcher; router: express.Router };
+  /** Factory aislable que recibe exactamente el launch gestionado de este app. */
+  createMainHealthRuntime?: (
+    app: express.Express,
+    launch: IncidentLaunchPort["launchManagedSession"],
+  ) => { watcher: MainHealthWatcher; router: express.Router };
   /** Costuras de las rutas KB para pruebas HTTP con un repositorio temporal. */
   kb?: {
     listRepos?: typeof listRepos;
@@ -268,11 +273,27 @@ export function createMainHealthPullRequestCommenter(
   };
 }
 
-function defaultMainHealthRuntime(app: express.Express): { watcher: MainHealthWatcher; router: express.Router } {
+const MAIN_HEALTH_WORKFLOW_NAME = "claude-plan-codex-impl";
+
+export function resolveMainHealthWorkflowId(catalogDirectory?: string): string | null {
+  return loadWorkflowCatalog(catalogDirectory).items.find(
+    ({ name }) => name === MAIN_HEALTH_WORKFLOW_NAME,
+  )?.id ?? null;
+}
+
+function defaultMainHealthRuntime(
+  app: express.Express,
+  launchManagedSession: IncidentLaunchPort["launchManagedSession"],
+  catalogDirectory?: string,
+): { watcher: MainHealthWatcher; router: express.Router } {
   const readSettings = () => readMainHealthSettings();
   const settings = readSettings();
   const store = createMainHealthStore();
-  const incidents = createIncidentManager({ settings });
+  const incidents = createIncidentManager({
+    settings,
+    workflowId: () => resolveMainHealthWorkflowId(catalogDirectory),
+    launch: { launchManagedSession },
+  });
   const telegram = app.locals.telegram as TelegramRuntime;
   const watcher = createMainHealthWatcher({
     readSettings,
@@ -432,7 +453,11 @@ app.use("/api/telegram", createTelegramRouter({
   createApi: options.telegramDeps?.createApi ?? ((token) => createTelegramApi(token)),
   now: options.telegramDeps?.now,
 }));
-const mainHealth = options.mainHealth ?? defaultMainHealthRuntime(app);
+const createMainHealth = options.createMainHealthRuntime
+  ?? ((runtimeApp: express.Express, launch: IncidentLaunchPort["launchManagedSession"]) => (
+    defaultMainHealthRuntime(runtimeApp, launch, catalogDirectory)
+  ));
+const mainHealth = options.mainHealth ?? createMainHealth(app, performLaunchManagedSession);
 app.locals.mainHealthWatcher = mainHealth.watcher;
 app.use("/api/main-health", mainHealth.router);
 const mcpMemory = options.mcpMemory ?? createMemoryPort(memoryApi.store());

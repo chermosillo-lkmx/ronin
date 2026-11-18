@@ -73,7 +73,7 @@ export interface RemoteClaimResult {
 
 export interface IncidentLaunchInput {
   repo: string;
-  workflowId: "claude-plan-codex-impl";
+  workflowId: string;
   name: string;
   mode: "workflow";
   request: string;
@@ -122,6 +122,7 @@ export interface IncidentManagerDeps {
   git?: IncidentGitPort;
   gitEnv?: Readonly<NodeJS.ProcessEnv>;
   settings?: Partial<Pick<MainHealthSettings, "aliases" | "remoteClaim" | "autoFix" | "leaseMin">>;
+  workflowId?: () => string | null;
   launch?: IncidentLaunchPort;
   fs?: Partial<IncidentFs>;
   atomicWrite?: (target: string, value: unknown) => void;
@@ -338,8 +339,7 @@ export function createSpawnGitPort(): IncidentGitPort {
 
 const defaultLaunchPort: IncidentLaunchPort = {
   async launchManagedSession(input) {
-    // El puerto del manager usa el nombre lógico pedido; el launcher general exige prefijo cowork-.
-    return launchRealSession({ ...input, name: `cowork-${input.name}` });
+    return launchRealSession(input);
   },
 };
 
@@ -1292,10 +1292,13 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         return { status: "busy", session: null };
       }
       const launched = await runWithIncidentOperation(repo, launchOperation, async () => {
+        const resolvedWorkflowId = deps.workflowId?.();
+        const workflowId = typeof resolvedWorkflowId === "string" ? resolvedWorkflowId.trim() : "";
+        if (!workflowId) throw new Error("workflow de main-health no disponible");
         const result = await launch.launchManagedSession({
           repo,
-          workflowId: "claude-plan-codex-impl",
-          name: logicalName,
+          workflowId,
+          name: expectedSession,
           mode: "workflow",
           request: fixerRequest(readIncident(repo) ?? incident, branch),
         });
