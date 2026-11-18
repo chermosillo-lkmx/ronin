@@ -113,27 +113,28 @@ test("discoverMainHealthRepos excluye symlinks cuya ruta real sale de LIEBRE_ROO
   assert.deepEqual(repos, ["api"]);
 });
 
-test("defaultMainHealthRepos valida LIEBRE_ROOT/repo y no mappings al root", () => {
-  const realPaths: Record<string, string> = {
-    "/liebre": "/real/liebre",
-    "/liebre/monorepo": "/real/liebre/monorepo",
-    "/liebre/api": "/real/liebre/api",
-  };
-  const repos = defaultMainHealthRepos({
-    listRepos: () => ["monorepo", "api", "../escape", "api"],
-    liebreRoot: "/liebre",
-    realPath: (path: string) => realPaths[path],
-    exists: (path: string) => path === "/real/liebre/.git" || path === "/real/liebre/api/.git",
-  });
-  assert.deepEqual(repos, ["api"]);
+test("defaultMainHealthRepos devuelve el alcance explícito independiente de checkouts", () => {
+  assert.deepEqual(defaultMainHealthRepos(), [
+    "ant-liebre-api",
+    "ant-ms-cfdis",
+    "ant-liebre-data-extraction-contpaqi",
+    "ant-ms-permissions",
+    "ant-ms-i18n",
+  ]);
 });
 
-test("readMainHealthSettings devuelve defaults completos con repos descubiertos", () => {
+test("readMainHealthSettings devuelve defaults completos del alcance explícito", () => {
   conSettings("{}", (file) => {
-    assert.deepEqual(readMainHealthSettings(file, () => ["api", "cfdis"]), {
+    assert.deepEqual(readMainHealthSettings(file), {
       enabled: true,
       intervalMin: 10,
-      repos: ["api", "cfdis"],
+      repos: [
+        "ant-liebre-api",
+        "ant-ms-cfdis",
+        "ant-liebre-data-extraction-contpaqi",
+        "ant-ms-permissions",
+        "ant-ms-i18n",
+      ],
       commentOnPr: false,
       remoteClaim: true,
       autoFix: true,
@@ -142,7 +143,6 @@ test("readMainHealthSettings devuelve defaults completos con repos descubiertos"
         "ant-liebre-api": "api",
         "ant-ms-cfdis": "cfdis",
         "ant-liebre-data-extraction-contpaqi": "dex",
-        "ant-liebre-app": "app",
         "ant-ms-i18n": "i18n",
         "ant-ms-permissions": "perms",
       },

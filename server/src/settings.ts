@@ -1,9 +1,7 @@
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { LIEBRE_ROOT } from "./config.js";
 import { dataPath } from "./data-dir.js";
 import { DEFAULT_ENGINE, sanitizeEngine, type EngineChoice } from "./engine-config.js";
-import { listRepos } from "./repos.js";
 
 const SETTINGS_FILE = dataPath("settings.json");
 
@@ -56,14 +54,17 @@ export interface MainHealthRepoDiscovery {
   realPath(path: string): string;
 }
 
-/** Defaults de repos según el mismo path LIEBRE_ROOT/repo que consume main-health.sh. */
-export function defaultMainHealthRepos(deps: MainHealthRepoDiscovery = {
-  listRepos,
-  liebreRoot: LIEBRE_ROOT,
-  exists: existsSync,
-  realPath: realpathSync,
-}): string[] {
-  return discoverMainHealthRepos(deps.listRepos(), deps.liebreRoot, deps.exists, deps.realPath);
+export const DEFAULT_MAIN_HEALTH_REPOS: readonly string[] = [
+  "ant-liebre-api",
+  "ant-ms-cfdis",
+  "ant-liebre-data-extraction-contpaqi",
+  "ant-ms-permissions",
+  "ant-ms-i18n",
+];
+
+/** Alcance explícito de main-health; no depende de los checkouts presentes. */
+export function defaultMainHealthRepos(): string[] {
+  return [...DEFAULT_MAIN_HEALTH_REPOS];
 }
 
 export interface MainHealthSettings {
@@ -81,7 +82,6 @@ export const DEFAULT_MAIN_HEALTH_ALIASES: Readonly<Record<string, string>> = {
   "ant-liebre-api": "api",
   "ant-ms-cfdis": "cfdis",
   "ant-liebre-data-extraction-contpaqi": "dex",
-  "ant-liebre-app": "app",
   "ant-ms-i18n": "i18n",
   "ant-ms-permissions": "perms",
 };
