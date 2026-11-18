@@ -84,77 +84,58 @@ fi
 owns_lock=0
 lock_token="$$-$RANDOM-$RANDOM"
 lock_owner="$$ $lock_token"
-while [ "$owns_lock" -eq 0 ]; do
-  if mkdir "$lock" 2>/dev/null; then
-    # El directorio puede haber sido movido y recreado antes de publicar. La creación
-    # exclusiva del owner decide quién posee realmente la ruta que sigue visible.
-    if (set -o noclobber; printf '%s\n' "$lock_owner" > "$lock/owner") 2>/dev/null \
-      && [ "$(cat "$lock/owner" 2>/dev/null || true)" = "$lock_owner" ]; then
-      owns_lock=1
-      break
-    fi
-  fi
-  if [ -f "$json" ]; then
-    print_cached
-    exit $?
-  fi
-  owner="$(cat "$lock/owner" 2>/dev/null || true)"
-  owner_pid="${owner%% *}"
-  if [[ "$owner" == *" "* ]] && [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
-    sleep "$poll"
-    continue
-  fi
-  # Un creador puede seguir entre mkdir y la publicación exclusiva del token.
-  if [ -z "$owner" ]; then
-    sleep "$lock_grace"
-    [ -f "$json" ] && { print_cached; exit $?; }
-  fi
-  current="$(cat "$lock/owner" 2>/dev/null || true)"
-  current_pid="${current%% *}"
-  if [[ "$current" == *" "* ]] && [[ "$current_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$current_pid" 2>/dev/null; then
-    continue
-  fi
-  if [ "$current" = "$owner" ]; then
-    stale="$lock.stale.$$.$RANDOM"
-    if mv "$lock" "$stale" 2>/dev/null; then
-      rm -rf "$stale"
-    fi
-  fi
-done
-
 owns_path_lock=0
 worktree_created=0
 path_lock_token="$$-$RANDOM-$RANDOM"
 path_lock_owner="$$ $path_lock_token"
 
-acquire_path_lock() {
+acquire_token_lock() { # $1 ruta, $2 owner esperado, $3 observa caché, $4 flag de propiedad
+  local target="$1" expected="$2" watch_cache="$3" result_var="$4"
   local owner owner_pid current current_pid stale
-  while [ "$owns_path_lock" -eq 0 ]; do
-    if mkdir "$path_lock" 2>/dev/null; then
-      if (set -o noclobber; printf '%s\n' "$path_lock_owner" > "$path_lock/owner") 2>/dev/null \
-        && [ "$(cat "$path_lock/owner" 2>/dev/null || true)" = "$path_lock_owner" ]; then
-        owns_path_lock=1
+  while :; do
+    if mkdir "$target" 2>/dev/null; then
+      # El directorio puede haber sido movido y recreado antes de publicar. La creación
+      # exclusiva del owner decide quién posee realmente la ruta que sigue visible.
+      if (set -o noclobber; printf '%s\n' "$expected" > "$target/owner") 2>/dev/null \
+        && [ "$(cat "$target/owner" 2>/dev/null || true)" = "$expected" ]; then
+        printf -v "$result_var" '%s' 1
         return
       fi
     fi
-    owner="$(cat "$path_lock/owner" 2>/dev/null || true)"
+    if [ "$watch_cache" = "1" ] && [ -f "$json" ]; then
+      print_cached
+      exit $?
+    fi
+    owner="$(cat "$target/owner" 2>/dev/null || true)"
     owner_pid="${owner%% *}"
     if [[ "$owner" == *" "* ]] && [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
       sleep "$poll"
       continue
     fi
-    [ -n "$owner" ] || sleep "$lock_grace"
-    current="$(cat "$path_lock/owner" 2>/dev/null || true)"
+    if [ -z "$owner" ]; then
+      sleep "$lock_grace"
+      if [ "$watch_cache" = "1" ] && [ -f "$json" ]; then print_cached; exit $?; fi
+    fi
+    current="$(cat "$target/owner" 2>/dev/null || true)"
     current_pid="${current%% *}"
     if [[ "$current" == *" "* ]] && [[ "$current_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$current_pid" 2>/dev/null; then
       continue
     fi
     if [ "$current" = "$owner" ]; then
-      stale="$path_lock.stale.$$.$RANDOM"
-      if mv "$path_lock" "$stale" 2>/dev/null; then rm -rf "$stale"; fi
+      stale="$target.stale.$$.$RANDOM"
+      if mv "$target" "$stale" 2>/dev/null; then rm -rf "$stale"; fi
     fi
   done
 }
+
+release_token_lock() { # $1 ruta, $2 owner esperado
+  if [ "$(cat "$1/owner" 2>/dev/null || true)" = "$2" ]; then
+    rm -f "$1/owner"
+    rmdir "$1" 2>/dev/null || true
+  fi
+}
+
+acquire_token_lock "$lock" "$lock_owner" 1 owns_lock
 
 cleanup() {
   rm -f "$diagnostic_log"
@@ -165,14 +146,8 @@ cleanup() {
     git -C "$source_repo" worktree prune >/dev/null 2>&1 || true
     rmdir "$wt_parent" 2>/dev/null || true
   fi
-  if [ "$owns_path_lock" -eq 1 ] && [ "$(cat "$path_lock/owner" 2>/dev/null || true)" = "$path_lock_owner" ]; then
-    rm -f "$path_lock/owner"
-    rmdir "$path_lock" 2>/dev/null || true
-  fi
-  if [ "$owns_lock" -eq 1 ] && [ "$(cat "$lock/owner" 2>/dev/null || true)" = "$lock_owner" ]; then
-    rm -f "$lock/owner"
-    rmdir "$lock" 2>/dev/null || true
-  fi
+  [ "$owns_path_lock" -eq 0 ] || release_token_lock "$path_lock" "$path_lock_owner"
+  [ "$owns_lock" -eq 0 ] || release_token_lock "$lock" "$lock_owner"
 }
 trap cleanup EXIT
 trap 'exit 143' TERM INT
@@ -185,7 +160,7 @@ fi
 
 # Dos SHA completos pueden compartir los siete primeros caracteres y, por contrato, la
 # misma ruta wt-<sha7>. Sólo un proceso puede usar esa ruta hasta retirarla por completo.
-acquire_path_lock
+acquire_token_lock "$path_lock" "$path_lock_owner" 0 owns_path_lock
 
 # Un dueño muerto puede dejar tanto la ruta como el registro administrativo del worktree.
 # La recuperación se hace siempre desde el repo fuente y sólo sobre la ruta exacta de este SHA.
