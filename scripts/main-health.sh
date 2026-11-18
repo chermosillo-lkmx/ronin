@@ -230,16 +230,15 @@ def ini_floor(path, section):
         return None
 
 floor = None
-for filename, section in ((".coveragerc", "report"), ("setup.cfg", "coverage:report")):
-    floor = ini_floor(worktree / filename, section)
-    if floor is not None:
-        break
+floor = ini_floor(worktree / ".coveragerc", "report")
 if floor is None:
     try:
         report = tomllib.loads((worktree / "pyproject.toml").read_text())["tool"]["coverage"]["report"]
         floor = float(Decimal(str(report["fail_under"])))
     except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError, ValueError, InvalidOperation):
         pass
+if floor is None:
+    floor = ini_floor(worktree / "setup.cfg", "coverage:report")
 if floor is None:
     try:
         text = (worktree / "vitest.config.ts").read_text()

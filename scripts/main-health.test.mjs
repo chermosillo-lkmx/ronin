@@ -73,6 +73,9 @@ function fixture(t, options = {}) {
   } else {
     writeFileSync(join(repo, ".coveragerc"), "[run]\nsource = src\n[report]\nfail_under = 80\n");
   }
+  if (options.setupFloor) {
+    writeFileSync(join(repo, "setup.cfg"), `[coverage:report]\nfail_under = ${options.setupFloor}\n`);
+  }
   writeFileSync(join(repo, "pytest.ini"), "[pytest]\n");
   writeFileSync(join(repo, "src/app.py"), "def f():\n    return 1\n");
   writeFileSync(join(repo, "tests/test_app.py"), "def test_f():\n    assert True\n");
@@ -289,6 +292,17 @@ test("main-health conserva una suite roja como medición roja y sale 1", (t) => 
 
 test("main-health lee fail_under de un pyproject TOML multilineal válido", (t) => {
   const fx = fixture(t, { pyprojectFloor: 95 });
+  fx.setJunit(passingCases);
+  const result = fx.run();
+  assert.equal(result.code, 1, result.out);
+  const data = JSON.parse(readFileSync(fx.jsonPath, "utf8"));
+  assert.equal(data.floor, 95);
+  assert.equal(data.total, 90);
+  assert.equal(data.status, "red");
+});
+
+test("main-health da precedencia a pyproject.toml sobre setup.cfg", (t) => {
+  const fx = fixture(t, { pyprojectFloor: 95, setupFloor: 80 });
   fx.setJunit(passingCases);
   const result = fx.run();
   assert.equal(result.code, 1, result.out);
