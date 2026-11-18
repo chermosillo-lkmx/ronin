@@ -481,7 +481,9 @@ test("main-health: inicia medición de cada merge-base canónica deduplicada ant
       heads: async () => heads,
       mainMergeBase: async (worktree, head) => {
         eventos.push(`base:${worktree}:${head.repo}:${head.sha}`);
-        return head.repo === "data" ? SHA_D : SHA_C;
+        return head.repo === "data"
+          ? { repo: "ant-liebre-data", sha: SHA_D }
+          : { repo: "ant-liebre-api", sha: SHA_C };
       },
       ensureMainMeasured: (repo, sha) => {
         eventos.push(`ensure:${repo}:${sha}`);
@@ -497,9 +499,9 @@ test("main-health: inicia medición de cada merge-base canónica deduplicada ant
 
     assert.deepEqual(eventos, [
       `base:/wt:api:${SHA_A}`,
-      `ensure:api:${SHA_C}`,
+      `ensure:ant-liebre-api:${SHA_C}`,
       `base:/wt:data:${SHA_B}`,
-      `ensure:data:${SHA_D}`,
+      `ensure:ant-liebre-data:${SHA_D}`,
       `base:/wt:api:${SHA_C}`,
       "run",
     ]);
@@ -520,6 +522,7 @@ test("main-health: fallos, null, base no canónica y rechazo tardío no impiden 
       { repo: "throw-base", sha: SHA_A, dirty: false },
       { repo: "null-base", sha: SHA_B, dirty: false },
       { repo: "invalid-base", sha: SHA_C, dirty: false },
+      { repo: "unsafe-repo", sha: "1".repeat(40), dirty: false },
       { repo: "throw-ensure", sha: SHA_D, dirty: false },
       { repo: "late-ensure", sha: "e".repeat(40), dirty: false },
     ];
@@ -529,8 +532,9 @@ test("main-health: fallos, null, base no canónica y rechazo tardío no impiden 
       mainMergeBase: async (_worktree, head) => {
         if (head.repo === "throw-base") throw new Error("merge-base roto");
         if (head.repo === "null-base") return null;
-        if (head.repo === "invalid-base") return "ABCDEF";
-        return "f".repeat(40);
+        if (head.repo === "invalid-base") return { repo: "repo", sha: "ABCDEF" };
+        if (head.repo === "unsafe-repo") return { repo: "a..b", sha: "f".repeat(40) };
+        return { repo: head.repo, sha: "f".repeat(40) };
       },
       ensureMainMeasured: (repo, sha) => {
         ensures.push(`${repo}:${sha}`);
@@ -563,7 +567,7 @@ test("main-health: no consulta merge-base en gate normal, busy, dirty, cache hit
     let bases = 0;
     let ensures = 0;
     const hooks = {
-      mainMergeBase: async () => { bases += 1; return SHA_C; },
+      mainMergeBase: async () => { bases += 1; return { repo: "api", sha: SHA_C }; },
       ensureMainMeasured: () => { ensures += 1; },
     };
     await tick(deps({ cycle: dir, ...hooks }), new Map());

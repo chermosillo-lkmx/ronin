@@ -1,10 +1,12 @@
 import { deliverPromptWhenReady } from "./engine.js";
+import { realGitPort, type GitPort, type RepoHead } from "./gate-cache.js";
 import { getRepoGate, type RepoGate } from "./repo-config.js";
 import { readLaunchRecord, readTmuxInventory } from "./sessions.js";
 import { readGateSettings, type GateSettings } from "./settings.js";
 import { cycleDirForSession, detectStage, readFlow } from "./stages.js";
 import { realGateDeps, type DriverDeps, type GateStage, type LaunchInfo } from "./verify-driver.js";
 import { resolveFlow } from "./workflow.js";
+import { basename, resolve, sep } from "node:path";
 
 type InventorySession = {
   name: string;
@@ -38,6 +40,8 @@ export interface VerifyDriverDepSources {
   repoGate(repo: string): RepoGate;
   /** Escribe un prompt en ese pane (`%N`) cuando su CLI está lista; false/throw = no llegó. */
   deliverPrompt(target: string, text: string): Promise<boolean>;
+  /** Integración opcional: sólo se cablea cuando el watcher de main-health ya existe. */
+  ensureMainMeasured?(repo: string, sha: string): unknown;
 }
 
 /** Carpeta propia de reportes del gate de Ronin, relativa al worktree (la lee unit-gate.sh). */
@@ -63,6 +67,50 @@ function launchInfo(raw: unknown): LaunchInfo | null {
   return typeof worktree === "string" ? { mode, repo, worktree } : { mode, repo };
 }
 
+const CANONICAL_SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const SAFE_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function safeRepo(repo: string): boolean {
+  return repo.length <= 61
+    && SAFE_REPO.test(repo)
+    && !repo.includes("..")
+    && !repo.endsWith(".")
+    && !repo.toLowerCase().endsWith(".lock");
+}
+
+function canonicalRepoFromRemote(remote: string): string | null {
+  const value = remote.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!value || /[\r\n\0]/.test(value)) return null;
+  const separator = Math.max(value.lastIndexOf("/"), value.lastIndexOf(":"));
+  const tail = value.slice(separator + 1);
+  const repo = tail.replace(/\.git$/i, "");
+  return safeRepo(repo) ? repo : null;
+}
+
+/** Resuelve el main común usando sólo el puerto Git; todo dato dudoso falla cerrado. */
+export async function resolveMainMergeBase(
+  worktree: string,
+  head: RepoHead,
+  git: GitPort = realGitPort,
+): Promise<{ repo: string; sha: string } | null> {
+  if (!safeRepo(head.repo) || !CANONICAL_SHA.test(head.sha)) return null;
+  const root = resolve(worktree);
+  const cwd = basename(root) === head.repo ? root : resolve(root, head.repo);
+  if (cwd !== root && !cwd.startsWith(`${root}${sep}`)) return null;
+  try {
+    const remote = await git.run(["remote", "get-url", "origin"], cwd);
+    if (!remote.ok) return null;
+    const repo = canonicalRepoFromRemote(remote.out);
+    if (!repo) return null;
+    const base = await git.run(["merge-base", head.sha, "origin/main"], cwd);
+    const sha = base.out.trim();
+    if (!base.ok || !CANONICAL_SHA.test(sha)) return null;
+    return { repo, sha };
+  } catch {
+    return null;
+  }
+}
+
 /** Arma el driver real, dejando las fronteras de tmux y disco inyectables para pruebas. */
 export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverDeps {
   return {
@@ -84,6 +132,8 @@ export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverD
     cycleFor: sources.cycleDirForSession,
     detect: sources.detectStage,
     ...realGateDeps,
+    mainMergeBase: (worktree, head) => resolveMainMergeBase(worktree, head, realGitPort),
+    ...(sources.ensureMainMeasured ? { ensureMainMeasured: sources.ensureMainMeasured } : {}),
     // Se lee en cada llamada: un cambio en settings.json o repo-config.json aplica sin reiniciar.
     gateConfig: (repo) => gateConfigFrom(sources.gateSettings(), sources.repoGate(repo)),
     maxConcurrent: () => sources.gateSettings().maxConcurrent,

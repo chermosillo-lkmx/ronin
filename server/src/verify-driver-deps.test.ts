@@ -1,6 +1,15 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { createVerifyDriverDeps, gateConfigFrom, type VerifyDriverDepSources } from "./verify-driver-deps.js";
+import {
+  createVerifyDriverDeps,
+  gateConfigFrom,
+  realVerifyDriverDeps,
+  resolveMainMergeBase,
+  type VerifyDriverDepSources,
+} from "./verify-driver-deps.js";
+
+const SHA_A = "a".repeat(40);
+const SHA_B = "b".repeat(40);
 
 function sources(overrides: Partial<VerifyDriverDepSources> = {}): VerifyDriverDepSources {
   return {
@@ -266,4 +275,80 @@ test("el driver real lee el mtime de los sentinelas (vuelta a pre-merge desde pr
   const deps = createVerifyDriverDeps(sources({}));
   assert.equal(typeof deps.sentinelAt, "function");
   assert.equal(deps.sentinelAt!("/no/existe/ronin-ciclo", "pre-merge"), null);
+});
+
+test("resolveMainMergeBase usa root/hijo, deriva repo canónico de HTTPS, scp y path", async () => {
+  const cases = [
+    {
+      worktree: "/wt/api",
+      head: { repo: "api", sha: SHA_A, dirty: false },
+      cwd: "/wt/api",
+      remote: "https://github.com/lkmx/ant-liebre-api.git",
+      repo: "ant-liebre-api",
+    },
+    {
+      worktree: "/wt/cycle",
+      head: { repo: "cfdis", sha: SHA_A, dirty: false },
+      cwd: "/wt/cycle/cfdis",
+      remote: "git@github.com:lkmx/ant-ms-cfdis.git",
+      repo: "ant-ms-cfdis",
+    },
+    {
+      worktree: "/wt/cycle",
+      head: { repo: "i18n", sha: SHA_A, dirty: false },
+      cwd: "/wt/cycle/i18n",
+      remote: "/tmp/remotes/ant-ms-i18n.git",
+      repo: "ant-ms-i18n",
+    },
+  ];
+  for (const value of cases) {
+    const calls: Array<{ args: string[]; cwd: string }> = [];
+    const git = {
+      run: async (args: string[], cwd: string) => {
+        calls.push({ args, cwd });
+        return args[0] === "remote"
+          ? { ok: true, out: `${value.remote}\n` }
+          : { ok: true, out: `${SHA_B}\n` };
+      },
+    };
+
+    assert.deepEqual(await resolveMainMergeBase(value.worktree, value.head, git), {
+      repo: value.repo,
+      sha: SHA_B,
+    });
+    assert.deepEqual(calls, [
+      { args: ["remote", "get-url", "origin"], cwd: value.cwd },
+      { args: ["merge-base", SHA_A, "origin/main"], cwd: value.cwd },
+    ]);
+  }
+});
+
+test("resolveMainMergeBase falla cerrado ante path, remoto, repo o SHA inseguros", async () => {
+  let calls = 0;
+  const never = { run: async () => { calls += 1; return { ok: true, out: "x" }; } };
+  assert.equal(await resolveMainMergeBase("/wt", { repo: "../api", sha: SHA_A, dirty: false }, never), null);
+  assert.equal(await resolveMainMergeBase("/wt", { repo: "api", sha: "ABC123", dirty: false }, never), null);
+  assert.equal(calls, 0);
+
+  const scenarios = [
+    [{ ok: false, out: "" }, { ok: true, out: SHA_B }],
+    [{ ok: true, out: "git@host:org/a..b.git" }, { ok: true, out: SHA_B }],
+    [{ ok: true, out: "git@host:org/repo.git" }, { ok: false, out: "" }],
+    [{ ok: true, out: "git@host:org/repo.git" }, { ok: true, out: SHA_B.toUpperCase() }],
+  ];
+  for (const replies of scenarios) {
+    let index = 0;
+    const git = { run: async () => replies[index++]! };
+    assert.equal(await resolveMainMergeBase("/wt", { repo: "api", sha: SHA_A, dirty: false }, git), null);
+  }
+});
+
+test("createVerifyDriverDeps propaga ensureMainMeasured y el real conserva sólo el resolver Git", () => {
+  const ensureMainMeasured = (_repo: string, _sha: string) => ({ status: "queued" });
+  const deps = createVerifyDriverDeps(sources({ ensureMainMeasured }));
+
+  assert.equal(deps.ensureMainMeasured, ensureMainMeasured);
+  assert.equal(typeof deps.mainMergeBase, "function");
+  assert.equal(typeof realVerifyDriverDeps.mainMergeBase, "function");
+  assert.equal(realVerifyDriverDeps.ensureMainMeasured, undefined);
 });

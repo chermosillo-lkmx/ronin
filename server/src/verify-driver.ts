@@ -274,7 +274,7 @@ export interface DriverDeps {
   /** `cacheHit` de gate-cache con el git real ya inyectado. */
   cacheHit(cached: VerifyState | null, heads: RepoHead[], worktree: string, e2eDirs: string[]): Promise<boolean>;
   /** Merge-base del HEAD de un sub-repo contra main; el puerto decide cwd/rutas. */
-  mainMergeBase?(worktree: string, head: RepoHead): Promise<string | null>;
+  mainMergeBase?(worktree: string, head: RepoHead): Promise<{ repo: string; sha: string } | null>;
   /** Encola la medición de main; puede devolver una promesa, pero el gate nunca la espera. */
   ensureMainMeasured?(repo: string, sha: string): unknown;
   /** Timeout y entorno del gate para un repo (override del repo o global), leídos en cada llamada. */
@@ -397,6 +397,15 @@ function guardarLog(deps: DriverDeps, cycle: string, stageKey: string, output: s
 }
 
 const MAIN_HEALTH_SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const MAIN_HEALTH_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function safeMainHealthRepo(repo: string): boolean {
+  return repo.length <= 61
+    && MAIN_HEALTH_REPO.test(repo)
+    && !repo.includes("..")
+    && !repo.endsWith(".")
+    && !repo.toLowerCase().endsWith(".lock");
+}
 
 function logBestEffort(deps: DriverDeps, error: unknown): void {
   try {
@@ -412,19 +421,19 @@ async function ensureMergeBasesMeasured(deps: DriverDeps, worktree: string, head
   const seen = new Set<string>();
   for (const head of heads) {
     if (typeof head.repo !== "string" || !MAIN_HEALTH_SHA.test(head.sha)) continue;
-    let base: string | null;
+    let base: { repo: string; sha: string } | null;
     try {
       base = await deps.mainMergeBase(worktree, head);
     } catch (error) {
       logBestEffort(deps, error);
       continue;
     }
-    if (!base || !MAIN_HEALTH_SHA.test(base)) continue;
-    const key = `${head.repo}@${base}`;
+    if (!base || !safeMainHealthRepo(base.repo) || !MAIN_HEALTH_SHA.test(base.sha)) continue;
+    const key = `${base.repo}@${base.sha}`;
     if (seen.has(key)) continue;
     seen.add(key);
     try {
-      const pending = deps.ensureMainMeasured(head.repo, base);
+      const pending = deps.ensureMainMeasured(base.repo, base.sha);
       if (pending && typeof (pending as PromiseLike<unknown>).then === "function") {
         void Promise.resolve(pending).catch((error) => logBestEffort(deps, error));
       }
