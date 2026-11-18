@@ -2,7 +2,11 @@ import type { Incident } from "./incident.js";
 
 interface NotifyStore {
   readToken(): string | null;
-  readConfig(): { chatId?: number; topics: Record<string, number> };
+  readConfig(): {
+    chatId?: number;
+    topics: Record<string, number>;
+    disabledTopics?: Record<string, number>;
+  };
 }
 
 interface NotifyApi {
@@ -40,13 +44,14 @@ export function createMainHealthNotifier(deps: MainHealthNotifierDeps): MainHeal
       return;
     }
     if (!token || typeof config.chatId !== "number" || !api) return;
+    if (config.disabledTopics && Object.hasOwn(config.disabledTopics, incident.repo)) return;
     const threadId = config.topics[incident.repo];
     const text = action === "abierto"
       ? `🔴 Incidente abierto en ${incident.repo} (${incident.firstRedSha.slice(0, 7)}).`
       : `🟢 Incidente cerrado en ${incident.repo} (${incident.firstRedSha.slice(0, 7)}).`;
     await api.sendMessage({
       chatId: config.chatId,
-      ...(typeof threadId === "number" ? { threadId } : {}),
+      ...(Number.isInteger(threadId) && threadId > 0 ? { threadId } : {}),
       text,
     });
   }

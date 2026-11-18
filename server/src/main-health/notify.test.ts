@@ -81,3 +81,45 @@ test("sin token, API o chat configurado es no-op", async () => {
   await make("token", -100, false).opened(incident());
   assert.equal(calls, 0);
 });
+
+test("un repo con tema desactivado no notifica ni cae al chat raíz", async () => {
+  let calls = 0;
+  const notifier = createMainHealthNotifier({
+    store: {
+      readToken: () => "token",
+      readConfig: () => ({
+        chatId: -100,
+        topics: { "ant-ms-i18n": 42 },
+        disabledTopics: { "ant-ms-i18n": 42 },
+      }),
+    },
+    runtime: {
+      getApi: () => ({ sendMessage: async () => { calls += 1; } }),
+    },
+  });
+
+  await notifier.opened(incident());
+  assert.equal(calls, 0);
+});
+
+test("tema ausente o inválido conserva el fallback al chat raíz", async () => {
+  const sent: Array<{ chatId: number; threadId?: number; text: string }> = [];
+  for (const topic of [undefined, 0, -1, 1.5, Number.NaN]) {
+    const notifier = createMainHealthNotifier({
+      store: {
+        readToken: () => "token",
+        readConfig: () => ({
+          chatId: -100,
+          topics: topic === undefined ? {} : { "ant-ms-i18n": topic },
+        }),
+      },
+      runtime: {
+        getApi: () => ({ sendMessage: async (message) => { sent.push(message); } }),
+      },
+    });
+    await notifier.opened(incident());
+  }
+
+  assert.equal(sent.length, 5);
+  assert.ok(sent.every((message) => message.threadId === undefined));
+});
