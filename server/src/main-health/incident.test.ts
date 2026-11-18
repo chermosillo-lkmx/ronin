@@ -1173,6 +1173,82 @@ test("close recupera marker stale cuando el PID vivo pertenece a otro nacimiento
   });
 });
 
+test("resolver default recupera otro PID local cuyo birth token cambió", async () => {
+  await withRootAsync(async (root) => {
+    let pidStillAlive = true;
+    const manager = createIncidentManager({
+      root,
+      now: () => 10_000,
+      pid: () => 1_401,
+      pidAlive: () => pidStillAlive,
+      processStartToken: () => "birth-manager",
+      processStartTokenForPid: (candidate) => candidate === 1_400 ? "birth-new" : "birth-manager",
+      host: () => "host-local",
+      operationLeaseMs: 100,
+      operationPollMs: 1,
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    const token = "other-local-reused-pid";
+    writeFileSync(join(root, "incidents", "api", `operation-${token}.json`), JSON.stringify({
+      token,
+      pid: 1_400,
+      host: "host-local",
+      processStartToken: "birth-old",
+      kind: "claim",
+      createdAt: 1_000,
+      heartbeat: 1_000,
+    }));
+
+    let settled = false;
+    const closing = manager.closeIncident("api");
+    void closing.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const recoveredWhilePidWasAlive = settled;
+    pidStillAlive = false;
+    await closing;
+
+    assert.equal(recoveredWhilePidWasAlive, true);
+  });
+});
+
+test("lease de host remoto ignora PID local coincidente y vence sólo por edad", async () => {
+  await withRootAsync(async (root) => {
+    let now = 1_000;
+    const manager = createIncidentManager({
+      root,
+      now: () => now,
+      pid: () => 1_501,
+      pidAlive: () => true,
+      processStartToken: () => "birth-local",
+      processIdentity: () => ({ host: "host-local", startToken: "birth-local" }),
+      host: () => "host-local",
+      operationLeaseMs: 100,
+      operationPollMs: 1,
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    const token = "remote-host-same-pid";
+    writeFileSync(join(root, "incidents", "api", `operation-${token}.json`), JSON.stringify({
+      token,
+      pid: 1_501,
+      host: "host-remoto",
+      processStartToken: "birth-remoto",
+      kind: "claim",
+      createdAt: now,
+      heartbeat: now,
+    }));
+
+    let settled = false;
+    const closing = manager.closeIncident("api");
+    void closing.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const stolenWhileFresh = settled;
+    now += 101;
+    await closing;
+
+    assert.equal(stolenWhileFresh, false);
+  });
+});
+
 test("release reintenta unlink transitorio y no deja marker vivo bloqueando close", async () => {
   await withRootAsync(async (root) => {
     let operationUnlinkAttempts = 0;
@@ -1209,6 +1285,48 @@ test("release reintenta unlink transitorio y no deja marker vivo bloqueando clos
     const closed = await manager.closeIncident("api", "/repo");
 
     assert.equal(operationUnlinkAttempts, 3);
+    assert.equal(closed?.repo, "api");
+  });
+});
+
+test("release reintenta completed fallido y siempre detiene el heartbeat", async () => {
+  await withRootAsync(async (root) => {
+    let completedWrites = 0;
+    let heartbeatStopped = false;
+    const claimSha = "c".repeat(40);
+    const manager = createIncidentManager({
+      root,
+      operationLeaseMs: 1_000_000,
+      heartbeatScheduler() {
+        return () => { heartbeatStopped = true; };
+      },
+      atomicWrite(target, value) {
+        if (typeof value === "object"
+          && value !== null
+          && "state" in value
+          && value.state === "completed") {
+          completedWrites += 1;
+          if (completedWrites === 1) throw new Error("write completed transitorio");
+        }
+        writeJsonAtomic(target, value);
+      },
+      git: {
+        async run(args) {
+          if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+          if (args[0] === "commit-tree") return `${claimSha}\n`;
+          if (args[0] === "ls-remote") return `${claimSha}\trefs/heads/fix/main-health-api\n`;
+          if (args[0] === "push") return "";
+          throw new Error(`Git inesperado: ${args.join(" ")}`);
+        },
+      },
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    await manager.claimRemote("api", "/repo");
+    const closed = await manager.closeIncident("api", "/repo");
+
+    assert.equal(completedWrites, 2);
+    assert.equal(heartbeatStopped, true);
     assert.equal(closed?.repo, "api");
   });
 });

@@ -10,7 +10,7 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -109,7 +109,9 @@ export interface IncidentManagerDeps {
   pid?: () => number;
   pidAlive?: (pid: number) => boolean;
   processStartToken?: () => string;
+  processStartTokenForPid?: (pid: number) => string | null;
   processIdentity?: (pid: number) => { host: string; startToken: string } | null;
+  heartbeatScheduler?: (tick: () => void, intervalMs: number) => () => void;
   mutexToken?: () => string;
   mutexLeaseMs?: number;
   operationLeaseMs?: number;
@@ -131,6 +133,19 @@ const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_ALIAS = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const SAFE_MUTEX_TOKEN = /^[A-Za-z0-9-]{8,128}$/;
 const PROCESS_START_TOKEN = `${Math.round(Date.now() - process.uptime() * 1_000)}`;
+
+function readLocalProcessStartToken(candidatePid: number): string | null {
+  try {
+    const token = execFileSync(
+      "ps",
+      ["-o", "lstart=", "-p", String(candidatePid)],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    return token || null;
+  } catch {
+    return null;
+  }
+}
 
 function safeRepo(repo: string): boolean {
   return repo.length <= 61
@@ -347,12 +362,21 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   const operationPollMs = Math.max(1, deps.operationPollMs ?? 10);
   const protocolWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
   const host = deps.host ?? hostname;
+  const processStartTokenForPid = deps.processStartTokenForPid ?? readLocalProcessStartToken;
   const localProcessIdentity = {
     host: host(),
-    startToken: (deps.processStartToken ?? (() => PROCESS_START_TOKEN))(),
+    startToken: (deps.processStartToken ?? (() => processStartTokenForPid(pid()) ?? PROCESS_START_TOKEN))(),
   };
   const processIdentity = deps.processIdentity
-    ?? ((candidatePid: number) => candidatePid === pid() ? localProcessIdentity : null);
+    ?? ((candidatePid: number) => {
+      const startToken = processStartTokenForPid(candidatePid);
+      return startToken ? { host: localProcessIdentity.host, startToken } : null;
+    });
+  const heartbeatScheduler = deps.heartbeatScheduler ?? ((tick: () => void, intervalMs: number) => {
+    const interval = setInterval(tick, intervalMs);
+    interval.unref();
+    return () => clearInterval(interval);
+  });
   const leaseMs = (deps.leaseMin ?? deps.settings?.leaseMin ?? DEFAULT_MAIN_HEALTH_SETTINGS.leaseMin) * 60_000;
   const tmux = deps.tmux ?? { hasSession };
   const git = deps.git ?? createSpawnGitPort();
@@ -624,14 +648,21 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
 
   function protocolLeaseIsLive(lease: IncidentOperationLease | IncidentCloseLease): boolean {
     if ("kind" in lease && lease.state === "completed") return false;
+    const heartbeatIsFresh = now() - lease.heartbeat < operationLeaseMs;
     // Un heartbeat atrasado no prueba que la operación terminó: mientras el PID
     // exista, retirar el marker permitiría que el efecto externo se reanudara sin fence.
-    if (!pidAlive(lease.pid)) return now() - lease.heartbeat < operationLeaseMs;
     if (lease.host && lease.processStartToken) {
+      // Un PID sólo tiene significado dentro de su host; para otro host manda el lease temporal.
+      if (lease.host !== localProcessIdentity.host) return heartbeatIsFresh;
+      // El heartbeat fresco evita invocar ps en cada tick del drain normal.
+      if (heartbeatIsFresh) return true;
+      if (!pidAlive(lease.pid)) return false;
       const current = processIdentity(lease.pid);
-      if (current && (current.host !== lease.host || current.startToken !== lease.processStartToken)) return false;
+      if (current && current.startToken !== lease.processStartToken) return false;
+      return true;
     }
-    return true;
+    // Markers legacy no contienen identidad de nacimiento y fallan cerrado si el PID existe.
+    return pidAlive(lease.pid) || heartbeatIsFresh;
   }
 
   function waitForProtocol(): Promise<void> {
@@ -688,7 +719,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   }
 
   function startOperationHeartbeat(repo: string, lease: IncidentOperationLease): () => void {
-    const interval = setInterval(() => {
+    return heartbeatScheduler(() => {
       let mutex: OwnerMutex | null = null;
       try {
         mutex = acquireOwnerMutex(repo, lease.pid);
@@ -703,12 +734,10 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         if (mutex) releaseOwnerMutex(repo, mutex);
       }
     }, Math.max(1, Math.floor(operationLeaseMs / 3)));
-    interval.unref();
-    return () => clearInterval(interval);
   }
 
   function startCloseHeartbeat(repo: string, lease: IncidentCloseLease): () => void {
-    const interval = setInterval(() => {
+    return heartbeatScheduler(() => {
       let mutex: OwnerMutex | null = null;
       try {
         mutex = acquireOwnerMutex(repo, lease.pid);
@@ -723,8 +752,6 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         if (mutex) releaseOwnerMutex(repo, mutex);
       }
     }, Math.max(1, Math.floor(operationLeaseMs / 3)));
-    interval.unref();
-    return () => clearInterval(interval);
   }
 
   async function acquireIncidentOperation(
@@ -765,33 +792,84 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     repo: string,
     operation: { lease: IncidentOperationLease; stopHeartbeat: () => void },
   ): Promise<void> {
-    const completion = await withProtocolMutex(repo, () => {
-      const target = operationFile(repo, operation.lease.token);
-      const current = readOperationLease(target);
-      if (!sameLease(current, operation.lease)) return false;
-      atomicWrite(target, { ...current, state: "completed", heartbeat: now() });
-      return true;
-    });
-    if (!completion.incidentExists || !completion.value) {
-      operation.stopHeartbeat();
-      return;
-    }
-    // Desde aquí close puede retirar el marker aun si este PID sigue vivo.
-    operation.stopHeartbeat();
-    await withProtocolMutex(repo, () => {
-      const target = operationFile(repo, operation.lease.token);
-      const current = readOperationLease(target);
-      if (!sameLease(current, operation.lease) || current?.state !== "completed") return;
+    try {
+      let completion:
+        | { incidentExists: true; value: boolean }
+        | { incidentExists: false }
+        | undefined;
+      let transitionError: unknown;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          fs.unlink(target);
-          return;
+          completion = await withProtocolMutex(repo, () => {
+            const target = operationFile(repo, operation.lease.token);
+            const current = readOperationLease(target);
+            if (!sameLease(current, operation.lease)) return false;
+            atomicWrite(target, { ...current, state: "completed", heartbeat: now() });
+            return true;
+          });
+          transitionError = undefined;
+          break;
         } catch (error) {
-          if (errorCode(error) === "ENOENT") return;
-          if (attempt === 1) return;
+          transitionError = error;
         }
       }
-    });
+      if (!completion) {
+        const fallback = await withProtocolMutex(repo, () => {
+          const target = operationFile(repo, operation.lease.token);
+          if (!sameLease(readOperationLease(target), operation.lease)) return true;
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+              fs.unlink(target);
+              return true;
+            } catch (error) {
+              if (errorCode(error) === "ENOENT") return true;
+              if (attempt === 1) return false;
+            }
+          }
+          return false;
+        });
+        if (fallback.incidentExists && !fallback.value) throw transitionError;
+        return;
+      }
+      if (!completion.incidentExists || !completion.value) return;
+      // Desde aquí close puede retirar el marker aun si este PID sigue vivo.
+      await withProtocolMutex(repo, () => {
+        const target = operationFile(repo, operation.lease.token);
+        const current = readOperationLease(target);
+        if (!sameLease(current, operation.lease) || current?.state !== "completed") return;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            fs.unlink(target);
+            return;
+          } catch (error) {
+            if (errorCode(error) === "ENOENT") return;
+            if (attempt === 1) return;
+          }
+        }
+      });
+    } finally {
+      operation.stopHeartbeat();
+    }
+  }
+
+  async function runWithIncidentOperation<T>(
+    repo: string,
+    operation: { lease: IncidentOperationLease; stopHeartbeat: () => void },
+    action: () => Promise<T>,
+  ): Promise<T> {
+    let actionFailed = false;
+    try {
+      return await action();
+    } catch (error) {
+      actionFailed = true;
+      throw error;
+    } finally {
+      try {
+        await releaseIncidentOperation(repo, operation);
+      } catch (releaseError) {
+        if (!actionFailed) throw releaseError;
+      }
+    }
   }
 
   async function acquireCloseLease(
@@ -1141,11 +1219,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     if (current.closingAt !== undefined) throw new Error(`el incidente se está cerrando: ${repo}`);
     const operation = await acquireIncidentOperation(repo, "claim");
     if (!operation) throw new Error(`el incidente se está cerrando: ${repo}`);
-    try {
-      return await claimRemoteWithinOperation(repo, repoDir);
-    } finally {
-      await releaseIncidentOperation(repo, operation);
-    }
+    return runWithIncidentOperation(repo, operation, () => claimRemoteWithinOperation(repo, repoDir));
   }
 
   function fixerRequest(incident: Incident, branch: string): string {
@@ -1217,21 +1291,19 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         releaseOwnedOwner(repo, ownership.owner);
         return { status: "busy", session: null };
       }
-      let launched: { name: string };
-      try {
-        launched = await launch.launchManagedSession({
+      const launched = await runWithIncidentOperation(repo, launchOperation, async () => {
+        const result = await launch.launchManagedSession({
           repo,
           workflowId: "claude-plan-codex-impl",
           name: logicalName,
           mode: "workflow",
           request: fixerRequest(readIncident(repo) ?? incident, branch),
         });
-        if (!rewriteOwnedOwner(repo, ownership.owner, launched.name)) {
-          throw new Error(`se perdió el owner antes de registrar la sesión ${launched.name}`);
+        if (!rewriteOwnedOwner(repo, ownership.owner, result.name)) {
+          throw new Error(`se perdió el owner antes de registrar la sesión ${result.name}`);
         }
-      } finally {
-        await releaseIncidentOperation(repo, launchOperation);
-      }
+        return result;
+      });
       return { status: "launched", session: launched.name };
     } catch (error) {
       releaseOwnedOwner(repo, ownership.owner);
