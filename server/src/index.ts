@@ -1352,6 +1352,8 @@ export interface ServerDependencies {
   ensureCapability: () => string;
   startBackground: (app: express.Express) => Promise<Cleanup>;
   listen: (app: express.Express, port: number) => Promise<Server>;
+  launchManagedSession: typeof launchManagedSession;
+  writeMcpConfig: typeof writeAgentMcpConfig;
 }
 
 export interface StartServerOptions {
@@ -1439,6 +1441,8 @@ const defaultDependencies: ServerDependencies = {
   ensureCapability: ensureCapabilityToken,
   startBackground: startDefaultBackground,
   listen: listenOnLoopback,
+  launchManagedSession,
+  writeMcpConfig: writeAgentMcpConfig,
 };
 
 /**
@@ -1447,12 +1451,34 @@ const defaultDependencies: ServerDependencies = {
  */
 export async function startServer(options: StartServerOptions = {}): Promise<ServerHandle> {
   const deps = { ...defaultDependencies, ...options.deps };
-  let mcpConfigPath = "";
-  const app = deps.createApp({
-    launchManagedSession: (input) => launchManagedSession(input, {
-      startCommandFor: (startCommand) => withMcpConfig(startCommand, mcpConfigPath),
-    }),
+  let resolveReadiness!: (configPath: string) => void;
+  let rejectReadiness!: (error: Error) => void;
+  let readinessSettled = false;
+  const readiness = new Promise<string>((resolve, reject) => {
+    resolveReadiness = resolve;
+    rejectReadiness = reject;
   });
+  // El gate puede no tener consumidores; esta captura evita un rechazo global durante un fallo de boot.
+  void readiness.catch(() => undefined);
+  const failReadiness = () => {
+    if (readinessSettled) return;
+    readinessSettled = true;
+    rejectReadiness(new Error("servidor no disponible para lanzar la sesión"));
+  };
+  let app: express.Express;
+  try {
+    app = deps.createApp({
+      launchManagedSession: async (input) => {
+        const configPath = await readiness;
+        return deps.launchManagedSession(input, {
+          startCommandFor: (startCommand) => withMcpConfig(startCommand, configPath),
+        });
+      },
+    });
+  } catch (error) {
+    failReadiness();
+    throw error;
+  }
   const requestedPort = options.port ?? PORT;
   let background: Cleanup | undefined;
   let server: Server | undefined;
@@ -1471,8 +1497,11 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
     server = await deps.listen(app, requestedPort);
     const address = server.address();
     const port = typeof address === "object" && address ? (address as AddressInfo).port : requestedPort;
-    mcpConfigPath = writeAgentMcpConfig(DATA_DIR, port, capabilityToken) ?? "";
+    const mcpConfigPath = deps.writeMcpConfig(DATA_DIR, port, capabilityToken) ?? "";
+    readinessSettled = true;
+    resolveReadiness(mcpConfigPath);
   } catch (error) {
+    failReadiness();
     try { await background?.(); } catch { /* conserva el error de arranque */ }
     try { await stopTelegram?.(); } catch { /* Telegram sigue siendo opcional */ }
     throw error;

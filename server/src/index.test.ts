@@ -517,6 +517,103 @@ test("startServer detiene Telegram si el background falla", async () => {
   assert.deepEqual(events, ["telegram:start", "background:start", "telegram:stop"]);
 });
 
+test("launch temprano de Telegram espera listen y la configuración MCP lista", async () => {
+  const events: string[] = [];
+  const backgroundReady = deferred<() => void>();
+  const listenReady = deferred<any>();
+  let pendingLaunch!: Promise<unknown>;
+  let startedCommand = "";
+  const server = {
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43888 }),
+    close: (callback: (error?: Error) => void) => callback(),
+  };
+  const starting = startServer({
+    deps: {
+      createApp: (options) => createApp({
+        ...options,
+        telegram: fakeTelegram(events, {
+          start: () => {
+            events.push("telegram:start");
+            pendingLaunch = options.launchManagedSession!({ repo: "repo", name: "early", mode: "terminal" });
+            void pendingLaunch.catch(() => undefined);
+            return async () => { events.push("telegram:stop"); };
+          },
+        }),
+      }),
+      startBackground: () => backgroundReady.promise,
+      listen: async () => {
+        events.push("listen:start");
+        return listenReady.promise;
+      },
+      launchManagedSession: (async (_input: unknown, injected: any) => {
+        events.push("launch:real");
+        startedCommand = injected.startCommandFor("claude");
+        return { name: "early" };
+      }) as any,
+      writeMcpConfig: (_dir: string, port: number, token: string) => {
+        events.push(`mcp:${port}:${token}`);
+        return "/tmp/agent ready.json";
+      },
+      ensureCapability: () => "cap-fixture",
+    },
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(events, ["telegram:start"]);
+  backgroundReady.resolve(() => {});
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["telegram:start", "listen:start"]);
+  listenReady.resolve(server);
+
+  const handle = await starting;
+  await pendingLaunch;
+  assert.deepEqual(events.slice(0, 4), [
+    "telegram:start",
+    "listen:start",
+    "mcp:43888:cap-fixture",
+    "launch:real",
+  ]);
+  assert.equal(startedCommand, 'claude --mcp-config "/tmp/agent ready.json"');
+  await handle.close();
+});
+
+test("fallo de startup rechaza launch temprano y después detiene Telegram", async () => {
+  const events: string[] = [];
+  let launchOutcome!: Promise<unknown>;
+  const starting = startServer({
+    deps: {
+      createApp: (options) => createApp({
+        ...options,
+        telegram: fakeTelegram(events, {
+          start: () => {
+            events.push("telegram:start");
+            launchOutcome = options.launchManagedSession!(
+              { repo: "repo", name: "early-fail", mode: "terminal" },
+            ).then(
+              () => ({ ok: true }),
+              (error) => ({ ok: false, error }),
+            );
+            return async () => { events.push("telegram:stop"); };
+          },
+        }),
+      }),
+      startBackground: async () => { throw new Error("background privado"); },
+      listen: async () => { throw new Error("no debe escuchar"); },
+      launchManagedSession: (async () => {
+        events.push("launch:real");
+        return { name: "no-debe-lanzar" };
+      }) as any,
+      writeMcpConfig: () => { throw new Error("no debe escribir"); },
+    },
+  });
+
+  await assert.rejects(starting, /background privado/);
+  const outcome = await launchOutcome as { ok: boolean; error: Error };
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error.message, "servidor no disponible para lanzar la sesión");
+  assert.deepEqual(events, ["telegram:start", "telegram:stop"]);
+});
+
 function commenterInput(signal?: AbortSignal) {
   const shaA = "a".repeat(40);
   const shaB = "b".repeat(40);
