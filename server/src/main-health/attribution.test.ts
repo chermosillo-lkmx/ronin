@@ -145,6 +145,73 @@ test("attribution conserva coordenadas finales de cobertura cuando un commit pos
   }
 });
 
+test("attribution conserva paths Unicode con espacios mediante salida NUL", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cowork-main-health-paths-"));
+  const repoDir = join(root, "repo");
+  const relativeFile = "src/área con espacio.py";
+  mkdirSync(join(repoDir, "src"), { recursive: true });
+  try {
+    git(repoDir, "init", "-b", "main");
+    git(repoDir, "config", "user.name", "Ada Tester");
+    git(repoDir, "config", "user.email", "ada@example.com");
+    writeFileSync(join(repoDir, relativeFile), "covered = 1\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "chore: baseline");
+    const greenSha = git(repoDir, "rev-parse", "HEAD");
+
+    writeFileSync(join(repoDir, relativeFile), "covered = 1\nuncovered = 2\n");
+    git(repoDir, "commit", "-am", "feat: añadir línea Unicode");
+    const redSha = git(repoDir, "rev-parse", "HEAD");
+
+    const report = await attributeMainHealth({
+      repoDir,
+      red: measurement(redSha, "red", { uncovered_by_file: { [relativeFile]: [2] } }),
+      measurements: [measurement(greenSha, "green")],
+    });
+
+    assert.deepEqual(report.commits[0].files, [relativeFile]);
+    assert.deepEqual(report.commits[0].addedLinesByFile, { [relativeFile]: [2] });
+    assert.deepEqual(report.commits[0].uncoveredAddedByFile, { [relativeFile]: [2] });
+    assert.deepEqual(report.culpritShas, [redSha]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("attribution trata __proto__ como path Git sin indexar prototipos", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cowork-main-health-proto-"));
+  const repoDir = join(root, "repo");
+  const relativeFile = "__proto__";
+  mkdirSync(repoDir, { recursive: true });
+  try {
+    git(repoDir, "init", "-b", "main");
+    git(repoDir, "config", "user.name", "Ada Tester");
+    git(repoDir, "config", "user.email", "ada@example.com");
+    writeFileSync(join(repoDir, relativeFile), "covered\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "chore: baseline");
+    const greenSha = git(repoDir, "rev-parse", "HEAD");
+
+    writeFileSync(join(repoDir, relativeFile), "covered\nuncovered\n");
+    git(repoDir, "commit", "-am", "feat: tocar path especial");
+    const redSha = git(repoDir, "rev-parse", "HEAD");
+    const bySpecialPath = Object.fromEntries([[relativeFile, [2]]]) as Record<string, number[]>;
+
+    const report = await attributeMainHealth({
+      repoDir,
+      red: measurement(redSha, "red", { uncovered_by_file: bySpecialPath }),
+      measurements: [measurement(greenSha, "green")],
+    });
+
+    assert.deepEqual(report.commits[0].files, [relativeFile]);
+    assert.deepEqual(report.commits[0].addedLinesByFile, bySpecialPath);
+    assert.deepEqual(report.commits[0].uncoveredAddedByFile, bySpecialPath);
+    assert.doesNotThrow(() => JSON.stringify(report));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("attribution reporta explícitamente que no existe medición verde previa", async () => {
   const sha = "a".repeat(40);
   const port: GitPort = { run: async () => { throw new Error("git no debe ejecutarse sin verdes"); } };

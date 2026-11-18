@@ -80,37 +80,29 @@ function normalizedPath(path: string): string {
   return path.replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
-/** Extrae los números de línea nueva de un diff unificado con contexto cero. */
-function parseAddedLines(diff: string): Record<string, number[]> {
-  const result: Record<string, number[]> = {};
-  let file: string | null = null;
+/** Extrae los números de línea nueva; el path llega por el canal NUL, nunca por el patch. */
+function parseAddedLines(diff: string): number[] {
+  const result: number[] = [];
   let nextNewLine: number | null = null;
   for (const line of diff.split(/\r?\n/)) {
-    if (line.startsWith("diff --git ")) {
-      file = null;
-      nextNewLine = null;
-      continue;
-    }
-    if (nextNewLine === null && line.startsWith("+++ ")) {
-      const target = line.slice(4).trim();
-      file = target === "/dev/null" ? null : normalizedPath(target.replace(/^b\//, ""));
-      nextNewLine = null;
-      continue;
-    }
     const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
     if (hunk) {
       nextNewLine = Number(hunk[1]);
       continue;
     }
-    if (file === null || nextNewLine === null || line.startsWith("\\")) continue;
+    if (nextNewLine === null || line.startsWith("\\")) continue;
     if (line.startsWith("+")) {
-      (result[file] ??= []).push(nextNewLine);
+      result.push(nextNewLine);
       nextNewLine += 1;
     } else if (!line.startsWith("-")) {
       nextNewLine += 1;
     }
   }
   return result;
+}
+
+function nulPaths(output: string): string[] {
+  return output.split("\0").filter((path) => path.length > 0).map(normalizedPath);
 }
 
 function redIdTouchesFile(id: string, file: string): boolean {
@@ -127,7 +119,21 @@ function redIdTouchesFile(id: string, file: string): boolean {
   return normalizedId.replaceAll(".", "/").includes(stem);
 }
 
-async function commitDiff(git: GitPort, repoDir: string, sha: string): Promise<{ files: string[]; diff: string }> {
+async function diffsByFile(
+  git: GitPort,
+  repoDir: string,
+  files: string[],
+  argsFor: (file: string) => string[],
+): Promise<Map<string, number[]>> {
+  const result = new Map<string, number[]>();
+  for (const file of files) result.set(file, parseAddedLines(await git.run(argsFor(file), repoDir)));
+  return result;
+}
+
+async function commitDiff(git: GitPort, repoDir: string, sha: string): Promise<{
+  files: string[];
+  addedLinesByFile: Map<string, number[]>;
+}> {
   let parent: string | null = null;
   try {
     parent = (await git.run(["rev-parse", "--verify", `${sha}^1`], repoDir)).trim();
@@ -135,18 +141,23 @@ async function commitDiff(git: GitPort, repoDir: string, sha: string): Promise<{
     // Un commit raíz no tiene ^1.
   }
   if (parent) {
-    const [fileOutput, diff] = await Promise.all([
-      git.run(["diff", "--name-only", "--no-renames", parent, sha, "--"], repoDir),
-      git.run(["diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames", parent, sha, "--"], repoDir),
+    const fileOutput = await git.run(["diff", "--name-only", "-z", "--no-renames", parent, sha, "--"], repoDir);
+    const files = nulPaths(fileOutput);
+    const addedLinesByFile = await diffsByFile(git, repoDir, files, (file) => [
+      "diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames", parent!, sha, "--", file,
     ]);
-    return { files: lines(fileOutput).map(normalizedPath), diff };
+    return { files, addedLinesByFile };
   }
   // diff-tree --root compara el commit inicial contra el árbol vacío.
-  const [fileOutput, diff] = await Promise.all([
-    git.run(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--no-renames", sha, "--"], repoDir),
-    git.run(["diff-tree", "--root", "-p", "-U0", "--no-color", "--no-ext-diff", "--no-renames", sha, "--"], repoDir),
+  const fileOutput = await git.run(
+    ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", sha, "--"],
+    repoDir,
+  );
+  const files = nulPaths(fileOutput);
+  const addedLinesByFile = await diffsByFile(git, repoDir, files, (file) => [
+    "diff-tree", "--root", "--no-commit-id", "-p", "-U0", "--no-color", "--no-ext-diff", "--no-renames", sha, "--", file,
   ]);
-  return { files: lines(fileOutput).map(normalizedPath), diff };
+  return { files, addedLinesByFile };
 }
 
 async function inspectCommit(
@@ -157,15 +168,14 @@ async function inspectCommit(
   const metadata = await git.run(["show", "-s", "--format=%an%x00%ae%x00%B", sha, "--"], repoDir);
   const [name = "", email = "", ...messageParts] = metadata.split("\0");
   const message = messageParts.join("\0").trim();
-  const { files, diff } = await commitDiff(git, repoDir, sha);
-  const addedLinesByFile = parseAddedLines(diff);
+  const { files, addedLinesByFile } = await commitDiff(git, repoDir, sha);
   return {
     sha,
     author: { name: name.trim(), email: email.trim() },
     pr: parsePullRequest(message),
     message,
     files,
-    addedLinesByFile,
+    addedLinesByFile: Object.fromEntries(addedLinesByFile),
     uncoveredAddedByFile: {},
     newRed: [],
   };
@@ -187,15 +197,21 @@ async function assignUncoveredLines(
   commits: AttributionCommit[],
 ): Promise<void> {
   const bySha = new Map(commits.map((commit) => [commit.sha.toLowerCase(), commit]));
+  const uncoveredByCommit = new Map(commits.map((commit) => [commit, new Map<string, number[]>()]));
   for (const [file, uncoveredLines] of Object.entries(red.uncovered_by_file)) {
     if (uncoveredLines.length === 0) continue;
     const output = await git.run(["blame", "--first-parent", "--line-porcelain", red.sha, "--", file], repoDir);
     const blamed = blameByFinalLine(output);
     for (const finalLine of uncoveredLines) {
       const commit = bySha.get(blamed.get(finalLine) ?? "");
-      if (commit) (commit.uncoveredAddedByFile[file] ??= []).push(finalLine);
+      if (!commit) continue;
+      const paths = uncoveredByCommit.get(commit)!;
+      const values = paths.get(file) ?? [];
+      values.push(finalLine);
+      paths.set(file, values);
     }
   }
+  for (const commit of commits) commit.uncoveredAddedByFile = Object.fromEntries(uncoveredByCommit.get(commit)!);
 }
 
 export async function attributeMainHealth(
