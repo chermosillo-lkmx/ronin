@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
-import { readAllowedRoots, readEngine, readGateSettings, saveAllowedRoots, saveEngine } from "./settings.js";
+import {
+  defaultMainHealthSettings,
+  discoverMainHealthRepos,
+  readAllowedRoots,
+  readEngine,
+  readGateSettings,
+  readMainHealthSettings,
+  saveAllowedRoots,
+  saveEngine,
+} from "./settings.js";
 import { DEFAULT_ENGINE } from "./engine-config.js";
 
 test("saveAllowedRoots valida absolutas/existentes, resuelve symlinks y elimina duplicados", () => {
@@ -75,5 +84,103 @@ test("saveEngine conserva el gate escrito a mano", () => {
   conSettings(JSON.stringify({ gate: { timeoutMin: 90, maxConcurrent: 4 } }), (file) => {
     saveEngine(DEFAULT_ENGINE, file);
     assert.deepEqual(readGateSettings(file), { timeoutMin: 90, maxConcurrent: 4, maxConcurrentLight: 4 });
+  });
+});
+
+test("discoverMainHealthRepos conserva repos git únicos bajo LIEBRE_ROOT", () => {
+  const paths: Record<string, { cwd: string; real: boolean }> = {
+    api: { cwd: "/liebre/api", real: true },
+    externo: { cwd: "/otro/externo", real: true },
+    falso: { cwd: "/liebre/falso", real: false },
+    archivo: { cwd: "/liebre/archivo", real: true },
+  };
+  const repos = discoverMainHealthRepos(
+    ["api", "externo", "falso", "archivo", "api"],
+    (repo: string) => paths[repo],
+    "/liebre",
+    (cwd: string) => cwd !== "/liebre/archivo",
+  );
+  assert.deepEqual(repos, ["api"]);
+});
+
+test("readMainHealthSettings devuelve defaults completos con repos descubiertos", () => {
+  conSettings("{}", (file) => {
+    assert.deepEqual(readMainHealthSettings(file, () => ["api", "cfdis"]), {
+      enabled: true,
+      intervalMin: 10,
+      repos: ["api", "cfdis"],
+      commentOnPr: false,
+      remoteClaim: true,
+      autoFix: true,
+      leaseMin: 30,
+      aliases: {
+        "ant-liebre-api": "api",
+        "ant-ms-cfdis": "cfdis",
+        "ant-liebre-data-extraction-contpaqi": "dex",
+        "ant-liebre-app": "app",
+        "ant-ms-i18n": "i18n",
+        "ant-ms-permissions": "perms",
+      },
+    });
+  });
+});
+
+test("readMainHealthSettings sanea valores válidos de mainHealth", () => {
+  conSettings(JSON.stringify({ mainHealth: {
+    enabled: false,
+    intervalMin: 60,
+    repos: [" api ", "", 3, "api", "cfdis"],
+    commentOnPr: true,
+    remoteClaim: false,
+    autoFix: false,
+    leaseMin: 120,
+    aliases: { " repo-remoto ": "api-2", peligro: "../api", vacio: "", numero: 4 },
+  } }), (file) => {
+    assert.deepEqual(readMainHealthSettings(file, () => ["default"]), {
+      enabled: false,
+      intervalMin: 60,
+      repos: ["api", "cfdis"],
+      commentOnPr: true,
+      remoteClaim: false,
+      autoFix: false,
+      leaseMin: 120,
+      aliases: { "repo-remoto": "api-2" },
+    });
+  });
+});
+
+test("readMainHealthSettings hace caer tipos y enteros inválidos a defaults", () => {
+  conSettings(JSON.stringify({ mainHealth: {
+    enabled: "false",
+    intervalMin: 0,
+    repos: "api",
+    commentOnPr: 1,
+    remoteClaim: "true",
+    autoFix: null,
+    leaseMin: 1441,
+    aliases: [],
+  } }), (file) => {
+    assert.deepEqual(
+      readMainHealthSettings(file, () => ["default"]),
+      defaultMainHealthSettings(["default"]),
+    );
+  });
+});
+
+test("saveEngine y saveAllowedRoots conservan mainHealth saneado", () => {
+  const mainHealth = {
+    enabled: false,
+    intervalMin: 20,
+    repos: ["api"],
+    commentOnPr: true,
+    remoteClaim: false,
+    autoFix: false,
+    leaseMin: 45,
+    aliases: { remoto: "api" },
+  };
+  conSettings(JSON.stringify({ mainHealth }), (file) => {
+    saveEngine(DEFAULT_ENGINE, file);
+    saveAllowedRoots([dirname(file)], file);
+    assert.deepEqual(readMainHealthSettings(file, () => ["default"]), mainHealth);
   });
 });
