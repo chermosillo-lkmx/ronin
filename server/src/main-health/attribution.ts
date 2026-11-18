@@ -95,10 +95,6 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-function normalizedPath(path: string): string {
-  return path.replaceAll("\\", "/").replace(/^\.\//, "");
-}
-
 /** Extrae los números de línea nueva; el path llega por el canal NUL, nunca por el patch. */
 function parseAddedLines(diff: string): number[] {
   const result: number[] = [];
@@ -125,13 +121,13 @@ function nulPaths(output: string): string[] {
 }
 
 function redIdTouchesFile(id: string, file: string): boolean {
-  const path = normalizedPath(file).toLowerCase();
+  const path = file.toLowerCase();
   const stem = path.replace(/\.[^/.]+$/, "");
   const testTree = /^(?:tests?|__tests__)\//.test(path);
   const basename = stem.slice(stem.lastIndexOf("/") + 1);
   const tokens = id.toLowerCase().match(/[a-z0-9_./\\-]+/g) ?? [];
   for (const rawToken of tokens) {
-    const token = rawToken.replaceAll("\\", "/");
+    const token = rawToken;
     const forms = new Set([token]);
     if (token.includes("/")) forms.add(token.replace(/\.[^/.]+$/, ""));
     if (!token.includes("/") && token.includes(".")) forms.add(token.replaceAll(".", "/"));

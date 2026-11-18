@@ -256,6 +256,45 @@ test("attribution trata pathspecs mágicos y backslash como filenames literales"
   }
 });
 
+test("attribution no confunde backslash literal con separador slash al cruzar IDs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cowork-main-health-backslash-"));
+  const repoDir = join(root, "repo");
+  mkdirSync(repoDir, { recursive: true });
+  try {
+    git(repoDir, "init", "-b", "main");
+    git(repoDir, "config", "user.name", "Ada Tester");
+    git(repoDir, "config", "user.email", "ada@example.com");
+    writeFileSync(join(repoDir, "README.md"), "baseline\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "chore: baseline");
+    const greenSha = git(repoDir, "rev-parse", "HEAD");
+
+    const backslashFile = "back\\slash.ts";
+    writeFileSync(join(repoDir, backslashFile), "literal\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "feat: añadir backslash literal");
+    const backslashSha = git(repoDir, "rev-parse", "HEAD");
+
+    mkdirSync(join(repoDir, "back"));
+    writeFileSync(join(repoDir, "back", "slash.ts"), "separator\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "feat: añadir slash separador");
+    const redSha = git(repoDir, "rev-parse", "HEAD");
+    const redId = `${backslashFile}::fails`;
+
+    const report = await attributeMainHealth({
+      repoDir,
+      red: measurement(redSha, "red", { failed: [redId] }),
+      measurements: [measurement(greenSha, "green")],
+    });
+
+    assert.deepEqual(report.culpritShas, [backslashSha]);
+    assert.deepEqual(report.commits.map((commit) => commit.newRed), [[redId], []]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("attribution relaciona IDs por segmentos exactos y no app dentro de happy", async () => {
   const root = mkdtempSync(join(tmpdir(), "cowork-main-health-ids-"));
   const repoDir = join(root, "repo");
