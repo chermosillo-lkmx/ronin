@@ -2,6 +2,57 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as api from "./api.js";
 
+test("getMainHealth devuelve filas válidas y filtra datos corruptos o cruzados", async () => {
+  const originalFetch = globalThis.fetch;
+  const valid = {
+    repo: "ant-liebre-api",
+    sha: "a".repeat(40),
+    status: "red",
+    total: 87.5,
+    floor: 90,
+    failedCount: 3,
+    measuredAt: 1_800_000_000_000,
+    incident: {
+      id: "ant-liebre-api@aaaaaaa",
+      openedAt: 1_800_000_000_100,
+      owner: { session: "cowork-main-health-api", heartbeat: 1_800_000_000_200 },
+      remoteOwner: "host-a/321",
+    },
+  };
+  try {
+    globalThis.fetch = async (input) => {
+      assert.equal(input, "/api/main-health");
+      return new Response(JSON.stringify([
+        valid,
+        { ...valid, repo: "otro-repo" },
+        { ...valid, sha: "ABC" },
+        { ...valid, status: "yellow" },
+        { ...valid, incident: { ...valid.incident, id: "otro-repo@aaaaaaa" } },
+      ]));
+    };
+
+    assert.deepEqual(await (api as any).getMainHealth(), [valid]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("getMainHealth falla cerrado ante HTTP, JSON, shape o fetch inválidos", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response("no", { status: 503 });
+    assert.deepEqual(await (api as any).getMainHealth(), []);
+    globalThis.fetch = async () => new Response("{no-json");
+    assert.deepEqual(await (api as any).getMainHealth(), []);
+    globalThis.fetch = async () => new Response(JSON.stringify({ rows: [] }));
+    assert.deepEqual(await (api as any).getMainHealth(), []);
+    globalThis.fetch = async () => { throw new Error("sin red"); };
+    assert.deepEqual(await (api as any).getMainHealth(), []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("getHealth conserva false y trata verifyGate ausente como desconocido", async () => {
   assert.equal(typeof api.getHealth, "function");
   const originalFetch = globalThis.fetch;
