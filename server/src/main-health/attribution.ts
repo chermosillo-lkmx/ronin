@@ -223,8 +223,9 @@ async function assignUncoveredLines(
 ): Promise<void> {
   const bySha = new Map(commits.map((commit) => [commit.sha.toLowerCase(), commit]));
   const uncoveredByCommit = new Map(commits.map((commit) => [commit, new Map<string, number[]>()]));
+  const touchedFiles = new Set(commits.flatMap((commit) => commit.files));
   for (const [file, uncoveredLines] of Object.entries(red.uncovered_by_file)) {
-    if (uncoveredLines.length === 0) continue;
+    if (uncoveredLines.length === 0 || !touchedFiles.has(file)) continue;
     const output = await git.run(["blame", "--first-parent", "--line-porcelain", red.sha, "--", file], repoDir);
     const blamed = blameByFinalLine(output);
     for (const finalLine of uncoveredLines) {

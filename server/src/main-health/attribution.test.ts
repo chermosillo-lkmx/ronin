@@ -163,16 +163,27 @@ test("attribution conserva paths Unicode con espacios mediante salida NUL", asyn
     git(repoDir, "commit", "-am", "feat: añadir línea Unicode");
     const redSha = git(repoDir, "rev-parse", "HEAD");
 
-    const report = await attributeMainHealth({
+    const input = {
       repoDir,
-      red: measurement(redSha, "red", { uncovered_by_file: { [relativeFile]: [2] } }),
+      red: measurement(redSha, "red", {
+        uncovered_by_file: { "generated/missing.py": [1], [relativeFile]: [2] },
+      }),
       measurements: [measurement(greenSha, "green")],
-    });
+    };
+    const report = await attributeMainHealth(input);
 
     assert.deepEqual(report.commits[0].files, [relativeFile]);
     assert.deepEqual(report.commits[0].addedLinesByFile, { [relativeFile]: [2] });
     assert.deepEqual(report.commits[0].uncoveredAddedByFile, { [relativeFile]: [2] });
     assert.deepEqual(report.culpritShas, [redSha]);
+
+    const failingPort: GitPort = {
+      run: async (args, cwd) => {
+        if (args[0] === "blame" && args.at(-1) === relativeFile) throw new Error("falló blame tocado");
+        return execFileSync("git", args, { cwd, encoding: "utf8" });
+      },
+    };
+    await assert.rejects(() => attributeMainHealth(input, failingPort), /falló blame tocado/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
