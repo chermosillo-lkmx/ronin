@@ -311,6 +311,61 @@ test("guard de recovery impide que un loser retire el mutex vivo instalado por e
   });
 });
 
+test("encadena guard generacional si el recuperador anterior muere antes de reemplazar mutex", () => {
+  withRoot((root) => {
+    const directory = join(root, "incidents", "api");
+    const mutex = join(directory, "owner.mutex.json");
+    const baseGuard = join(directory, "owner.mutex.recover-999-token-muerto");
+    const childGuard = join(directory, "owner.mutex.recover-999-token-muerto.after-88-token-recuperador-8888");
+    const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
+    original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    original.claimOwner("api", "cowork-viejo");
+    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999 }));
+
+    const dyingRecovery = createIncidentManager({
+      root,
+      now: () => 70_000,
+      pid: () => 88,
+      leaseMin: 1,
+      pidAlive: () => false,
+      mutexToken: () => "token-recuperador-8888",
+      fs: {
+        unlink(target) {
+          if (target === mutex) throw new Error("recuperador murió antes de reemplazar");
+          return rmSync(target);
+        },
+      },
+    });
+
+    assert.throws(
+      () => dyingRecovery.claimOwner("api", "cowork-no-llega"),
+      /recuperador murió antes de reemplazar/,
+    );
+    assert.deepEqual(JSON.parse(readFileSync(baseGuard, "utf8")), {
+      observed: { pid: 999, token: "token-muerto" },
+      recovery: { pid: 88, token: "token-recuperador-8888" },
+    });
+    assert.deepEqual(JSON.parse(readFileSync(mutex, "utf8")), { token: "token-muerto", pid: 999 });
+
+    const successor = createIncidentManager({
+      root,
+      now: () => 70_000,
+      pid: () => 99,
+      leaseMin: 1,
+      pidAlive: () => false,
+      mutexToken: () => "token-sucesor-99999999",
+    });
+    const result = successor.claimOwner("api", "cowork-recuperado");
+
+    assert.equal(result.acquired, true);
+    assert.equal(result.owner?.session, "cowork-recuperado");
+    assert.deepEqual(JSON.parse(readFileSync(childGuard, "utf8")), {
+      observed: { pid: 999, token: "token-muerto" },
+      recovery: { pid: 99, token: "token-sucesor-99999999" },
+    });
+  });
+});
+
 test("publicación indivisible del mutex nunca deja JSON parcial visible", () => {
   withRoot((root) => {
     const directory = join(root, "incidents", "api");

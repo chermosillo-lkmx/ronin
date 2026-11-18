@@ -172,12 +172,23 @@ interface OwnerMutex {
   pid: number;
 }
 
+interface OwnerRecoveryGuard {
+  observed: OwnerMutex;
+  recovery: OwnerMutex;
+}
+
 function isOwnerMutex(value: unknown): value is OwnerMutex {
   return isRecord(value)
     && typeof value.token === "string"
     && SAFE_MUTEX_TOKEN.test(value.token)
     && Number.isInteger(value.pid)
     && (value.pid as number) > 0;
+}
+
+function isOwnerRecoveryGuard(value: unknown): value is OwnerRecoveryGuard {
+  return isRecord(value)
+    && isOwnerMutex(value.observed)
+    && isOwnerMutex(value.recovery);
 }
 
 function processPidAlive(candidatePid: number): boolean {
@@ -328,18 +339,21 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     }
   }
 
-  function mutexRecoveryGuard(repo: string, mutex: OwnerMutex): string {
-    return join(incidentDir(repo), `owner.mutex.recover-${mutex.pid}-${mutex.token}`);
+  function mutexRecoveryGuard(repo: string, observed: OwnerMutex, previous?: OwnerMutex): string {
+    const base = `owner.mutex.recover-${observed.pid}-${observed.token}`;
+    return join(
+      incidentDir(repo),
+      previous ? `${base}.after-${previous.pid}-${previous.token}` : base,
+    );
   }
 
-  /** Prepara el JSON completo fuera del nombre común y lo publica con link(2) exclusivo. */
-  function publishOwnerMutex(repo: string, mutex: OwnerMutex): boolean {
-    const temporary = join(incidentDir(repo), `owner.mutex.tmp-${mutex.pid}-${mutex.token}`);
+  /** Prepara JSON completo fuera del destino y lo publica con link(2) exclusivo. */
+  function publishJsonExclusive(target: string, temporary: string, value: unknown): boolean {
     let fd: number | undefined;
     let prepared = false;
     try {
       fd = fs.open(temporary, "wx");
-      fs.write(fd, `${JSON.stringify(mutex)}\n`);
+      fs.write(fd, `${JSON.stringify(value)}\n`);
       fs.fsync(fd);
       prepared = true;
     } finally {
@@ -352,15 +366,40 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
       }
     }
     try {
-      fs.link(temporary, mutexFile(repo));
+      fs.link(temporary, target);
     } catch (error) {
       if (errorCode(error) !== "EEXIST") throw error;
       return false;
     } finally {
       try { fs.unlink(temporary); } catch { /* el hardlink publicado conserva el inode completo */ }
     }
+    return true;
+  }
+
+  function publishOwnerMutex(repo: string, mutex: OwnerMutex): boolean {
+    const temporary = join(incidentDir(repo), `owner.mutex.tmp-${mutex.pid}-${mutex.token}`);
+    if (!publishJsonExclusive(mutexFile(repo), temporary, mutex)) return false;
     const verified = readOwnerMutex(repo);
     return verified?.token === mutex.token && verified.pid === mutex.pid;
+  }
+
+  function readRecoveryGuard(target: string): OwnerRecoveryGuard | null {
+    try {
+      const value: unknown = JSON.parse(fs.readFile(target, "utf8") as string);
+      return isOwnerRecoveryGuard(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function publishRecoveryGuard(target: string, guard: OwnerRecoveryGuard): boolean {
+    const temporary = `${target}.tmp-${guard.recovery.pid}-${guard.recovery.token}`;
+    if (!publishJsonExclusive(target, temporary, guard)) return false;
+    const verified = readRecoveryGuard(target);
+    return verified?.observed.token === guard.observed.token
+      && verified.observed.pid === guard.observed.pid
+      && verified.recovery.token === guard.recovery.token
+      && verified.recovery.pid === guard.recovery.pid;
   }
 
   function releaseOwnerMutex(repo: string, mutex: OwnerMutex): void {
@@ -383,36 +422,31 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     // Un mutex publicado siempre es JSON completo. Algo ilegible falla cerrado.
     if (!occupied || pidAlive(occupied.pid)) return null;
 
-    const guard = mutexRecoveryGuard(repo, occupied);
-    try {
-      // El guard es un hardlink de ESTA generación; nunca se borra ni se reutiliza.
-      fs.link(mutexFile(repo), guard);
-    } catch (error) {
-      if (errorCode(error) === "EEXIST" || errorCode(error) === "ENOENT") return null;
-      throw error;
-    }
-    const guarded = (() => {
-      try {
-        const value: unknown = JSON.parse(fs.readFile(guard, "utf8") as string);
-        return isOwnerMutex(value) ? value : null;
-      } catch {
-        return null;
+    let guardPath = mutexRecoveryGuard(repo, occupied);
+    const candidateGuard: OwnerRecoveryGuard = { observed: occupied, recovery: candidate };
+    for (let generation = 0; generation < 8; generation += 1) {
+      if (publishRecoveryGuard(guardPath, candidateGuard)) {
+        const confirmed = readOwnerMutex(repo);
+        if (!confirmed
+          || confirmed.token !== occupied.token
+          || confirmed.pid !== occupied.pid) return null;
+        try {
+          fs.unlink(mutexFile(repo));
+        } catch (error) {
+          if (errorCode(error) === "ENOENT") return null;
+          throw error;
+        }
+        return publishOwnerMutex(repo, candidate) ? candidate : null;
       }
-    })();
-    const confirmed = readOwnerMutex(repo);
-    if (!guarded
-      || !confirmed
-      || guarded.token !== occupied.token
-      || guarded.pid !== occupied.pid
-      || confirmed.token !== occupied.token
-      || confirmed.pid !== occupied.pid) return null;
-    try {
-      fs.unlink(mutexFile(repo));
-    } catch (error) {
-      if (errorCode(error) === "ENOENT") return null;
-      throw error;
+
+      const previous = readRecoveryGuard(guardPath);
+      if (!previous
+        || previous.observed.token !== occupied.token
+        || previous.observed.pid !== occupied.pid
+        || pidAlive(previous.recovery.pid)) return null;
+      guardPath = mutexRecoveryGuard(repo, occupied, previous.recovery);
     }
-    return publishOwnerMutex(repo, candidate) ? candidate : null;
+    return null;
   }
 
   function writeOwnerExclusive(repo: string, owner: IncidentOwner): void {
