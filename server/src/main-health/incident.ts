@@ -111,6 +111,8 @@ export interface IncidentManagerDeps {
   pidAlive?: (pid: number) => boolean;
   mutexToken?: () => string;
   mutexLeaseMs?: number;
+  operationLeaseMs?: number;
+  operationPollMs?: number;
   leaseMin?: number;
   tmux?: TmuxPort;
   host?: () => string;
@@ -191,6 +193,23 @@ interface OwnerRecoveryGuard {
   recovery: OwnerMutex;
 }
 
+type IncidentOperationKind = "claim" | "launch";
+
+interface IncidentOperationLease {
+  token: string;
+  pid: number;
+  kind: IncidentOperationKind;
+  createdAt: number;
+  heartbeat: number;
+}
+
+interface IncidentCloseLease {
+  token: string;
+  pid: number;
+  createdAt: number;
+  heartbeat: number;
+}
+
 function isOwnerMutex(value: unknown): value is OwnerMutex {
   return isRecord(value)
     && typeof value.token === "string"
@@ -205,6 +224,31 @@ function isOwnerRecoveryGuard(value: unknown): value is OwnerRecoveryGuard {
   return isRecord(value)
     && isOwnerMutex(value.observed)
     && isOwnerMutex(value.recovery);
+}
+
+function isOperationLease(value: unknown): value is IncidentOperationLease {
+  return isRecord(value)
+    && typeof value.token === "string"
+    && SAFE_MUTEX_TOKEN.test(value.token)
+    && Number.isInteger(value.pid)
+    && (value.pid as number) > 0
+    && (value.kind === "claim" || value.kind === "launch")
+    && typeof value.createdAt === "number"
+    && Number.isFinite(value.createdAt)
+    && typeof value.heartbeat === "number"
+    && Number.isFinite(value.heartbeat);
+}
+
+function isCloseLease(value: unknown): value is IncidentCloseLease {
+  return isRecord(value)
+    && typeof value.token === "string"
+    && SAFE_MUTEX_TOKEN.test(value.token)
+    && Number.isInteger(value.pid)
+    && (value.pid as number) > 0
+    && typeof value.createdAt === "number"
+    && Number.isFinite(value.createdAt)
+    && typeof value.heartbeat === "number"
+    && Number.isFinite(value.heartbeat);
 }
 
 function processPidAlive(candidatePid: number): boolean {
@@ -283,6 +327,9 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   const pidAlive = deps.pidAlive ?? processPidAlive;
   const mutexToken = deps.mutexToken ?? randomUUID;
   const mutexLeaseMs = deps.mutexLeaseMs ?? 30_000;
+  const operationLeaseMs = deps.operationLeaseMs ?? 30_000;
+  const operationPollMs = Math.max(1, deps.operationPollMs ?? 10);
+  const protocolWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
   const host = deps.host ?? hostname;
   const leaseMs = (deps.leaseMin ?? deps.settings?.leaseMin ?? DEFAULT_MAIN_HEALTH_SETTINGS.leaseMin) * 60_000;
   const tmux = deps.tmux ?? { hasSession };
@@ -497,6 +544,248 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     return pidAlive(mutex.pid) && now() - mutex.createdAt < mutexLeaseMs;
   }
 
+  function operationFile(repo: string, token: string): string {
+    if (!SAFE_MUTEX_TOKEN.test(token)) throw new Error("token de operación inválido");
+    return join(incidentDir(repo), `operation-${token}.json`);
+  }
+
+  function closeLeaseFile(repo: string): string {
+    return join(incidentDir(repo), "close.lease.json");
+  }
+
+  function readOperationLease(target: string): IncidentOperationLease | null {
+    try {
+      const value: unknown = JSON.parse(fs.readFile(target, "utf8") as string);
+      return isOperationLease(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function readCloseLease(repo: string): IncidentCloseLease | null {
+    try {
+      const value: unknown = JSON.parse(fs.readFile(closeLeaseFile(repo), "utf8") as string);
+      if (!isCloseLease(value)) throw new Error(`lease de cierre corrupto: ${repo}`);
+      return value;
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  function protocolLeaseIsLive(lease: IncidentOperationLease | IncidentCloseLease): boolean {
+    // Un heartbeat atrasado no prueba que la operación terminó: mientras el PID
+    // exista, retirar el marker permitiría que el efecto externo se reanudara sin fence.
+    return pidAlive(lease.pid) || now() - lease.heartbeat < operationLeaseMs;
+  }
+
+  function waitForProtocol(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, operationPollMs));
+  }
+
+  async function withProtocolMutex<T>(
+    repo: string,
+    action: () => T,
+  ): Promise<{ incidentExists: true; value: T } | { incidentExists: false }> {
+    while (readIncident(repo)) {
+      let mutex: OwnerMutex | null = null;
+      try {
+        mutex = acquireOwnerMutex(repo, pid());
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") return { incidentExists: false };
+        throw error;
+      }
+      if (mutex) {
+        try {
+          return { incidentExists: true, value: action() };
+        } finally {
+          releaseOwnerMutex(repo, mutex);
+        }
+      }
+      await waitForProtocol();
+    }
+    return { incidentExists: false };
+  }
+
+  function acquireProtocolMutexSync(repo: string): OwnerMutex | null {
+    const deadline = Date.now() + Math.max(1_000, Math.min(30_000, mutexLeaseMs + 1_000));
+    while (readIncident(repo)) {
+      try {
+        const mutex = acquireOwnerMutex(repo, pid());
+        if (mutex) return mutex;
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") return null;
+        throw error;
+      }
+      if (Date.now() >= deadline) throw new Error(`timeout adquiriendo mutex de incidente: ${repo}`);
+      Atomics.wait(protocolWaitBuffer, 0, 0, operationPollMs);
+    }
+    return null;
+  }
+
+  function sameLease(
+    left: IncidentOperationLease | IncidentCloseLease | null,
+    right: IncidentOperationLease | IncidentCloseLease,
+  ): boolean {
+    return left?.token === right.token
+      && left.pid === right.pid
+      && left.createdAt === right.createdAt;
+  }
+
+  function startOperationHeartbeat(repo: string, lease: IncidentOperationLease): () => void {
+    const interval = setInterval(() => {
+      let mutex: OwnerMutex | null = null;
+      try {
+        mutex = acquireOwnerMutex(repo, lease.pid);
+        if (!mutex) return;
+        const current = readOperationLease(operationFile(repo, lease.token));
+        if (sameLease(current, lease)) {
+          atomicWrite(operationFile(repo, lease.token), { ...current, heartbeat: now() });
+        }
+      } catch {
+        // El consumidor detectará pérdida del lease al concluir la operación.
+      } finally {
+        if (mutex) releaseOwnerMutex(repo, mutex);
+      }
+    }, Math.max(1, Math.floor(operationLeaseMs / 3)));
+    interval.unref();
+    return () => clearInterval(interval);
+  }
+
+  function startCloseHeartbeat(repo: string, lease: IncidentCloseLease): () => void {
+    const interval = setInterval(() => {
+      let mutex: OwnerMutex | null = null;
+      try {
+        mutex = acquireOwnerMutex(repo, lease.pid);
+        if (!mutex) return;
+        const current = readCloseLease(repo);
+        if (sameLease(current, lease)) {
+          atomicWrite(closeLeaseFile(repo), { ...current, heartbeat: now() });
+        }
+      } catch {
+        // El lease se recuperará al vencer si su proceso deja de renovarlo.
+      } finally {
+        if (mutex) releaseOwnerMutex(repo, mutex);
+      }
+    }, Math.max(1, Math.floor(operationLeaseMs / 3)));
+    interval.unref();
+    return () => clearInterval(interval);
+  }
+
+  async function acquireIncidentOperation(
+    repo: string,
+    kind: IncidentOperationKind,
+  ): Promise<{ lease: IncidentOperationLease; stopHeartbeat: () => void } | null> {
+    const token = mutexToken();
+    if (!SAFE_MUTEX_TOKEN.test(token)) throw new Error("token de operación inválido");
+    const result = await withProtocolMutex(repo, () => {
+      const incident = readIncident(repo);
+      if (!incident || incident.closingAt !== undefined || readCloseLease(repo)) return null;
+      const timestamp = now();
+      const lease: IncidentOperationLease = { token, pid: pid(), kind, createdAt: timestamp, heartbeat: timestamp };
+      const target = operationFile(repo, token);
+      const temporary = `${target}.tmp-${lease.pid}-${token}`;
+      if (!publishJsonExclusive(target, temporary, lease)) throw new Error(`operación duplicada: ${token}`);
+      const afterPublish = readIncident(repo);
+      if (!afterPublish || afterPublish.closingAt !== undefined || readCloseLease(repo)) {
+        fs.unlink(target);
+        return null;
+      }
+      return lease;
+    });
+    const lease = result.incidentExists ? result.value : null;
+    return lease ? { lease, stopHeartbeat: startOperationHeartbeat(repo, lease) } : null;
+  }
+
+  async function releaseIncidentOperation(
+    repo: string,
+    operation: { lease: IncidentOperationLease; stopHeartbeat: () => void },
+  ): Promise<void> {
+    operation.stopHeartbeat();
+    await withProtocolMutex(repo, () => {
+      const target = operationFile(repo, operation.lease.token);
+      if (!sameLease(readOperationLease(target), operation.lease)) return;
+      try {
+        fs.unlink(target);
+      } catch (error) {
+        if (errorCode(error) !== "ENOENT") throw error;
+      }
+    });
+  }
+
+  async function acquireCloseLease(
+    repo: string,
+  ): Promise<{ lease: IncidentCloseLease; stopHeartbeat: () => void } | null> {
+    const token = mutexToken();
+    if (!SAFE_MUTEX_TOKEN.test(token)) throw new Error("token de cierre inválido");
+    while (readIncident(repo)) {
+      const result = await withProtocolMutex(repo, () => {
+        const current = readCloseLease(repo);
+        if (!current) {
+          const timestamp = now();
+          const candidate: IncidentCloseLease = { token, pid: pid(), createdAt: timestamp, heartbeat: timestamp };
+          const target = closeLeaseFile(repo);
+          if (publishJsonExclusive(target, `${target}.tmp-${candidate.pid}-${token}`, candidate)) return candidate;
+        } else if (!protocolLeaseIsLive(current)) {
+          const stale = join(incidentDir(repo), `close.lease.stale-${current.pid}-${current.token}-${now()}`);
+          fs.rename(closeLeaseFile(repo), stale);
+          const timestamp = now();
+          const candidate: IncidentCloseLease = { token, pid: pid(), createdAt: timestamp, heartbeat: timestamp };
+          const target = closeLeaseFile(repo);
+          if (publishJsonExclusive(target, `${target}.tmp-${candidate.pid}-${token}`, candidate)) return candidate;
+        }
+        return null;
+      });
+      if (!result.incidentExists) return null;
+      const acquired = result.value;
+      if (acquired) return { lease: acquired, stopHeartbeat: startCloseHeartbeat(repo, acquired) };
+      await waitForProtocol();
+    }
+    return null;
+  }
+
+  async function releaseCloseLease(
+    repo: string,
+    closeLease: { lease: IncidentCloseLease; stopHeartbeat: () => void },
+  ): Promise<void> {
+    closeLease.stopHeartbeat();
+    await withProtocolMutex(repo, () => {
+      if (!sameLease(readCloseLease(repo), closeLease.lease)) return;
+      try {
+        fs.unlink(closeLeaseFile(repo));
+      } catch (error) {
+        if (errorCode(error) !== "ENOENT") throw error;
+      }
+    });
+  }
+
+  async function drainIncidentOperations(repo: string): Promise<void> {
+    while (readIncident(repo)) {
+      const result = await withProtocolMutex(repo, () => {
+        let hasLiveOperation = false;
+        const entries = fs.readdir(incidentDir(repo), { encoding: "utf8" }) as string[];
+        for (const entry of entries) {
+          if (!entry.startsWith("operation-") || !entry.endsWith(".json") || entry.includes(".tmp-")) continue;
+          const target = join(incidentDir(repo), entry);
+          const lease = readOperationLease(target);
+          if (!lease || entry !== `operation-${lease.token}.json`) {
+            throw new Error(`marker de operación corrupto: ${entry}`);
+          }
+          if (protocolLeaseIsLive(lease)) {
+            hasLiveOperation = true;
+            continue;
+          }
+          fs.unlink(target);
+        }
+        return hasLiveOperation;
+      });
+      if (!result.incidentExists) return;
+      const hasLiveOperation = result.value;
+      if (!hasLiveOperation) return;
+      await waitForProtocol();
+    }
+  }
+
   function writeOwnerExclusive(repo: string, owner: IncidentOwner): void {
     const target = ownerFile(repo);
     const temporary = `${target}.tmp-${owner.pid}-${randomUUID()}`;
@@ -598,23 +887,35 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   }
 
   function persistOwnClaim(incident: Incident, claimSha: string, branch: string): Incident {
-    const current = readClaimableIncident(incident);
-    const stored: Incident = {
-      ...current,
-      claimSha,
-      claimBranch: branch,
-    };
-    delete stored.remoteOwner;
-    storeIncident(stored);
-    return stored;
+    const mutex = acquireProtocolMutexSync(incident.repo);
+    if (!mutex) throw new Error(`el incidente cambió durante el claim: ${incident.repo}`);
+    try {
+      const current = readClaimableIncident(incident);
+      const stored: Incident = {
+        ...current,
+        claimSha,
+        claimBranch: branch,
+      };
+      delete stored.remoteOwner;
+      storeIncident(stored);
+      return stored;
+    } finally {
+      releaseOwnerMutex(incident.repo, mutex);
+    }
   }
 
   function persistRemoteOwner(incident: Incident, remoteOwner: string): void {
-    const current = readClaimableIncident(incident);
-    const stored: Incident = { ...current, remoteOwner };
-    delete stored.claimSha;
-    delete stored.claimBranch;
-    storeIncident(stored);
+    const mutex = acquireProtocolMutexSync(incident.repo);
+    if (!mutex) throw new Error(`el incidente cambió durante el claim: ${incident.repo}`);
+    try {
+      const current = readClaimableIncident(incident);
+      const stored: Incident = { ...current, remoteOwner };
+      delete stored.claimSha;
+      delete stored.claimBranch;
+      storeIncident(stored);
+    } finally {
+      releaseOwnerMutex(incident.repo, mutex);
+    }
   }
 
   function rewriteOwnedOwner(repo: string, expected: IncidentOwner, session: string): boolean {
@@ -654,7 +955,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     }
   }
 
-  async function claimRemote(repo: string, repoDir: string): Promise<RemoteClaimResult> {
+  async function claimRemoteWithinOperation(repo: string, repoDir: string): Promise<RemoteClaimResult> {
     assertRepo(repo);
     const incident = readIncident(repo);
     if (!incident) throw new Error(`no hay incidente abierto: ${repo}`);
@@ -738,6 +1039,20 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     }
   }
 
+  async function claimRemote(repo: string, repoDir: string): Promise<RemoteClaimResult> {
+    assertRepo(repo);
+    const current = readIncident(repo);
+    if (!current) throw new Error(`no hay incidente abierto: ${repo}`);
+    if (current.closingAt !== undefined) throw new Error(`el incidente se está cerrando: ${repo}`);
+    const operation = await acquireIncidentOperation(repo, "claim");
+    if (!operation) throw new Error(`el incidente se está cerrando: ${repo}`);
+    try {
+      return await claimRemoteWithinOperation(repo, repoDir);
+    } finally {
+      await releaseIncidentOperation(repo, operation);
+    }
+  }
+
   function fixerRequest(incident: Incident, branch: string): string {
     return [
       "Atiende este incidente de main-health.",
@@ -802,15 +1117,25 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         releaseOwnedOwner(repo, ownership.owner);
         return { status: "busy", session: null };
       }
-      const launched = await launch.launchManagedSession({
-        repo,
-        workflowId: "claude-plan-codex-impl",
-        name: logicalName,
-        mode: "workflow",
-        request: fixerRequest(readIncident(repo) ?? incident, branch),
-      });
-      if (!rewriteOwnedOwner(repo, ownership.owner, launched.name)) {
-        throw new Error(`se perdió el owner antes de registrar la sesión ${launched.name}`);
+      const launchOperation = await acquireIncidentOperation(repo, "launch");
+      if (!launchOperation) {
+        releaseOwnedOwner(repo, ownership.owner);
+        return { status: "busy", session: null };
+      }
+      let launched: { name: string };
+      try {
+        launched = await launch.launchManagedSession({
+          repo,
+          workflowId: "claude-plan-codex-impl",
+          name: logicalName,
+          mode: "workflow",
+          request: fixerRequest(readIncident(repo) ?? incident, branch),
+        });
+        if (!rewriteOwnedOwner(repo, ownership.owner, launched.name)) {
+          throw new Error(`se perdió el owner antes de registrar la sesión ${launched.name}`);
+        }
+      } finally {
+        await releaseIncidentOperation(repo, launchOperation);
       }
       return { status: "launched", session: launched.name };
     } catch (error) {
@@ -873,55 +1198,75 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     repoDir: string | undefined,
     fixerRun: Promise<EnsureFixerResult> | undefined,
   ): Promise<Incident | null> {
-    if (fixerRun) {
-      try {
-        await fixerRun;
-      } catch {
-        // El cierre debe continuar aunque el fixer en vuelo haya fallado al observar closingAt.
-      }
-    }
-    const current = readIncident(repo);
-    if (!current) return null;
-    if (current.claimSha && current.claimBranch) {
-      if (!repoDir) throw new Error(`repoDir es obligatorio para cerrar un claim propio: ${repo}`);
-      const remoteOwner = await readRemoteClaim(repoDir, current.claimBranch);
-      if (remoteOwner === current.claimSha) {
-        const ref = `refs/heads/${current.claimBranch}`;
+    const closeLease = await acquireCloseLease(repo);
+    if (!closeLease) return null;
+    try {
+      if (fixerRun) {
         try {
-          await git.run([
-            "push",
-            `--force-with-lease=${ref}:${current.claimSha}`,
-            "origin",
-            `:${ref}`,
-          ], repoDir, { env: gitEnv });
-        } catch (error) {
-          if (!isRemoteClaimConflict(error)) throw error;
-          const afterConflict = await readRemoteClaim(repoDir, current.claimBranch);
-          if (afterConflict === current.claimSha) throw error;
+          await fixerRun;
+        } catch {
+          // El cierre debe continuar aunque el fixer en vuelo haya fallado al observar closingAt.
         }
       }
+      await drainIncidentOperations(repo);
+      const current = readIncident(repo);
+      if (!current) return null;
+      if (current.claimSha && current.claimBranch) {
+        if (!repoDir) throw new Error(`repoDir es obligatorio para cerrar un claim propio: ${repo}`);
+        const remoteOwner = await readRemoteClaim(repoDir, current.claimBranch);
+        if (remoteOwner === current.claimSha) {
+          const ref = `refs/heads/${current.claimBranch}`;
+          try {
+            await git.run([
+              "push",
+              `--force-with-lease=${ref}:${current.claimSha}`,
+              "origin",
+              `:${ref}`,
+            ], repoDir, { env: gitEnv });
+          } catch (error) {
+            if (!isRemoteClaimConflict(error)) throw error;
+            const afterConflict = await readRemoteClaim(repoDir, current.claimBranch);
+            if (afterConflict === current.claimSha) throw error;
+          }
+        }
+      }
+      // El rename comparte el mutex del protocolo: ningún segundo close puede
+      // observar el directorio entre el último check del lease y el archivo.
+      const archived = await withProtocolMutex(repo, () => {
+        const latest = readIncident(repo);
+        if (!latest) return null;
+        const closed: Incident = { ...latest, closedAt: now() };
+        atomicWrite(join(incidentDir(repo), "incident.json"), closed);
+        const archiveParent = join(incidentsRoot, `${repo}.closed`);
+        fs.mkdir(archiveParent, { recursive: true });
+        const archiveId = `${repo}@${latest.firstRedSha.slice(0, 7)}`;
+        fs.rename(incidentDir(repo), join(archiveParent, `${archiveId}-${closed.closedAt}`));
+        return clone(closed);
+      });
+      return archived.incidentExists ? archived.value : null;
+    } finally {
+      await releaseCloseLease(repo, closeLease);
     }
-    const closed: Incident = { ...current, closedAt: now() };
-    atomicWrite(join(incidentDir(repo), "incident.json"), closed);
-    const archiveParent = join(incidentsRoot, `${repo}.closed`);
-    fs.mkdir(archiveParent, { recursive: true });
-    const archiveId = `${repo}@${current.firstRedSha.slice(0, 7)}`;
-    fs.rename(incidentDir(repo), join(archiveParent, `${archiveId}-${closed.closedAt}`));
-    return clone(closed);
   }
 
   function closeIncident(repo: string, repoDir?: string): Promise<Incident | null> {
     const running = closingRuns.get(repo);
     if (running) return running;
     if (!safeRepo(repo)) return Promise.resolve(null);
-    const current = readIncident(repo);
-    if (!current) return Promise.resolve(null);
-    if (current.claimSha && current.claimBranch && !repoDir) {
-      return Promise.reject(new Error(`repoDir es obligatorio para cerrar un claim propio: ${repo}`));
-    }
-
-    if (current.closingAt === undefined) {
-      storeIncident({ ...current, closingAt: now() });
+    let mutex: OwnerMutex | null = null;
+    try {
+      mutex = acquireProtocolMutexSync(repo);
+      if (!mutex) return Promise.resolve(null);
+      const current = readIncident(repo);
+      if (!current) return Promise.resolve(null);
+      if (current.claimSha && current.claimBranch && !repoDir) {
+        return Promise.reject(new Error(`repoDir es obligatorio para cerrar un claim propio: ${repo}`));
+      }
+      if (current.closingAt === undefined) {
+        storeIncident({ ...current, closingAt: now() });
+      }
+    } finally {
+      if (mutex) releaseOwnerMutex(repo, mutex);
     }
     const fixerRun = fixerRuns.get(repo);
     const operation = closeIncidentOnce(repo, repoDir, fixerRun).finally(() => {

@@ -4,6 +4,7 @@ import { existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, renameSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { writeJsonAtomic } from "../atomic.js";
 import type { MainHealthAttribution } from "./attribution.js";
 import { createIncidentManager, type IncidentGitPort, type IncidentLaunchInput } from "./incident.js";
 
@@ -870,6 +871,358 @@ test("close conserva closingAt si falla cleanup y permite reintentar", async () 
     assert.equal(closed?.closedAt, 3_000);
     assert.equal(deletionAttempts, 2);
     assert.equal(manager.readIncident("api"), null);
+  });
+});
+
+test("close de otro manager drena un claim cuyo push ya está en vuelo", async () => {
+  await withRootAsync(async (root) => {
+    const claimSha = "c".repeat(40);
+    let remoteSha: string | null = null;
+    let reportPush: () => void = () => {};
+    let releasePush: () => void = () => {};
+    const pushStarted = new Promise<void>((resolve) => { reportPush = resolve; });
+    const pushGate = new Promise<void>((resolve) => { releasePush = resolve; });
+    const gitPort: IncidentGitPort = {
+      async run(args) {
+        if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+        if (args[0] === "commit-tree") return `${claimSha}\n`;
+        if (args[0] === "ls-remote") return remoteSha ? `${remoteSha}\trefs/heads/fix/main-health-api\n` : "";
+        if (args[0] === "push" && args.includes(":refs/heads/fix/main-health-api")) {
+          remoteSha = null;
+          return "";
+        }
+        if (args[0] === "push") {
+          reportPush();
+          await pushGate;
+          remoteSha = claimSha;
+          return "";
+        }
+        throw new Error(`Git inesperado: ${args.join(" ")}`);
+      },
+    };
+    const first = createIncidentManager({ root, pid: () => 1_001, pidAlive: () => true, git: gitPort });
+    const second = createIncidentManager({ root, pid: () => 1_002, pidAlive: () => true, git: gitPort });
+    first.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    const claiming = first.claimRemote("api", "/repo");
+    await pushStarted;
+    let closeSettled = false;
+    const closing = second.closeIncident("api", "/repo");
+    void closing.then(() => { closeSettled = true; }, () => { closeSettled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    let midFlightFailure: unknown;
+    try {
+      assert.equal(closeSettled, false);
+      assert.notEqual(second.readIncident("api"), null);
+    } catch (error) {
+      midFlightFailure = error;
+    } finally {
+      releasePush();
+    }
+
+    const [claimOutcome, closeOutcome] = await Promise.allSettled([claiming, closing]);
+    if (midFlightFailure) throw midFlightFailure;
+    assert.equal(claimOutcome.status, "fulfilled");
+    assert.equal(closeOutcome.status, "fulfilled");
+    assert.equal(remoteSha, null);
+    assert.equal(second.readIncident("api"), null);
+  });
+});
+
+test("close externo espera launch y rewrite de owner antes de archivar", async () => {
+  await withRootAsync(async (root) => {
+    let now = 1_000;
+    let launches = 0;
+    let archivedOwnerHeartbeat: number | null = null;
+    let reportLaunch: () => void = () => {};
+    let releaseLaunch: () => void = () => {};
+    const launchStarted = new Promise<void>((resolve) => { reportLaunch = resolve; });
+    const launchGate = new Promise<void>((resolve) => { releaseLaunch = resolve; });
+    const sessions = new Set<string>();
+    const first = createIncidentManager({
+      root,
+      now: () => now,
+      pid: () => 1_101,
+      pidAlive: () => true,
+      settings: { aliases: {}, autoFix: true, remoteClaim: false },
+      tmux: { hasSession: async (session) => sessions.has(session) },
+      launch: {
+        async launchManagedSession(input) {
+          launches += 1;
+          reportLaunch();
+          await launchGate;
+          const session = `cowork-${input.name}`;
+          sessions.add(session);
+          return { name: session };
+        },
+      },
+    });
+    const incidentDirectory = join(root, "incidents", "api");
+    const second = createIncidentManager({
+      root,
+      now: () => now,
+      pid: () => 1_102,
+      pidAlive: () => true,
+      settings: { aliases: {}, autoFix: true, remoteClaim: false },
+      tmux: { hasSession: async (session) => sessions.has(session) },
+      fs: {
+        rename(oldPath, newPath) {
+          if (oldPath === incidentDirectory && String(newPath).includes("api.closed")) {
+            archivedOwnerHeartbeat = JSON.parse(readFileSync(join(incidentDirectory, "owner.json"), "utf8")).heartbeat;
+          }
+          renameSync(oldPath, newPath);
+        },
+      },
+    });
+    first.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    const fixing = first.ensureFixer("api", "/repo");
+    await launchStarted;
+    let closeSettled = false;
+    const closing = second.closeIncident("api");
+    void closing.then(() => { closeSettled = true; }, () => { closeSettled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    let midFlightFailure: unknown;
+    try {
+      assert.equal(closeSettled, false);
+      assert.notEqual(second.readIncident("api"), null);
+    } catch (error) {
+      midFlightFailure = error;
+    } finally {
+      now = 2_000;
+      releaseLaunch();
+    }
+
+    const [fixOutcome, closeOutcome] = await Promise.allSettled([fixing, closing]);
+    if (midFlightFailure) throw midFlightFailure;
+    assert.equal(fixOutcome.status, "fulfilled");
+    assert.equal(closeOutcome.status, "fulfilled");
+    assert.equal(archivedOwnerHeartbeat, 2_000);
+    assert.equal(launches, 1);
+    assert.equal(second.readIncident("api"), null);
+  });
+});
+
+test("dos managers cierran concurrentemente con un solo cleanup y archivo", async () => {
+  await withRootAsync(async (root) => {
+    const claimSha = "c".repeat(40);
+    let remoteSha: string | null = null;
+    let deletionAttempts = 0;
+    let pauseLookup = false;
+    let lookupPaused = false;
+    let reportLookup: () => void = () => {};
+    let releaseLookup: () => void = () => {};
+    const lookupStarted = new Promise<void>((resolve) => { reportLookup = resolve; });
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const gitPort: IncidentGitPort = {
+      async run(args) {
+        if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+        if (args[0] === "commit-tree") return `${claimSha}\n`;
+        if (args[0] === "ls-remote") {
+          if (pauseLookup && !lookupPaused) {
+            lookupPaused = true;
+            reportLookup();
+            await lookupGate;
+          }
+          return remoteSha ? `${remoteSha}\trefs/heads/fix/main-health-api\n` : "";
+        }
+        if (args[0] === "push" && args.includes(":refs/heads/fix/main-health-api")) {
+          deletionAttempts += 1;
+          remoteSha = null;
+          return "";
+        }
+        if (args[0] === "push") { remoteSha = claimSha; return ""; }
+        throw new Error(`Git inesperado: ${args.join(" ")}`);
+      },
+    };
+    const first = createIncidentManager({ root, pid: () => 1_201, pidAlive: () => true, git: gitPort });
+    const second = createIncidentManager({ root, pid: () => 1_202, pidAlive: () => true, git: gitPort });
+    first.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    await first.claimRemote("api", "/repo");
+    pauseLookup = true;
+
+    const firstClose = first.closeIncident("api", "/repo");
+    await lookupStarted;
+    const secondClose = second.closeIncident("api", "/repo");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releaseLookup();
+    const outcomes = await Promise.allSettled([firstClose, secondClose]);
+
+    assert.deepEqual(outcomes.map((outcome) => outcome.status), ["fulfilled", "fulfilled"]);
+    const closedValues = outcomes.map((outcome) => outcome.status === "fulfilled" ? outcome.value : null);
+    assert.equal(closedValues.filter(Boolean).length, 1);
+    assert.equal(deletionAttempts, 1);
+    assert.equal(readdirSync(join(root, "incidents", "api.closed")).length, 1);
+  });
+});
+
+test("close recupera leases durables de un proceso muerto sin esperar indefinidamente", async () => {
+  await withRootAsync(async (root) => {
+    const manager = createIncidentManager({
+      root,
+      now: () => 10_000,
+      pid: () => 1_302,
+      pidAlive: (candidate) => candidate === 1_302,
+      operationLeaseMs: 100,
+      operationPollMs: 1,
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    const directory = join(root, "incidents", "api");
+    const operationToken = "dead-operation-token";
+    const closeToken = "dead-close-token";
+    writeFileSync(join(directory, `operation-${operationToken}.json`), JSON.stringify({
+      token: operationToken,
+      pid: 1_301,
+      kind: "claim",
+      createdAt: 1_000,
+      heartbeat: 1_000,
+    }));
+    writeFileSync(join(directory, "close.lease.json"), JSON.stringify({
+      token: closeToken,
+      pid: 1_301,
+      createdAt: 1_000,
+      heartbeat: 1_000,
+    }));
+
+    const closed = await manager.closeIncident("api");
+
+    assert.equal(closed?.repo, "api");
+    assert.equal(manager.readIncident("api"), null);
+    const archive = join(root, "incidents", "api.closed", `${closed!.id}-${closed!.closedAt}`);
+    assert.equal(readdirSync(archive).some((entry) => entry.startsWith("operation-")), false);
+    assert.equal(readdirSync(archive).some((entry) => entry.startsWith("close.lease.stale-")), true);
+  });
+});
+
+test("close nunca roba una operación cuyo PID sigue vivo aunque venza el heartbeat", async () => {
+  await withRootAsync(async (root) => {
+    let operationAlive = true;
+    const manager = createIncidentManager({
+      root,
+      now: () => 10_000,
+      pid: () => 1_312,
+      pidAlive: (candidate) => candidate === 1_312 || (candidate === 1_311 && operationAlive),
+      operationLeaseMs: 100,
+      operationPollMs: 1,
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    const directory = join(root, "incidents", "api");
+    const operationToken = "live-operation-token";
+    writeFileSync(join(directory, `operation-${operationToken}.json`), JSON.stringify({
+      token: operationToken,
+      pid: 1_311,
+      kind: "claim",
+      createdAt: 1_000,
+      heartbeat: 1_000,
+    }));
+
+    let settled = false;
+    const closing = manager.closeIncident("api");
+    void closing.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+
+    operationAlive = false;
+    const closed = await closing;
+    assert.equal(closed?.repo, "api");
+  });
+});
+
+test("rename final ocurre bajo el mutex durable del protocolo", async () => {
+  await withRootAsync(async (root) => {
+    const incidentDirectory = join(root, "incidents", "api");
+    let renameHeldMutex = false;
+    const first = createIncidentManager({
+      root,
+      pid: () => 1_321,
+      pidAlive: () => true,
+      operationPollMs: 1,
+      fs: {
+        rename(oldPath, newPath) {
+          if (oldPath === incidentDirectory && String(newPath).includes("api.closed")) {
+            renameHeldMutex = existsSync(join(incidentDirectory, "owner.mutex.json"));
+          }
+          renameSync(oldPath, newPath);
+        },
+      },
+    });
+    first.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    const firstResult = await first.closeIncident("api");
+
+    assert.equal(firstResult?.repo, "api");
+    assert.equal(renameHeldMutex, true);
+  });
+});
+
+test("closingAt no borra la intención de claim persistida concurrentemente", async () => {
+  await withRootAsync(async (root) => {
+    const claimSha = "c".repeat(40);
+    let remoteSha: string | null = null;
+    let closing: Promise<unknown> | undefined;
+    let closeScheduled = false;
+    let staleIncident: string | undefined;
+    let servedStaleIncident = false;
+    let second!: ReturnType<typeof createIncidentManager>;
+    const gitPort: IncidentGitPort = {
+      async run(args) {
+        if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+        if (args[0] === "commit-tree") return `${claimSha}\n`;
+        if (args[0] === "ls-remote") return remoteSha ? `${remoteSha}\trefs/heads/fix/main-health-api\n` : "";
+        if (args[0] === "push" && args.includes(":refs/heads/fix/main-health-api")) {
+          remoteSha = null;
+          return "";
+        }
+        if (args[0] === "push") {
+          remoteSha = claimSha;
+          return "";
+        }
+        throw new Error(`Git inesperado: ${args.join(" ")}`);
+      },
+    };
+    const first = createIncidentManager({
+      root,
+      pid: () => 1_401,
+      pidAlive: () => true,
+      git: gitPort,
+      atomicWrite(target, value) {
+        if (!closeScheduled
+          && typeof value === "object"
+          && value !== null
+          && "claimSha" in value) {
+          closeScheduled = true;
+          staleIncident = readFileSync(target, "utf8");
+          closing = Promise.resolve().then(() => second.closeIncident("api", "/repo"));
+        }
+        writeJsonAtomic(target, value);
+      },
+    });
+    second = createIncidentManager({
+      root,
+      pid: () => 1_402,
+      pidAlive: () => true,
+      git: gitPort,
+      fs: {
+        readFile(path, options) {
+          if (!servedStaleIncident
+            && staleIncident
+            && path === join(root, "incidents", "api", "incident.json")
+            && !existsSync(join(root, "incidents", "api", "owner.mutex.json"))) {
+            servedStaleIncident = true;
+            return staleIncident;
+          }
+          return readFileSync(path, options as never);
+        },
+      },
+    });
+    first.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    await first.claimRemote("api", "/repo");
+    assert.ok(closing);
+    await closing;
+
+    assert.equal(remoteSha, null);
+    assert.equal(second.readIncident("api"), null);
   });
 });
 
