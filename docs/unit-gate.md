@@ -81,7 +81,9 @@ intento, por lo que se puede re-tocar el sentinela para correr el mismo commit.
    Puede apoyarse en junits de corridas aparte vía `UNIT_GATE_EXTRA_JUNIT` (ver abajo).
 3. **La suite completa pasa**: `0 failed / 0 errors` y `> 0` tests. Python ejecuta `pytest` con
    `--cov=<dir> --cov-report=xml:reports/coverage-gate.xml` (una `--cov` por directorio de producto) además del junit (`ant-ms-cfdis` añade
-   `-o log_cli=false -m "not functional"`). Node ejecuta `npx vitest run --coverage
+   `-o log_cli=false -m "not functional"` y corre con `RUN_REAL_PG=1` salvo que el llamador fije otro valor:
+   se mide con Postgres real, la suite levanta su propio `postgres:15` y `fake-gcs-server`, así que la máquina del
+   gate necesita Docker vivo; decisión del 2026-11-18). Node ejecuta `npx vitest run --coverage
    --coverage.reporter=cobertura --coverage.reportsDirectory=reports/coverage-gate` además del
    reporter junit. Intérprete Python: `<repo>/.venv/bin/python` y, si el worktree no tiene,
    `~/code/lkmx/liebre/<repo>/.venv/bin/python`.

@@ -702,8 +702,11 @@ for repo in "${candidates[@]}"; do
   if [ "$runner" = "python" ]; then
     coverage_xml="$REPORTS/coverage-gate.xml"; rm -f "$coverage_xml"
     PY="$(py_for "$repo")" || { bad "$name: sin intérprete (.venv) ni en el worktree ni en $MAIN_ROOT/$name"; continue; }
-    extra=()
-    case "$name" in ant-ms-cfdis) extra=(-o log_cli=false -m "not functional");; esac
+    extra=(); suite_env=()
+    # cfdis se mide CON Postgres real (decisión 2026-11-18): su suite levanta un postgres:15
+    # desechable cuando RUN_REAL_PG=1. Sólo para esa suite (env por comando, no export: no se
+    # filtra a los demás repos de la misma corrida); un RUN_REAL_PG explícito del llamador manda.
+    case "$name" in ant-ms-cfdis) extra=(-o log_cli=false -m "not functional"); suite_env=("RUN_REAL_PG=${RUN_REAL_PG:-1}");; esac
     cov=(); while IFS= read -r d; do [ -n "$d" ] && cov+=("--cov=$d"); done <<< "$src_dirs"
     par=()
     if [ -n "${UNIT_GATE_XDIST:-}" ]; then
@@ -713,7 +716,7 @@ for repo in "${candidates[@]}"; do
         say "   ⚠ $name: UNIT_GATE_XDIST=$UNIT_GATE_XDIST pero pytest-xdist no está instalado — suite en serie"
       fi
     fi
-    say "   → $PY -m pytest tests -q -o addopts='' ${extra[*]+"${extra[*]}"} ${par[*]+"${par[*]}"} -p no:cacheprovider ${cov[*]} --cov-report=xml:$coverage_xml --junitxml=$junit"
+    say "   → ${suite_env[*]+"${suite_env[*]} "}$PY -m pytest tests -q -o addopts='' ${extra[*]+"${extra[*]}"} ${par[*]+"${par[*]}"} -p no:cacheprovider ${cov[*]} --cov-report=xml:$coverage_xml --junitxml=$junit"
     # pytest --cov escribe `.coverage` en el cwd (raíz del sub-repo): en repos que no lo ignoran
     # dejaba el árbol sucio y el gate de merge lo rechazaba. Va a la carpeta de reportes del gate,
     # absoluto por si algún test cambia de directorio.
@@ -721,7 +724,7 @@ for repo in "${candidates[@]}"; do
     # -p pytest_ronin_sigterm (scripts/): el SIGTERM de Ronin al cortar por timeout se vuelve
     # KeyboardInterrupt y pytest corre el teardown de sus fixtures antes del SIGKILL.
     COVERAGE_FILE="$(cd "$REPORTS" && pwd)/.coverage" PYTHONPATH="$GATE_SCRIPTS_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-    "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider -p pytest_ronin_sigterm "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
+    env ${suite_env[@]+"${suite_env[@]}"} "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider -p pytest_ronin_sigterm "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
     suite_pid=$!
     wait "$suite_pid"; rc=$?
     suite_pid=""
