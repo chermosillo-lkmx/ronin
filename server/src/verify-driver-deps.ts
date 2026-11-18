@@ -43,7 +43,7 @@ export interface VerifyDriverDepSources {
 /** Carpeta propia de reportes del gate de Ronin, relativa al worktree (la lee unit-gate.sh). */
 export const GATE_REPORTS_DIR = "reports/ronin-gate";
 
-/** Timeout y entorno del gate: el override del repo gana; xdist y el cupo global llegan al script. */
+/** Timeout y entorno del gate: el override del repo gana; xdist, realPg y el cupo global llegan al script. */
 export function gateConfigFrom(global: GateSettings, repo: RepoGate): { timeoutMs: number; env: Record<string, string> } {
   return {
     timeoutMs: (repo.timeoutMin ?? global.timeoutMin) * 60_000,
@@ -51,6 +51,7 @@ export function gateConfigFrom(global: GateSettings, repo: RepoGate): { timeoutM
       UNIT_GATE_REPORTS_DIR: GATE_REPORTS_DIR,
       UNIT_GATE_MAX_SUITES: String(global.maxConcurrent),
       ...(repo.xdist ? { UNIT_GATE_XDIST: String(repo.xdist) } : {}),
+      ...(repo.realPg === true ? { UNIT_GATE_REAL_PG: "1" } : {}),
     },
   };
 }
