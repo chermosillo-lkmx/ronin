@@ -826,6 +826,86 @@ test("main que avanza durante attribution no publica ni ejecuta efectos del SHA 
   assert.equal(notifications, 0);
 });
 
+test("efectos de apertura sobreviven un fallo Git posterior a la transición durable", async () => {
+  const deps = baseDeps(["repo"]);
+  deps.readSettings = () => baseSettings(["repo"], { commentOnPr: true });
+  let gitChecks = 0;
+  deps.git.lsRemoteMain = async () => {
+    gitChecks += 1;
+    if (gitChecks <= 2) return SHA_A;
+    throw new Error("git transitorio posterior al open");
+  };
+  let current: Incident | null = null;
+  let fixers = 0;
+  let comments = 0;
+  let notifications = 0;
+  deps.incidents = {
+    ...noopIncidents(),
+    readIncident: () => current,
+    openIncident: (input) => {
+      current = { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+      return current;
+    },
+    ensureFixer: async () => { fixers += 1; },
+  };
+  deps.commentPullRequest = async () => { comments += 1; };
+  deps.notifier = {
+    opened: async () => { notifications += 1; },
+    closed: async () => { notifications += 1; },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(current?.firstRedSha, SHA_A, "la apertura ya cruzó la frontera durable");
+  assert.equal(gitChecks, 2, "no vuelve a consultar Git después del open confirmado");
+  assert.equal(notifications, 1);
+  assert.equal(comments, 1);
+  assert.equal(fixers, 1);
+});
+
+test("notificación de cierre sobrevive un fallo Git posterior a la transición durable", async () => {
+  const deps = baseDeps(["repo"]);
+  let gitChecks = 0;
+  deps.git.lsRemoteMain = async () => {
+    gitChecks += 1;
+    if (gitChecks <= 2) return SHA_A;
+    throw new Error("git transitorio posterior al close");
+  };
+  let current: Incident | null = {
+    id: `repo@${SHA_A.slice(0, 7)}`,
+    repo: "repo",
+    firstRedSha: SHA_A,
+    openedAt: 1,
+    summary: "rojo",
+    attribution: attribution(measurement("repo", SHA_A, "red")),
+  };
+  let notifications = 0;
+  deps.incidents = {
+    ...noopIncidents(),
+    readIncident: () => current,
+    closeIncident: async () => {
+      if (!current) return null;
+      const closed = { ...current, closedAt: 2 };
+      current = null;
+      return closed;
+    },
+  };
+  deps.notifier = {
+    opened: async () => { notifications += 1; },
+    closed: async () => { notifications += 1; },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.evaluate("repo", measurement("repo", SHA_A, "green"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(current, null, "el cierre ya cruzó la frontera durable");
+  assert.equal(gitChecks, 2, "no vuelve a consultar Git después del close confirmado");
+  assert.equal(notifications, 1);
+});
+
 test("evaluate abre una vez, delega fixer, respeta commentOnPr=false y luego cierra", async () => {
   const store = memoryStore();
   const deps = baseDeps(["repo"], store);
