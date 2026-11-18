@@ -106,17 +106,23 @@ function nulPaths(output: string): string[] {
 }
 
 function redIdTouchesFile(id: string, file: string): boolean {
-  const normalizedId = id.toLowerCase().replaceAll("\\", "/");
   const path = normalizedPath(file).toLowerCase();
-  if (normalizedId.includes(path)) return true;
-
   const stem = path.replace(/\.[^/.]+$/, "");
-  const classname = normalizedId.split("::", 1)[0].trim();
-  const classnamePath = classname.replaceAll(".", "/");
-  if (classnamePath === stem || classnamePath.startsWith(`${stem}/`) || stem.endsWith(`/${classnamePath}`)) return true;
-
-  // También cubre IDs que incluyen un módulo fuente en notación Python (p. ej. src.app).
-  return normalizedId.replaceAll(".", "/").includes(stem);
+  const testTree = /^(?:tests?|__tests__)\//.test(path);
+  const basename = stem.slice(stem.lastIndexOf("/") + 1);
+  const tokens = id.toLowerCase().match(/[a-z0-9_./\\-]+/g) ?? [];
+  for (const rawToken of tokens) {
+    const token = rawToken.replaceAll("\\", "/");
+    const forms = new Set([token]);
+    if (token.includes("/")) forms.add(token.replace(/\.[^/.]+$/, ""));
+    if (!token.includes("/") && token.includes(".")) forms.add(token.replaceAll(".", "/"));
+    if (/\.(?:py|js|jsx|ts|tsx|go|rb|java)$/.test(token)) forms.add(token.replace(/\.[^.]+$/, ""));
+    for (const form of forms) {
+      if (form === path || form === stem || form.startsWith(`${stem}/`)) return true;
+      if (testTree && !form.includes("/") && form === basename) return true;
+    }
+  }
+  return false;
 }
 
 async function diffsByFile(

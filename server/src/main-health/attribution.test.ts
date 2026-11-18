@@ -212,6 +212,43 @@ test("attribution trata __proto__ como path Git sin indexar prototipos", async (
   }
 });
 
+test("attribution relaciona IDs por segmentos exactos y no app dentro de happy", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cowork-main-health-ids-"));
+  const repoDir = join(root, "repo");
+  mkdirSync(join(repoDir, "tests"), { recursive: true });
+  mkdirSync(join(repoDir, "src"), { recursive: true });
+  try {
+    git(repoDir, "init", "-b", "main");
+    git(repoDir, "config", "user.name", "Ada Tester");
+    git(repoDir, "config", "user.email", "ada@example.com");
+    writeFileSync(join(repoDir, "README.md"), "baseline\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "chore: baseline");
+    const greenSha = git(repoDir, "rev-parse", "HEAD");
+
+    writeFileSync(join(repoDir, "app.py"), "app = True\n");
+    writeFileSync(join(repoDir, "tests", "test_app.py"), "def test_break(): assert False\n");
+    writeFileSync(join(repoDir, "src", "core.py"), "raise RuntimeError\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "feat: añadir regresiones");
+    const redSha = git(repoDir, "rev-parse", "HEAD");
+    const falsePositive = "tests.test_happy::test_no";
+    const exactTest = "tests.test_app::test_break";
+    const exactModule = "src.core::ImportError";
+
+    const report = await attributeMainHealth({
+      repoDir,
+      red: measurement(redSha, "red", { failed: [falsePositive, exactTest], errors: [exactModule] }),
+      measurements: [measurement(greenSha, "green")],
+    });
+
+    assert.deepEqual(report.commits[0].newRed, [exactTest, exactModule]);
+    assert.deepEqual(report.unattributedRed, [falsePositive]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("attribution reporta explícitamente que no existe medición verde previa", async () => {
   const sha = "a".repeat(40);
   const port: GitPort = { run: async () => { throw new Error("git no debe ejecutarse sin verdes"); } };
