@@ -39,6 +39,7 @@ export interface SendMessageParams {
   chatId: number;
   threadId?: number;
   text: string;
+  signal?: AbortSignal;
   keyboard?: InlineButton[][];
   replyTo?: number;
   forceReply?: boolean;
@@ -126,14 +127,14 @@ export function createTelegramApi(token: string, fetchImpl: typeof fetch = fetch
     getMe: () => json("getMe", {}),
     getUpdates: (offset, timeoutSec, signal) =>
       json("getUpdates", { offset, timeout: timeoutSec, allowed_updates: ["message", "callback_query", "my_chat_member"] }, signal),
-    sendMessage: ({ chatId, threadId, text, keyboard, replyTo, forceReply }) =>
+    sendMessage: ({ chatId, threadId, text, signal, keyboard, replyTo, forceReply }) =>
       json("sendMessage", {
         chat_id: chatId,
         message_thread_id: threadId,
         text,
         reply_to_message_id: replyTo,
         reply_markup: keyboard ? keyboardMarkup(keyboard) : forceReply ? { force_reply: true } : undefined,
-      }),
+      }, signal),
     editMessage: async ({ chatId, messageId, text, keyboard }) => {
       await json("editMessageText", {
         chat_id: chatId,

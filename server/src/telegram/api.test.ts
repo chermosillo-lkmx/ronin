@@ -58,6 +58,22 @@ test("sendMessage traduce teclado, hilo, respuesta y force_reply", async () => {
   assert.deepEqual(bodies[1].reply_markup, { force_reply: true });
 });
 
+test("sendMessage propaga AbortSignal al fetch", async () => {
+  const controller = new AbortController();
+  let seenSignal: AbortSignal | null | undefined;
+  const api = createTelegramApi("1:T", (async (_url: string, init: RequestInit) => {
+    seenSignal = init.signal;
+    return new Response(JSON.stringify({
+      ok: true,
+      result: { message_id: 1, chat: { id: 1, type: "supergroup" } },
+    }));
+  }) as unknown as typeof fetch);
+
+  await api.sendMessage({ chatId: 9, text: "hola", signal: controller.signal });
+
+  assert.equal(seenSignal, controller.signal);
+});
+
 test("sendDocument envía multipart con el nombre de archivo", async () => {
   let form: FormData | undefined;
   const api = createTelegramApi("1:T", (async (_u: string, init: RequestInit) => {
