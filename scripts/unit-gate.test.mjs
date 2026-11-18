@@ -1183,6 +1183,36 @@ test("60. suite roja sin medición y AUTO=0 falla explícitamente «sin medició
   assert.match(r.out, /UNIT-GATE: FAIL/);
 });
 
+test("60b. AUTO mide main sincrónicamente y relee la medición", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const base = fx.git("merge-base", "HEAD", "origin/main").trim();
+  const healthDir = join(fx.tmp, "main-health-auto");
+  const fake = join(fx.tmp, "fake-main-health.sh");
+  const marker = join(fx.tmp, "main-health-args");
+  const measurement = join(fx.tmp, "measurement.json");
+  writeFileSync(measurement, JSON.stringify({
+    sha: base, repo: "origin", status: "red", tests: 2, total: 89, floor: 80,
+    failed: ["tests.test_other::test_other"], errors: [], skipped: 0,
+    skipped_by_reason: {}, uncovered_by_file: {}, duration: 1, at: Date.now(), gate_rc: 1,
+  }) + "\n");
+  writeFileSync(fake,
+    `#!/bin/bash\nprintf '%s\\n' "$@" > "$FAKE_MAIN_HEALTH_ARGS"\n` +
+    `mkdir -p "$MAIN_HEALTH_DIR/$1"\ncp "$FAKE_MAIN_HEALTH_JSON" "$MAIN_HEALTH_DIR/$1/$3.json"\nexit 1\n`);
+  chmodSync(fake, 0o755);
+  const r = fx.run({
+    ...withoutExtra,
+    MAIN_HEALTH_DIR: healthDir,
+    UNIT_GATE_MAIN_HEALTH_AUTO: "1",
+    UNIT_GATE_MAIN_HEALTH_CMD: fake,
+    FAKE_MAIN_HEALTH_ARGS: marker,
+    FAKE_MAIN_HEALTH_JSON: measurement,
+  });
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(readFileSync(marker, "utf8").trim().split("\n"), ["origin", "--sha", base]);
+  assert.match(r.out, /heredado de main/);
+});
+
 test("61. la medición se busca por basename del remoto origin, no por nombre del directorio", (t) => {
   const fx = fixture(t); // directorio ant-fake-api, remoto .../origin.git
   fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);

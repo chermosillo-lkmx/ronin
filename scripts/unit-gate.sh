@@ -814,7 +814,7 @@ for repo in "${candidates[@]}"; do
     measurement="$MAIN_HEALTH_DIR/$main_repo_name/$base.json"
     if [ ! -f "$measurement" ] && [ "$MAIN_HEALTH_AUTO" != "0" ]; then
       say "   → $name: midiendo main $base para clasificar la suite roja"
-      "$GATE_SCRIPTS_DIR/main-health.sh" "$main_repo_name" --sha "$base" >/dev/null 2>&1 || true
+      "${UNIT_GATE_MAIN_HEALTH_CMD:-$GATE_SCRIPTS_DIR/main-health.sh}" "$main_repo_name" --sha "$base" >/dev/null 2>&1 || true
     fi
     comparison="$(red_comparison "$junit" "$measurement" 2>/dev/null || printf 'MISSING\n')"
     IFS=$'\t' read -r inheritance_kind inherited_count inherited_base_total incident owner new_reds <<< "$comparison"
