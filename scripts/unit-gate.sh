@@ -31,6 +31,8 @@ BASE_REF="${UNIT_GATE_BASE:-origin/main}"
 MAIN_ROOT="${UNIT_GATE_MAIN_ROOT:-$HOME/code/lkmx/liebre}"
 REPORTS="${UNIT_GATE_REPORTS_DIR:-reports}"
 STATE_DIR="${UNIT_GATE_STATE_DIR:-$HOME/.cowork/unit-gate}"
+MAIN_HEALTH_DIR="${MAIN_HEALTH_DIR:-$HOME/.cowork/main-health}"
+MAIN_HEALTH_AUTO="${UNIT_GATE_MAIN_HEALTH_AUTO:-1}"
 RECORD_BASE="${UNIT_GATE_RECORD_BASE:-0}"
 fail=0; checked=0
 suite_pid=""
@@ -144,6 +146,36 @@ print(f("tests"), f("failures"), f("errors"), f("skipped"))
 PY
 }
 
+red_comparison() { # $1 junit actual, $2 medición main-health → TSV de clasificación
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+junit, measurement = map(Path, sys.argv[1:])
+try:
+    data = json.loads(measurement.read_text())
+    base_red = set(data.get("failed", [])) | set(data.get("errors", []))
+    base_total = float(data["total"])
+except (OSError, ValueError, TypeError, KeyError):
+    print("MISSING")
+    raise SystemExit
+
+current = set()
+for case in ET.parse(junit).getroot().iter("testcase"):
+    if case.find("failure") is not None or case.find("error") is not None:
+        current.add(f'{case.get("classname") or ""}::{case.get("name") or ""}')
+new = sorted(current - base_red)
+if new:
+    print("NEW", len(new), base_total, "-", "-", json.dumps(new, ensure_ascii=False), sep="\t")
+else:
+    incident = str(data.get("incident") or data.get("incident_id") or data.get("sha", "")[:7] or "desconocido")
+    owner = str(data.get("owner") or data.get("session") or "main")
+    print("INHERITED", len(current), base_total, incident, owner, "-", sep="\t")
+PY
+}
+
 head_commit_time() { git log -1 --format=%ct 2>/dev/null; } # epoch del commit HEAD del repo actual
 
 # Regla 2 (y sólo la 2) puede apoyarse en UNIT_GATE_EXTRA_JUNIT: junits de corridas aparte (p. ej.
@@ -210,7 +242,9 @@ PY
 }
 
 coverage_rule() { # $1 base, $2 coverage.xml, $3 runner, $4 repo; usa GATE_CHANGED/GATE_SRC_CHANGED
-  GATE_BASE="$1" GATE_COVERAGE="$2" GATE_RUNNER="$3" GATE_REPO="$4" UNIT_GATE_STATE_DIR="$STATE_DIR" python3 <<'PY'
+  GATE_BASE="$1" GATE_COVERAGE="$2" GATE_RUNNER="$3" GATE_REPO="$4" UNIT_GATE_STATE_DIR="$STATE_DIR" \
+  GATE_MAIN_HEALTH_DIR="$MAIN_HEALTH_DIR" GATE_MAIN_REPO="${GATE_MAIN_REPO:-$4}" \
+  GATE_INHERITED_RED="${GATE_INHERITED_RED:-0}" GATE_INHERITED_BASE_TOTAL="${GATE_INHERITED_BASE_TOTAL:-}" python3 <<'PY'
 import configparser
 import fnmatch
 import os
@@ -229,6 +263,9 @@ src_changed = [p for p in os.environ.get("GATE_SRC_CHANGED", "").splitlines() if
 label = os.environ.get("GATE_SRC_LABEL") or "src"
 state_dir = Path(os.environ["UNIT_GATE_STATE_DIR"])
 repo_name = Path(os.environ["GATE_REPO"]).name
+main_health_dir = Path(os.environ["GATE_MAIN_HEALTH_DIR"])
+main_repo_name = os.environ["GATE_MAIN_REPO"]
+inherited_red = os.environ.get("GATE_INHERITED_RED") == "1"
 
 def emit(kind, message):
     print(f"{kind}\t{message}")
@@ -356,6 +393,7 @@ def base_measurement():
     paths = [cache / f"{base}.json"]
     if tree:
         paths.append(cache / f"tree-{tree}.json")
+    paths.append(main_health_dir / main_repo_name / f"{base}.json")
     for path in paths:
         try:
             data = __import__("json").loads(path.read_text())
@@ -560,6 +598,16 @@ else:
                 emit("BAD", f"cobertura {fmt(total)} % < piso {fmt(floor)} % y bajó respecto a la base {fmt(measured)} %")
         else:
             emit("OK", f"cobertura {fmt(total)} % ≥ piso {fmt(floor)} %")
+        if inherited_red:
+            try:
+                inherited_total = Decimal(os.environ["GATE_INHERITED_BASE_TOTAL"])
+            except (KeyError, InvalidOperation):
+                emit("BAD", f"rojas heredadas sin total válido de la base {base[:7]}")
+            else:
+                if total < inherited_total:
+                    emit("BAD", f"cobertura {fmt(total)} % bajó respecto a la base roja {base[:7]} ({fmt(inherited_total)} %)")
+                else:
+                    emit("OK", f"cobertura {fmt(total)} % ≥ base roja {base[:7]} ({fmt(inherited_total)} %)")
         old_floor = base_floor()
         if floor is not None and old_floor is not None and floor < old_floor:
             emit("BAD", f"piso bajado de {fmt(old_floor)} a {fmt(floor)}")
@@ -618,6 +666,9 @@ PY
 for repo in "${candidates[@]}"; do
   name="$(basename "$repo")"
   cd "$repo" || { bad "$name: no puedo entrar"; continue; }
+  remote_url="$(git remote get-url origin 2>/dev/null || true)"
+  main_repo_name="$(basename -s .git "$remote_url" 2>/dev/null || true)"
+  [ -n "$main_repo_name" ] || main_repo_name="$name"
   git fetch -q origin main 2>/dev/null || true
   base="$(git merge-base HEAD "$BASE_REF" 2>/dev/null)" || { bad "$name: sin merge-base con $BASE_REF"; continue; }
   # Cambios de la rama + working tree (el worker puede no haber commiteado aún).
@@ -696,6 +747,9 @@ for repo in "${candidates[@]}"; do
 
   [ "${UNIT_GATE_SKIP_SUITE:-0}" = "1" ] && continue
 
+  inherited_red=0
+  inherited_base_total=""
+
   # Reglas 3 y 4 comparten la misma corrida: suite completa + XML de cobertura.
   mkdir -p "$REPORTS"
   junit="$REPORTS/junit-gate.xml"; rm -f "$junit"
@@ -744,11 +798,35 @@ for repo in "${candidates[@]}"; do
   read -r t f e s <<< "$(junit_summary "$junit")"
   if [ "$t" -eq 0 ]; then bad "$name: el junit no tiene casos (0 tests)"; continue; fi
   if [ "$f" -ne 0 ] || [ "$e" -ne 0 ]; then
-    bad "$name: suite en ROJO — $t tests, $f failed, $e errors, $s skipped"
-    grep -E "^(FAILED|ERROR) " "$REPORTS/unit-gate.log" | head -20 | sed 's/^/     /'
-    continue
+    if [ "$RECORD_BASE" = "1" ]; then
+      bad "$name: suite en ROJO — $t tests, $f failed, $e errors, $s skipped"
+      grep -E "^(FAILED|ERROR) " "$REPORTS/unit-gate.log" | head -20 | sed 's/^/     /'
+      continue
+    fi
+    measurement="$MAIN_HEALTH_DIR/$main_repo_name/$base.json"
+    if [ ! -f "$measurement" ] && [ "$MAIN_HEALTH_AUTO" != "0" ]; then
+      say "   → $name: midiendo main $base para clasificar la suite roja"
+      "$GATE_SCRIPTS_DIR/main-health.sh" "$main_repo_name" --sha "$base" >/dev/null 2>&1 || true
+    fi
+    comparison="$(red_comparison "$junit" "$measurement" 2>/dev/null || printf 'MISSING\n')"
+    IFS=$'\t' read -r inheritance_kind inherited_count inherited_base_total incident owner new_reds <<< "$comparison"
+    case "$inheritance_kind" in
+      INHERITED)
+        inherited_red=1
+        say "   ⚠ $name: heredado de main ${base:0:7}: $inherited_count rojas (incidente $incident, dueño $owner)"
+        ;;
+      NEW)
+        bad "$name: suite en ROJO con rojas nuevas respecto a main ${base:0:7}: $new_reds"
+        continue
+        ;;
+      *)
+        bad "$name: suite en ROJO — sin medición de main ${base:0:7} en $measurement"
+        continue
+        ;;
+    esac
+  else
+    ok "$name: suite en verde — $t tests, 0 failed, $s skipped"
   fi
-  ok "$name: suite en verde — $t tests, 0 failed, $s skipped"
   if [ -n "$test_present" ]; then
     missing="$(tests_ran_from "$junit" $test_present)"
     if [ -n "$missing" ]; then
@@ -759,7 +837,10 @@ for repo in "${candidates[@]}"; do
     fi
   fi
 
-  recorded="$(record_coverage "$coverage_xml" "$name" 2>&1)"; record_rc=$?
+  recorded=""; record_rc=2
+  if [ "$inherited_red" -ne 1 ]; then
+    recorded="$(record_coverage "$coverage_xml" "$name" 2>&1)"; record_rc=$?
+  fi
   if [ "$RECORD_BASE" = "1" ]; then
     if [ "$record_rc" -eq 0 ]; then
       ok "$name: medición base registrada ($recorded)"
@@ -772,7 +853,9 @@ for repo in "${candidates[@]}"; do
   fi
 
   # Regla 4: líneas nuevas cubiertas, piso total y trinquete de exclusiones/umbral.
-  coverage_output="$(GATE_CHANGED="$changed" GATE_SRC_CHANGED="$src_changed" GATE_SRC_LABEL="$src_label" coverage_rule "$base" "$coverage_xml" "$runner" "$name" 2>&1)"
+  coverage_output="$(GATE_CHANGED="$changed" GATE_SRC_CHANGED="$src_changed" GATE_SRC_LABEL="$src_label" \
+    GATE_MAIN_REPO="$main_repo_name" GATE_INHERITED_RED="$inherited_red" GATE_INHERITED_BASE_TOTAL="$inherited_base_total" \
+    coverage_rule "$base" "$coverage_xml" "$runner" "$name" 2>&1)"
   coverage_rc=$?
   if [ "$coverage_rc" -ne 0 ]; then
     bad "$name: el analizador de cobertura falló (rc=$coverage_rc)"

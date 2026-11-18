@@ -1109,3 +1109,94 @@ test("56. con el plugin, un SIGTERM al grupo corre el teardown de los fixtures d
   await closed;
   assert.equal(existsSync(marker), true, "el teardown del fixture no corrió tras SIGTERM");
 });
+
+function seedMainHealth(fx, data, remoteName = "origin") {
+  const base = fx.git("merge-base", "HEAD", "origin/main").trim();
+  const healthDir = join(fx.tmp, "main-health");
+  const directory = join(healthDir, remoteName);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, `${base}.json`), JSON.stringify({
+    sha: base,
+    repo: remoteName,
+    status: "red",
+    tests: 2,
+    total: 89,
+    floor: 80,
+    failed: ["tests.test_other::test_other"],
+    errors: [],
+    skipped: 0,
+    skipped_by_reason: {},
+    uncovered_by_file: {},
+    duration: 1,
+    at: Date.now(),
+    gate_rc: 1,
+    ...data,
+  }) + "\n");
+  return { healthDir, base };
+}
+
+test("57. rojas heredadas y cobertura >= base pasan con WARN, incidente y dueño", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir, base } = seedMainHealth(fx, { incident: "INC-42", owner: "cowork-main-fix" });
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, new RegExp(`heredado de main ${base.slice(0, 7)}: 1 rojas \\(incidente INC-42, dueño cowork-main-fix\\)`));
+  assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
+test("58. una roja nueva respecto de main falla y lista su ID", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([
+    { ...OTHER_PASS, outcome: "failure" },
+    { classname: "tests.test_new", name: "test_regression", outcome: "error" },
+    APP("passed"),
+  ]);
+  const { healthDir } = seedMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /rojas nuevas/);
+  assert.match(r.out, /tests\.test_new::test_regression/);
+  assert.match(r.out, /UNIT-GATE: FAIL/);
+});
+
+test("59. rojas heredadas pero cobertura menor que main fallan", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  fx.setCoverage({ lineRate: 0.88 });
+  const { healthDir } = seedMainHealth(fx, { total: 89 });
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /cobertura 88(?:\.00)? %.*base.*89(?:\.00)? %/);
+  assert.match(r.out, /UNIT-GATE: FAIL/);
+});
+
+test("60. suite roja sin medición y AUTO=0 falla explícitamente «sin medición»", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const healthDir = join(fx.tmp, "main-health-vacio");
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /sin medición/);
+  assert.match(r.out, /UNIT-GATE: FAIL/);
+});
+
+test("61. la medición se busca por basename del remoto origin, no por nombre del directorio", (t) => {
+  const fx = fixture(t); // directorio ant-fake-api, remoto .../origin.git
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir } = seedMainHealth(fx, {}, "origin");
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /heredado de main/);
+});
+
+test("62. base_measurement usa main-health para permitir el WARN de piso heredado", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  fx.write(".coveragerc", "[report]\nfail_under = 99.7\n");
+  const { healthDir, base } = seedMainHealth(fx, { status: "red", total: 89 });
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, new RegExp(`piso heredado de main: 90\\.00 % < piso 99\\.70 %, igual o mejor que la base ${base.slice(0, 7)} \\(89\\.00 %\\)`));
+  assert.match(r.out, /UNIT-GATE: PASS/);
+});
