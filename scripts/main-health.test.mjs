@@ -98,6 +98,7 @@ function fixture(t, options = {}) {
       `n=0; [ ! -f "$FAKE_MARKER" ] || n="$(cat "$FAKE_MARKER")"; printf '%s\\n' "$((n+1))" > "$FAKE_MARKER"\n` +
       `[ -z "\${FAKE_SUITE_LOG:-}" ] || printf 'suite\\n' >> "$FAKE_SUITE_LOG"\n` +
       `[ -z "\${FAKE_WT_LOG:-}" ] || printf '%s\\n' "$wt" >> "$FAKE_WT_LOG"\n` +
+      `[ -z "\${FAKE_GATE_STARTED:-}" ] || : > "$FAKE_GATE_STARTED"\n` +
       `[ -z "\${FAKE_GATE_DELAY:-}" ] || sleep "$FAKE_GATE_DELAY"\n` +
       `mkdir -p "$wt/reports"\n` +
       `[ "\${FAKE_NO_JUNIT:-0}" = 1 ] || cp "$FAKE_JUNIT" "$wt/reports/junit-gate.xml"\n` +
@@ -337,6 +338,57 @@ test("dos SHA con el mismo prefijo serializan la ruta compartida del worktree", 
   assert.equal(paths.length, 2);
   assert.equal(paths[0], paths[1]);
   assert.match(paths[0], new RegExp(`/wt-${fx.sha[0]}/${REPO}$`));
+});
+
+test("un waiter terminado no elimina el worktree activo del dueño del path-lock", async (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  let otherSha = "";
+  for (let attempt = 1; attempt <= 64; attempt += 1) {
+    writeFileSync(join(fx.repo, "src/app.py"), `def f():\n    return ${attempt + 1}\n`);
+    sh("git", ["add", "src/app.py"], { cwd: fx.repo, env: fx.gitEnv });
+    sh("git", ["commit", "-q", "-m", `waiter ${attempt}`], { cwd: fx.repo, env: fx.gitEnv });
+    const candidate = sh("git", ["rev-parse", "HEAD"], { cwd: fx.repo, env: fx.gitEnv });
+    if (candidate[0] === fx.sha[0]) { otherSha = candidate; break; }
+  }
+  assert.notEqual(otherSha, "", "no se encontró una colisión del primer dígito");
+  const started = join(fx.root, "owner-started");
+  const env = {
+    MAIN_HEALTH_WORKTREE_PREFIX_LENGTH: "1",
+    FAKE_GATE_STARTED: started,
+    FAKE_GATE_DELAY: "0.5",
+  };
+  const collect = (child) => new Promise((resolve) => {
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    child.once("close", (code) => resolve({ code, output }));
+  });
+  const ownerChild = fx.spawnRun(env, fx.sha);
+  const ownerResult = collect(ownerChild);
+  const startedDeadline = Date.now() + 3000;
+  while (!existsSync(started) && Date.now() < startedDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(existsSync(started), true);
+  const worktree = join(fx.healthDir, REPO, `wt-${fx.sha[0]}`, REPO);
+  assert.equal(existsSync(worktree), true);
+
+  const waiterChild = fx.spawnRun(env, otherSha);
+  const waiterResult = collect(waiterChild);
+  const waiterLock = join(fx.healthDir, REPO, `${otherSha}.lock`);
+  const waiterDeadline = Date.now() + 3000;
+  while (!existsSync(waiterLock) && Date.now() < waiterDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(existsSync(waiterLock), true);
+  waiterChild.kill("SIGTERM");
+  const waiter = await waiterResult;
+  assert.equal(waiter.code, 143, waiter.output);
+  assert.equal(existsSync(worktree), true, "el waiter eliminó el worktree del dueño activo");
+  assert.match(sh("git", ["worktree", "list", "--porcelain"], { cwd: fx.repo }), new RegExp(`worktree .*/wt-${fx.sha[0]}/${REPO}`));
+  const owner = await ownerResult;
+  assert.equal(owner.code, 0, owner.output);
 });
 
 test("main-health roba un lock cuyo PID murió", (t) => {

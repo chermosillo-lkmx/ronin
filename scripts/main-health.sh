@@ -123,6 +123,7 @@ while [ "$owns_lock" -eq 0 ]; do
 done
 
 owns_path_lock=0
+worktree_created=0
 path_lock_token="$$-$RANDOM-$RANDOM"
 path_lock_owner="$$ $path_lock_token"
 
@@ -157,11 +158,13 @@ acquire_path_lock() {
 
 cleanup() {
   rm -f "$diagnostic_log"
-  if [ -n "${wt:-}" ] && [ -e "$wt" ]; then
-    git -C "$source_repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  if [ "$owns_path_lock" -eq 1 ] && [ "$worktree_created" -eq 1 ]; then
+    if [ -n "${wt:-}" ] && [ -e "$wt" ]; then
+      git -C "$source_repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    fi
+    git -C "$source_repo" worktree prune >/dev/null 2>&1 || true
+    rmdir "$wt_parent" 2>/dev/null || true
   fi
-  git -C "$source_repo" worktree prune >/dev/null 2>&1 || true
-  rmdir "$wt_parent" 2>/dev/null || true
   if [ "$owns_path_lock" -eq 1 ] && [ "$(cat "$path_lock/owner" 2>/dev/null || true)" = "$path_lock_owner" ]; then
     rm -f "$path_lock/owner"
     rmdir "$path_lock" 2>/dev/null || true
@@ -193,6 +196,7 @@ git -C "$source_repo" worktree add -q --detach "$wt" "$sha" || {
   printf 'main-health: no pude crear el worktree para %s@%s\n' "$repo" "$short" >&2
   exit 2
 }
+worktree_created=1
 
 if [ -f "$wt/package.json" ]; then
   if [ -f "$wt/pnpm-lock.yaml" ]; then
