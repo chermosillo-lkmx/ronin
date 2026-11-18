@@ -1502,6 +1502,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
     resolveReadiness(mcpConfigPath);
   } catch (error) {
     failReadiness();
+    try { if (server) await closeServer(server); } catch { /* conserva el error de arranque */ }
     try { await background?.(); } catch { /* conserva el error de arranque */ }
     try { await stopTelegram?.(); } catch { /* Telegram sigue siendo opcional */ }
     throw error;

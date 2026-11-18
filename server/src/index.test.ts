@@ -614,6 +614,72 @@ test("fallo de startup rechaza launch temprano y después detiene Telegram", asy
   assert.deepEqual(events, ["telegram:start", "telegram:stop"]);
 });
 
+test("fallo posterior a listen cierra socket, background y Telegram sin filtrar el error original", async () => {
+  const events: string[] = [];
+  const writeError = new Error("write MCP roto");
+  let closes = 0;
+  let launchOutcome!: Promise<unknown>;
+  const server = {
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43999 }),
+    close: (callback: (error?: Error) => void) => {
+      closes += 1;
+      events.push("socket:close");
+      callback();
+    },
+  };
+
+  const starting = startServer({
+    deps: {
+      createApp: (options) => createApp({
+        ...options,
+        telegram: fakeTelegram(events, {
+          start: () => {
+            events.push("telegram:start");
+            launchOutcome = options.launchManagedSession!(
+              { repo: "repo", name: "early-write-fail", mode: "terminal" },
+            ).then(
+              () => ({ ok: true }),
+              (error) => ({ ok: false, error }),
+            );
+            return async () => { events.push("telegram:stop"); };
+          },
+        }),
+      }),
+      startBackground: async () => {
+        events.push("background:start");
+        return async () => { events.push("background:stop"); };
+      },
+      listen: async () => {
+        events.push("listen");
+        return server as any;
+      },
+      writeMcpConfig: () => {
+        events.push("mcp:write");
+        throw writeError;
+      },
+      launchManagedSession: (async () => {
+        events.push("launch:real");
+        return { name: "no-debe-lanzar" };
+      }) as any,
+    },
+  });
+
+  await assert.rejects(starting, (error) => error === writeError);
+  const outcome = await launchOutcome as { ok: boolean; error: Error };
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error.message, "servidor no disponible para lanzar la sesión");
+  assert.equal(closes, 1);
+  assert.deepEqual(events, [
+    "telegram:start",
+    "background:start",
+    "listen",
+    "mcp:write",
+    "socket:close",
+    "background:stop",
+    "telegram:stop",
+  ]);
+});
+
 function commenterInput(signal?: AbortSignal) {
   const shaA = "a".repeat(40);
   const shaB = "b".repeat(40);
