@@ -1,0 +1,223 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "main-health.sh");
+const REPO = "ant-health-api";
+
+function sh(command, args, options = {}) {
+  const result = spawnSync(command, args, { encoding: "utf8", ...options });
+  if (result.status !== 0) {
+    throw new Error(`${command} ${args.join(" ")} → ${result.status}\n${result.stdout}\n${result.stderr}`);
+  }
+  return result.stdout.trim();
+}
+
+function junit(cases) {
+  const count = (outcome) => cases.filter((item) => item.outcome === outcome).length;
+  return `<?xml version="1.0"?><testsuites><testsuite tests="${cases.length}" failures="${count("failure")}" errors="${count("error")}" skipped="${count("skipped")}">` +
+    cases.map(({ classname, name, outcome = "passed", reason = "" }) =>
+      `<testcase classname="${classname}" name="${name}">` +
+      (outcome === "failure" ? `<failure message="${reason}">${reason}</failure>` : "") +
+      (outcome === "error" ? `<error message="${reason}">${reason}</error>` : "") +
+      (outcome === "skipped" ? `<skipped message="${reason}">${reason}</skipped>` : "") +
+      `</testcase>`,
+    ).join("") + `</testsuite></testsuites>\n`;
+}
+
+const coverage = `<?xml version="1.0"?><coverage line-rate="0.90"><packages><package><classes>` +
+  `<class filename="src/app.py"><lines><line number="1" hits="1"/><line number="2" hits="0"/></lines></class>` +
+  `</classes></package></packages></coverage>\n`;
+
+function fixture(t) {
+  const root = mkdtempSync(join(tmpdir(), "main-health-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repoRoot = join(root, "repos");
+  const healthDir = join(root, "health");
+  const origin = join(root, "origin.git");
+  const repo = join(repoRoot, REPO);
+  const fakeGate = join(root, "fake-unit-gate.sh");
+  const marker = join(root, "suite-count");
+  const sourceJunit = join(root, "junit.xml");
+  const sourceCoverage = join(root, "coverage.xml");
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@t",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@t",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+  };
+  mkdirSync(repoRoot, { recursive: true });
+  sh("git", ["init", "-q", "--bare", "-b", "main", origin], { cwd: root, env: gitEnv });
+  sh("git", ["clone", "-q", origin, repo], { cwd: root, env: gitEnv });
+  mkdirSync(join(repo, "src"), { recursive: true });
+  mkdirSync(join(repo, "tests"), { recursive: true });
+  writeFileSync(join(repo, ".coveragerc"), "[run]\nsource = src\n[report]\nfail_under = 80\n");
+  writeFileSync(join(repo, "pytest.ini"), "[pytest]\n");
+  writeFileSync(join(repo, "src/app.py"), "def f():\n    return 1\n");
+  writeFileSync(join(repo, "tests/test_app.py"), "def test_f():\n    assert True\n");
+  sh("git", ["add", "-A"], { cwd: repo, env: gitEnv });
+  sh("git", ["commit", "-q", "-m", "main"], { cwd: repo, env: gitEnv });
+  sh("git", ["push", "-q", "origin", "HEAD:main"], { cwd: repo, env: gitEnv });
+  const sha = sh("git", ["rev-parse", "HEAD"], { cwd: repo, env: gitEnv });
+
+  writeFileSync(
+    fakeGate,
+    `#!/bin/bash\n` +
+      `set -u\n` +
+      `wt="$1"\n` +
+      `n=0; [ ! -f "$FAKE_MARKER" ] || n="$(cat "$FAKE_MARKER")"; printf '%s\\n' "$((n+1))" > "$FAKE_MARKER"\n` +
+      `mkdir -p "$wt/reports"\n` +
+      `[ "\${FAKE_NO_JUNIT:-0}" = 1 ] || cp "$FAKE_JUNIT" "$wt/reports/junit-gate.xml"\n` +
+      `[ -f "$FAKE_COVERAGE" ] && cp "$FAKE_COVERAGE" "$wt/reports/coverage-gate.xml"\n` +
+      `printf 'salida simulada\\n' > "$wt/reports/unit-gate.log"\n` +
+      `exit "\${FAKE_GATE_RC:-0}"\n`,
+  );
+  chmodSync(fakeGate, 0o755);
+  writeFileSync(sourceCoverage, coverage);
+
+  const baseEnv = {
+    ...gitEnv,
+    MAIN_HEALTH_REPO_ROOT: repoRoot,
+    MAIN_HEALTH_DIR: healthDir,
+    MAIN_HEALTH_UNIT_GATE: fakeGate,
+    MAIN_HEALTH_POLL: "0.05",
+    FAKE_MARKER: marker,
+    FAKE_JUNIT: sourceJunit,
+    FAKE_COVERAGE: sourceCoverage,
+  };
+  const run = (env = {}, args = []) => {
+    const result = spawnSync("bash", [SCRIPT, REPO, "--sha", sha, ...args], {
+      encoding: "utf8",
+      env: { ...baseEnv, ...env },
+    });
+    return { code: result.status, out: result.stdout + result.stderr };
+  };
+  const spawnRun = (env = {}) => spawn("bash", [SCRIPT, REPO, "--sha", sha], {
+    env: { ...baseEnv, ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const jsonPath = join(healthDir, REPO, `${sha}.json`);
+  const errorPath = join(healthDir, REPO, `${sha}.error.json`);
+  const lockPath = join(healthDir, REPO, `${sha}.lock`);
+  return {
+    root, repo, healthDir, sha, marker, sourceJunit, jsonPath, errorPath, lockPath,
+    run, spawnRun,
+    setJunit: (cases) => writeFileSync(sourceJunit, junit(cases)),
+  };
+}
+
+const passingCases = [
+  { classname: "tests.test_app", name: "test_f", outcome: "passed" },
+  { classname: "tests.test_app", name: "test_optional", outcome: "skipped", reason: "needs db" },
+];
+
+test("main-health mide main y escribe todos los campos del JSON", (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  const result = fx.run();
+  assert.equal(result.code, 0, result.out);
+  const data = JSON.parse(readFileSync(fx.jsonPath, "utf8"));
+  assert.deepEqual(data, {
+    sha: fx.sha,
+    repo: REPO,
+    status: "green",
+    tests: 2,
+    total: 90,
+    floor: 80,
+    failed: [],
+    errors: [],
+    skipped: 1,
+    skipped_by_reason: { "needs db": 1 },
+    uncovered_by_file: { "src/app.py": [2] },
+    duration: data.duration,
+    at: data.at,
+    gate_rc: 0,
+  });
+  assert.equal(typeof data.duration, "number");
+  assert.ok(data.duration >= 0);
+  assert.equal(typeof data.at, "number");
+  assert.equal(existsSync(join(fx.healthDir, REPO, `wt-${fx.sha.slice(0, 7)}`, REPO)), false);
+  assert.doesNotMatch(sh("git", ["worktree", "list", "--porcelain"], { cwd: fx.repo }), /wt-/);
+});
+
+test("main-health devuelve la caché inmediatamente sin volver a correr la suite", (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  assert.equal(fx.run().code, 0);
+  const cached = readFileSync(fx.jsonPath, "utf8");
+  const result = fx.run({ FAKE_GATE_RC: "99" });
+  assert.equal(result.code, 0, result.out);
+  assert.equal(result.out.trim(), cached.trim());
+  assert.equal(readFileSync(fx.marker, "utf8").trim(), "1");
+});
+
+test("main-health espera un lock vivo hasta que aparece su JSON", async (t) => {
+  const fx = fixture(t);
+  mkdirSync(fx.lockPath, { recursive: true });
+  writeFileSync(join(fx.lockPath, "pid"), `${process.pid}\n`);
+  const child = fx.spawnRun();
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(existsSync(fx.marker), false, output);
+  mkdirSync(dirname(fx.jsonPath), { recursive: true });
+  writeFileSync(fx.jsonPath, JSON.stringify({ sha: fx.sha, status: "green" }) + "\n");
+  assert.equal(await closed, 0, output);
+  assert.equal(existsSync(fx.marker), false, output);
+});
+
+test("main-health roba un lock cuyo PID murió", (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  mkdirSync(fx.lockPath, { recursive: true });
+  writeFileSync(join(fx.lockPath, "pid"), "99999999\n");
+  const result = fx.run();
+  assert.equal(result.code, 0, result.out);
+  assert.equal(readFileSync(fx.marker, "utf8").trim(), "1");
+  assert.equal(existsSync(fx.lockPath), false);
+});
+
+test("main-health escribe error JSON y sale 2 cuando no hay junit", (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  const result = fx.run({ FAKE_NO_JUNIT: "1", FAKE_GATE_RC: "1" });
+  assert.equal(result.code, 2, result.out);
+  assert.equal(existsSync(fx.jsonPath), false);
+  const error = JSON.parse(readFileSync(fx.errorPath, "utf8"));
+  assert.equal(error.sha, fx.sha);
+  assert.match(error.reason, /junit/i);
+  assert.equal(typeof error.at, "number");
+  assert.match(error.log_tail, /salida simulada/);
+});
+
+test("main-health conserva una suite roja como medición roja y sale 1", (t) => {
+  const fx = fixture(t);
+  fx.setJunit([
+    { classname: "tests.test_app", name: "test_f", outcome: "failure", reason: "boom" },
+    { classname: "tests.test_app", name: "test_setup", outcome: "error", reason: "bad fixture" },
+  ]);
+  const result = fx.run({ FAKE_GATE_RC: "1" });
+  assert.equal(result.code, 1, result.out);
+  const data = JSON.parse(readFileSync(fx.jsonPath, "utf8"));
+  assert.equal(data.status, "red");
+  assert.deepEqual(data.failed, ["tests.test_app::test_f"]);
+  assert.deepEqual(data.errors, ["tests.test_app::test_setup"]);
+  assert.equal(data.gate_rc, 1);
+});
