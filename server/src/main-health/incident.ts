@@ -30,6 +30,7 @@ export interface Incident {
   remoteOwner?: string;
   claimSha?: string;
   claimBranch?: string;
+  closingAt?: number;
   closedAt?: number;
 }
 
@@ -163,6 +164,7 @@ function isIncident(value: unknown): value is Incident {
     && (value.claimSha === undefined || (typeof value.claimSha === "string" && SAFE_SHA.test(value.claimSha)))
     && (value.claimBranch === undefined || value.claimBranch === `fix/main-health-${value.repo}`)
     && ((value.claimSha === undefined) === (value.claimBranch === undefined))
+    && (value.closingAt === undefined || (typeof value.closingAt === "number" && Number.isFinite(value.closingAt)))
     && (value.closedAt === undefined || (typeof value.closedAt === "number" && Number.isFinite(value.closedAt)));
 }
 
@@ -291,6 +293,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   const remoteClaim = deps.settings?.remoteClaim ?? DEFAULT_MAIN_HEALTH_SETTINGS.remoteClaim;
   const autoFix = deps.settings?.autoFix ?? DEFAULT_MAIN_HEALTH_SETTINGS.autoFix;
   const fixerRuns = new Map<string, Promise<EnsureFixerResult>>();
+  const closingRuns = new Map<string, Promise<Incident | null>>();
   const atomicWrite = deps.atomicWrite ?? writeJsonAtomic;
   const fs: IncidentFs = {
     close: deps.fs?.close ?? closeSync,
@@ -587,9 +590,15 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     return remoteSha;
   }
 
+  function readClaimableIncident(expected: Incident): Incident {
+    const current = readIncident(expected.repo);
+    if (!current || current.id !== expected.id) throw new Error(`el incidente cambió durante el claim: ${expected.repo}`);
+    if (current.closingAt !== undefined) throw new Error(`el incidente se está cerrando: ${expected.repo}`);
+    return current;
+  }
+
   function persistOwnClaim(incident: Incident, claimSha: string, branch: string): Incident {
-    const current = readIncident(incident.repo);
-    if (!current || current.id !== incident.id) throw new Error(`el incidente cambió durante el claim: ${incident.repo}`);
+    const current = readClaimableIncident(incident);
     const stored: Incident = {
       ...current,
       claimSha,
@@ -601,8 +610,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   }
 
   function persistRemoteOwner(incident: Incident, remoteOwner: string): void {
-    const current = readIncident(incident.repo);
-    if (!current || current.id !== incident.id) throw new Error(`el incidente cambió durante el claim: ${incident.repo}`);
+    const current = readClaimableIncident(incident);
     const stored: Incident = { ...current, remoteOwner };
     delete stored.claimSha;
     delete stored.claimBranch;
@@ -650,9 +658,11 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     assertRepo(repo);
     const incident = readIncident(repo);
     if (!incident) throw new Error(`no hay incidente abierto: ${repo}`);
+    if (incident.closingAt !== undefined) throw new Error(`el incidente se está cerrando: ${repo}`);
     const branch = `fix/main-health-${repo}`;
     if (incident.claimSha && incident.claimBranch) {
       const remoteOwner = await readRemoteClaim(repoDir, branch);
+      readClaimableIncident(incident);
       if (remoteOwner === incident.claimSha) {
         if (incident.remoteOwner) persistOwnClaim(incident, incident.claimSha, branch);
         return { accepted: true, branch, claimSha: incident.claimSha };
@@ -662,6 +672,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         return { accepted: false, branch, claimSha: incident.claimSha, remoteOwner };
       }
       try {
+        readClaimableIncident(incident);
         await git.run(["push", "origin", `${incident.claimSha}:refs/heads/${branch}`], repoDir, { env: gitEnv });
         persistOwnClaim(incident, incident.claimSha, branch);
         return { accepted: true, branch, claimSha: incident.claimSha };
@@ -680,6 +691,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     const timestamp = now();
     const isoDate = new Date(timestamp).toISOString();
     const tree = (await git.run(["rev-parse", `${incident.firstRedSha}^{tree}`], repoDir)).trim();
+    readClaimableIncident(incident);
     if (!SAFE_SHA.test(tree)) throw new Error("Git devolvió un tree inválido para el claim");
     const identity = "Cowork Main Health";
     const email = "main-health@cowork.local";
@@ -708,6 +720,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     assertSha(claimSha);
     // La intención durable permite reconciliar un push cuyo resultado no llegó al proceso.
     persistOwnClaim(incident, claimSha, branch);
+    readClaimableIncident(incident);
     try {
       await git.run(["push", "origin", `${claimSha}:refs/heads/${branch}`], repoDir, { env: gitEnv });
       return { accepted: true, branch, claimSha };
@@ -743,12 +756,14 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     assertRepo(repo);
     const incident = readIncident(repo);
     if (!incident) return { status: "no-incident", session: null };
+    if (incident.closingAt !== undefined) return { status: "busy", session: null };
     if (incident.remoteOwner) return { status: "remote-owned", session: null, remoteOwner: incident.remoteOwner };
 
     const currentOwner = readOwner(repo);
     if (currentOwner
       && now() - currentOwner.heartbeat < leaseMs
       && await tmux.hasSession(currentOwner.session)) {
+      if (readIncident(repo)?.closingAt !== undefined) return { status: "busy", session: null };
       return { status: "active", session: currentOwner.session };
     }
 
@@ -757,6 +772,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     const candidates = [...new Set([`cowork-main-health-${repo}`, `cowork-main-health-${alias}`])];
     for (const session of candidates) {
       if (!await tmux.hasSession(session)) continue;
+      if (readIncident(repo)?.closingAt !== undefined) return { status: "busy", session: null };
       const claimed = claimOwner(repo, session);
       if (claimed.acquired) return { status: "adopted", session };
       return claimed.owner
@@ -782,6 +798,10 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
           return { status: "remote-owned", session: null, remoteOwner: claim.remoteOwner! };
         }
       }
+      if (readIncident(repo)?.closingAt !== undefined) {
+        releaseOwnedOwner(repo, ownership.owner);
+        return { status: "busy", session: null };
+      }
       const launched = await launch.launchManagedSession({
         repo,
         workflowId: "claude-plan-codex-impl",
@@ -800,6 +820,9 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   }
 
   function ensureFixer(repo: string, repoDir: string): Promise<EnsureFixerResult> {
+    if (closingRuns.has(repo) || readIncident(repo)?.closingAt !== undefined) {
+      return Promise.resolve({ status: "busy", session: null });
+    }
     const running = fixerRuns.get(repo);
     if (running) return running;
     const promise = ensureFixerOnce(repo, repoDir).finally(() => fixerRuns.delete(repo));
@@ -845,8 +868,18 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
       .sort((left, right) => left.repo.localeCompare(right.repo));
   }
 
-  async function closeIncident(repo: string, repoDir?: string): Promise<Incident | null> {
-    if (!safeRepo(repo)) return null;
+  async function closeIncidentOnce(
+    repo: string,
+    repoDir: string | undefined,
+    fixerRun: Promise<EnsureFixerResult> | undefined,
+  ): Promise<Incident | null> {
+    if (fixerRun) {
+      try {
+        await fixerRun;
+      } catch {
+        // El cierre debe continuar aunque el fixer en vuelo haya fallado al observar closingAt.
+      }
+    }
     const current = readIncident(repo);
     if (!current) return null;
     if (current.claimSha && current.claimBranch) {
@@ -875,6 +908,27 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     const archiveId = `${repo}@${current.firstRedSha.slice(0, 7)}`;
     fs.rename(incidentDir(repo), join(archiveParent, `${archiveId}-${closed.closedAt}`));
     return clone(closed);
+  }
+
+  function closeIncident(repo: string, repoDir?: string): Promise<Incident | null> {
+    const running = closingRuns.get(repo);
+    if (running) return running;
+    if (!safeRepo(repo)) return Promise.resolve(null);
+    const current = readIncident(repo);
+    if (!current) return Promise.resolve(null);
+    if (current.claimSha && current.claimBranch && !repoDir) {
+      return Promise.reject(new Error(`repoDir es obligatorio para cerrar un claim propio: ${repo}`));
+    }
+
+    if (current.closingAt === undefined) {
+      storeIncident({ ...current, closingAt: now() });
+    }
+    const fixerRun = fixerRuns.get(repo);
+    const operation = closeIncidentOnce(repo, repoDir, fixerRun).finally(() => {
+      if (closingRuns.get(repo) === operation) closingRuns.delete(repo);
+    });
+    closingRuns.set(repo, operation);
+    return operation;
   }
 
   return {

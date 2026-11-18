@@ -104,7 +104,7 @@ test("cierra y archiva el incidente actual; cerrar de nuevo es no-op", async () 
 
     const closed = await manager.closeIncident("api");
 
-    assert.deepEqual(closed, { ...opened, closedAt: 3_000 });
+    assert.deepEqual(closed, { ...opened, closingAt: 3_000, closedAt: 3_000 });
     assert.equal(manager.readIncident("api"), null);
     assert.deepEqual(
       JSON.parse(readFileSync(join(root, "incidents", "api.closed", `${opened.id}-3000`, "incident.json"), "utf8")),
@@ -752,6 +752,124 @@ test("close retira sólo claim propio y un incidente posterior puede reclamar", 
     git(repoDir, "push", "--force", "origin", `${secondRed}:refs/heads/fix/main-health-api`);
     await manager.closeIncident("api", repoDir);
     assert.equal(git(repoDir, "ls-remote", "origin", "refs/heads/fix/main-health-api").split(/\s+/)[0], secondRed);
+  });
+});
+
+test("close marca el incidente antes de esperar Git y bloquea fixers locales y externos", async () => {
+  await withRootAsync(async (root) => {
+    const claimSha = "c".repeat(40);
+    let remoteSha: string | null = null;
+    let now = 1_000;
+    let launches = 0;
+    let pauseNextLookup = false;
+    let paused = false;
+    let releaseLookup: () => void = () => {};
+    let reportLookup: () => void = () => {};
+    const lookupPaused = new Promise<void>((resolve) => { reportLookup = resolve; });
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const gitPort: IncidentGitPort = {
+      async run(args) {
+        if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+        if (args[0] === "commit-tree") return `${claimSha}\n`;
+        if (args[0] === "ls-remote") {
+          if (pauseNextLookup && !paused) {
+            paused = true;
+            reportLookup();
+            await lookupGate;
+          }
+          return remoteSha ? `${remoteSha}\trefs/heads/fix/main-health-api\n` : "";
+        }
+        if (args[0] === "push") {
+          if (args.includes(":refs/heads/fix/main-health-api")) remoteSha = null;
+          else remoteSha = claimSha;
+          return "";
+        }
+        throw new Error(`Git inesperado: ${args.join(" ")}`);
+      },
+    };
+    const deps = {
+      root,
+      now: () => now,
+      pid: () => 811,
+      settings: { aliases: {}, autoFix: true, remoteClaim: true },
+      tmux: { hasSession: async () => false },
+      git: gitPort,
+      launch: {
+        launchManagedSession: async () => {
+          launches += 1;
+          return { name: "cowork-main-health-api" };
+        },
+      },
+    } as const;
+    const manager = createIncidentManager(deps);
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    await manager.claimRemote("api", "/repo");
+    now = 2_000;
+    pauseNextLookup = true;
+
+    const closing = manager.closeIncident("api", "/repo");
+    await lookupPaused;
+    let assertionFailure: unknown;
+    try {
+      assert.equal(manager.readIncident("api")?.closingAt, 2_000);
+      assert.equal(manager.closeIncident("api", "/repo"), closing);
+      assert.deepEqual(await manager.ensureFixer("api", "/repo"), { status: "busy", session: null });
+      const otherManager = createIncidentManager({ ...deps, pid: () => 812 });
+      assert.deepEqual(await otherManager.ensureFixer("api", "/repo"), { status: "busy", session: null });
+      await assert.rejects(() => otherManager.claimRemote("api", "/repo"), /se está cerrando/);
+      assert.equal(launches, 0);
+    } catch (error) {
+      assertionFailure = error;
+    } finally {
+      releaseLookup();
+    }
+
+    const closed = await closing;
+    if (assertionFailure) throw assertionFailure;
+    assert.equal(closed?.closingAt, 2_000);
+    assert.equal(manager.readIncident("api"), null);
+    assert.equal(remoteSha, null);
+  });
+});
+
+test("close conserva closingAt si falla cleanup y permite reintentar", async () => {
+  await withRootAsync(async (root) => {
+    const claimSha = "c".repeat(40);
+    let remoteSha: string | null = null;
+    let now = 1_000;
+    let deletionAttempts = 0;
+    const manager = createIncidentManager({
+      root,
+      now: () => now,
+      git: {
+        async run(args) {
+          if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+          if (args[0] === "commit-tree") return `${claimSha}\n`;
+          if (args[0] === "ls-remote") return remoteSha ? `${remoteSha}\trefs/heads/fix/main-health-api\n` : "";
+          if (args[0] === "push" && args.includes(":refs/heads/fix/main-health-api")) {
+            deletionAttempts += 1;
+            if (deletionAttempts === 1) throw new Error("remote temporalmente caído");
+            remoteSha = null;
+            return "";
+          }
+          if (args[0] === "push") { remoteSha = claimSha; return ""; }
+          throw new Error(`Git inesperado: ${args.join(" ")}`);
+        },
+      },
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    await manager.claimRemote("api", "/repo");
+    now = 2_000;
+
+    await assert.rejects(() => manager.closeIncident("api", "/repo"), /remote temporalmente caído/);
+    assert.equal(manager.readIncident("api")?.closingAt, 2_000);
+    now = 3_000;
+    const closed = await manager.closeIncident("api", "/repo");
+
+    assert.equal(closed?.closingAt, 2_000);
+    assert.equal(closed?.closedAt, 3_000);
+    assert.equal(deletionAttempts, 2);
+    assert.equal(manager.readIncident("api"), null);
   });
 });
 
