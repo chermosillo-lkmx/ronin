@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import express from "express";
 import type { Incident, IncidentOwner } from "./incident.js";
-import type { MainHealthMeasurement } from "./store.js";
+import { createMainHealthStore, type MainHealthMeasurement } from "./store.js";
 import { createMainHealthRouter, type MainHealthRoutesDeps } from "./routes.js";
 
 const SHA_A = "a".repeat(40);
@@ -84,7 +87,7 @@ test("GET / proyecta mediciones e incidente público en orden configurado", asyn
   };
   const { status, body } = await getStatus({
     repos: () => ["beta", "alpha"],
-    store: { latestMeasurement: (repo) => measurements.get(repo) ?? null },
+    store: { latestOperationalMeasurement: (repo) => measurements.get(repo) ?? null },
     incidents: {
       readIncident: (repo) => repo === "beta" ? betaIncident : null,
       readOwner: (repo) => repo === "beta" ? owner : null,
@@ -142,7 +145,7 @@ test("omite repos sin medición, duplicados, inseguros y veto sin tumbar filas s
       "good",
     ],
     store: {
-      latestMeasurement: (repo) => {
+      latestOperationalMeasurement: (repo) => {
         if (repo === "throws") throw new Error("disco roto");
         if (repo === "corrupt") return { repo, sha: SHA_A, status: "green" } as MainHealthMeasurement;
         if (repo === "duplicate") return duplicate;
@@ -175,7 +178,7 @@ test("omite incidentes cerrados o con identidad inválida y owners corruptos", a
   const corruptOwner = { session: "", heartbeat: Number.NaN } as IncidentOwner;
   const { body } = await getStatus({
     repos: () => ["current", "closed"],
-    store: { latestMeasurement: (repo) => repo === "current" ? current : closed },
+    store: { latestOperationalMeasurement: (repo) => repo === "current" ? current : closed },
     incidents: {
       readIncident: (repo) => repo === "current"
         ? incident("current", SHA_A, { id: "../../escape" })
@@ -185,4 +188,28 @@ test("omite incidentes cerrados o con identidad inválida y owners corruptos", a
   });
 
   assert.deepEqual((body as Array<Record<string, unknown>>).map(({ incident: value }) => value), [undefined, undefined]);
+});
+
+test("GET / conserva la medición operacional aunque un baseline histórico sea más reciente", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cowork-main-health-routes-"));
+  try {
+    const store = createMainHealthStore({ root, now: () => 3_000 });
+    const main = measurement("api", SHA_A, "red");
+    const historical = { ...measurement("api", SHA_B, "green"), at: 9_000 };
+    store.writeMeasurement(main);
+    store.confirmOperationalMeasurement("api", main.sha);
+    store.writeMeasurement(historical);
+
+    const { body } = await getStatus({
+      repos: () => ["api"],
+      store,
+      incidents: { readIncident: () => null, readOwner: () => null },
+    });
+
+    assert.deepEqual((body as Array<Record<string, unknown>>).map(({ sha, status }) => ({ sha, status })), [
+      { sha: SHA_A, status: "red" },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

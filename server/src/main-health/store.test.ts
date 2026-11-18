@@ -96,6 +96,40 @@ test("store lista sólo mediciones válidas del repo y obtiene la última por at
   });
 });
 
+test("store conserva un puntero atómico a la última medición operacional confirmada", () => {
+  withRoot((root) => {
+    let now = 4_000;
+    const writes: Array<{ target: string; value: unknown }> = [];
+    const store = createMainHealthStore({
+      root,
+      now: () => now,
+      atomicWrite: (target, value) => {
+        writes.push({ target, value });
+        mkdirSync(join(target, ".."), { recursive: true });
+        writeFileSync(target, JSON.stringify(value));
+      },
+    });
+    const operational = measurement({ sha: "b".repeat(40), at: 20 });
+    const newerBaseline = measurement({ sha: "c".repeat(40), status: "green", at: 80 });
+    store.writeMeasurement(operational);
+    store.confirmOperationalMeasurement("api", operational.sha);
+    now = 5_000;
+    store.writeMeasurement(newerBaseline);
+
+    assert.deepEqual(store.latestMeasurement("api"), newerBaseline, "el historial conserva orden por fecha");
+    assert.deepEqual(store.latestOperationalMeasurement("api"), operational, "baseline no mueve el puntero");
+    assert.deepEqual(writes.find(({ target }) => target.endsWith("operational.json")), {
+      target: join(root, "api", "operational.json"),
+      value: { sha: operational.sha, confirmedAt: 4_000 },
+    });
+
+    writeFileSync(join(root, "api", "operational.json"), JSON.stringify({ sha: "../escape", confirmedAt: 6_000 }));
+    assert.equal(store.latestOperationalMeasurement("api"), null, "puntero corrupto falla cerrado");
+    assert.throws(() => store.confirmOperationalMeasurement("../api", operational.sha), /repo inválido/);
+    assert.throws(() => store.confirmOperationalMeasurement("api", "abreviado"), /SHA inválido/);
+  });
+});
+
 test("store considera reciente un error sólo durante menos de una hora con reloj inyectado", () => {
   withRoot((root) => {
     const now = 10_000_000;

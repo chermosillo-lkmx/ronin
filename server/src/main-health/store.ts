@@ -27,6 +27,11 @@ export interface MainHealthError {
   log_tail: string;
 }
 
+interface OperationalMeasurementPointer {
+  sha: string;
+  confirmedAt: number;
+}
+
 export interface MainHealthStoreDeps {
   root?: string;
   env?: Readonly<Record<string, string | undefined>>;
@@ -37,6 +42,7 @@ export interface MainHealthStoreDeps {
 
 const SAFE_REPO = /^[A-Za-z0-9._-]+$/;
 const SAFE_SHA = /^[A-Fa-f0-9]{7,64}$/;
+const CANONICAL_SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const MEASUREMENT_KEYS = [
   "sha", "repo", "status", "tests", "total", "floor", "failed", "errors", "skipped",
   "skipped_by_reason", "uncovered_by_file", "duration", "at", "gate_rc",
@@ -110,6 +116,14 @@ export function isMainHealthError(value: unknown): value is MainHealthError {
     && typeof value.log_tail === "string";
 }
 
+function isOperationalMeasurementPointer(value: unknown): value is OperationalMeasurementPointer {
+  return isRecord(value)
+    && hasExactKeys(value, ["sha", "confirmedAt"])
+    && typeof value.sha === "string"
+    && CANONICAL_SHA.test(value.sha)
+    && isCount(value.confirmedAt);
+}
+
 function safeRepo(repo: string): boolean {
   return repo !== "." && repo !== ".." && SAFE_REPO.test(repo);
 }
@@ -170,6 +184,21 @@ export function createMainHealthStore(deps: MainHealthStoreDeps = {}) {
     return listMeasurements(repo)[0] ?? null;
   }
 
+  function latestOperationalMeasurement(repo: string): MainHealthMeasurement | null {
+    if (!safeRepo(repo)) return null;
+    const pointer = readJson(join(root, repo, "operational.json"), isOperationalMeasurementPointer);
+    return pointer ? readMeasurement(repo, pointer.sha) : null;
+  }
+
+  function confirmOperationalMeasurement(repo: string, sha: string): void {
+    assertRepo(repo);
+    if (!CANONICAL_SHA.test(sha)) throw new Error(`SHA inválido: ${sha}`);
+    if (!readMeasurement(repo, sha)) throw new Error("medición operacional ausente");
+    const directory = join(root, repo);
+    mkdirSync(directory, { recursive: true });
+    atomicWrite(join(directory, "operational.json"), { sha, confirmedAt: now() });
+  }
+
   function hasRecentError(repo: string, sha: string): boolean {
     const error = readError(repo, sha);
     if (!error) return false;
@@ -195,7 +224,18 @@ export function createMainHealthStore(deps: MainHealthStoreDeps = {}) {
     atomicWrite(join(directory, `${value.sha}.error.json`), clone(value));
   }
 
-  return { root, readMeasurement, readError, hasRecentError, listMeasurements, latestMeasurement, writeMeasurement, writeError };
+  return {
+    root,
+    readMeasurement,
+    readError,
+    hasRecentError,
+    listMeasurements,
+    latestMeasurement,
+    latestOperationalMeasurement,
+    confirmOperationalMeasurement,
+    writeMeasurement,
+    writeError,
+  };
 }
 
 export type MainHealthStore = ReturnType<typeof createMainHealthStore>;

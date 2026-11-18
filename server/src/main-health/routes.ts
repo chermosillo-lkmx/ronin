@@ -7,7 +7,7 @@ const SAFE_SHA = /^[A-Fa-f0-9]{7,64}$/;
 const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const VETOED_REPO = "ant-liebre-app";
 
-type RoutesStore = Pick<MainHealthStore, "latestMeasurement">;
+type RoutesStore = Pick<MainHealthStore, "latestOperationalMeasurement">;
 type RoutesIncidents = Pick<IncidentManager, "readIncident" | "readOwner">;
 
 export interface MainHealthRoutesDeps {
@@ -126,7 +126,7 @@ export function createMainHealthRouter(deps: MainHealthRoutesDeps): Router {
 
       let measurement: MainHealthMeasurement | null;
       try {
-        measurement = deps.store.latestMeasurement(repo);
+        measurement = deps.store.latestOperationalMeasurement(repo);
       } catch {
         continue;
       }
