@@ -192,10 +192,9 @@ acquire_path_lock
 git -C "$source_repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
 git -C "$source_repo" worktree prune >/dev/null 2>&1 || true
 mkdir -p "$wt_parent"
-git -C "$source_repo" worktree add -q --detach "$wt" "$sha" || {
-  printf 'main-health: no pude crear el worktree para %s@%s\n' "$repo" "$short" >&2
-  exit 2
-}
+if ! git -C "$source_repo" worktree add -q --detach "$wt" "$sha" 2>"$diagnostic_log"; then
+  publish_error "no pude crear el worktree para $repo@$short" "$diagnostic_log"
+fi
 worktree_created=1
 
 if [ -f "$wt/package.json" ]; then

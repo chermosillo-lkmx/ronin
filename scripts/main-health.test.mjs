@@ -378,10 +378,11 @@ test("un waiter terminado no elimina el worktree activo del dueño del path-lock
   const waiterResult = collect(waiterChild);
   const waiterLock = join(fx.healthDir, REPO, `${otherSha}.lock`);
   const waiterDeadline = Date.now() + 3000;
-  while (!existsSync(waiterLock) && Date.now() < waiterDeadline) {
+  while (!existsSync(join(waiterLock, "owner")) && Date.now() < waiterDeadline) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  assert.equal(existsSync(waiterLock), true);
+  assert.equal(existsSync(join(waiterLock, "owner")), true);
+  await new Promise((resolve) => setTimeout(resolve, 50));
   waiterChild.kill("SIGTERM");
   const waiter = await waiterResult;
   assert.equal(waiter.code, 143, waiter.output);
@@ -414,6 +415,25 @@ test("main-health recupera y limpia un worktree residual al robar un lock muerto
   assert.equal(result.code, 0, result.out);
   assert.equal(existsSync(residual), false, result.out);
   assert.doesNotMatch(sh("git", ["worktree", "list", "--porcelain"], { cwd: fx.repo }), /wt-/);
+});
+
+test("main-health publica error JSON cuando falla git worktree add", (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  const fakeBin = join(fx.root, "fake-bin");
+  const realGit = sh("bash", ["-c", "command -v git"]);
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(fakeBin, "git"),
+    `#!/bin/bash\n` +
+    `if [[ " $* " == *" worktree add "* ]]; then echo 'falló worktree add simulado' >&2; exit 44; fi\n` +
+    `exec "${realGit}" "$@"\n`);
+  chmodSync(join(fakeBin, "git"), 0o755);
+  const result = fx.run({ PATH: `${fakeBin}:${process.env.PATH}` });
+  assert.equal(result.code, 2, result.out);
+  assert.equal(existsSync(fx.jsonPath), false);
+  const error = JSON.parse(readFileSync(fx.errorPath, "utf8"));
+  assert.match(error.reason, /crear.*worktree/i);
+  assert.match(error.log_tail, /falló worktree add simulado/);
 });
 
 test("main-health escribe error JSON y sale 2 cuando no hay junit", (t) => {
