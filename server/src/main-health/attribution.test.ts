@@ -1,0 +1,126 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { attributeMainHealth, parsePullRequest, type GitPort } from "./attribution.js";
+import type { MainHealthMeasurement } from "./store.js";
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function measurement(sha: string, status: "green" | "red", overrides: Partial<MainHealthMeasurement> = {}): MainHealthMeasurement {
+  return {
+    sha,
+    repo: "api",
+    status,
+    tests: 1,
+    total: 100,
+    floor: 90,
+    failed: [],
+    errors: [],
+    skipped: 0,
+    skipped_by_reason: {},
+    uncovered_by_file: {},
+    duration: 10,
+    at: 1,
+    gate_rc: status === "green" ? 0 : 1,
+    ...overrides,
+  };
+}
+
+test("attribution usa el verde first-parent y cruza PR, autor, líneas y roja nueva", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cowork-main-health-attribution-"));
+  const repoDir = join(root, "repo");
+  mkdirSync(join(repoDir, "src"), { recursive: true });
+  mkdirSync(join(repoDir, "tests"), { recursive: true });
+  try {
+    git(repoDir, "init", "-b", "main");
+    git(repoDir, "config", "user.name", "Ada Tester");
+    git(repoDir, "config", "user.email", "ada@example.com");
+    writeFileSync(join(repoDir, "src", "app.py"), "covered = True\n");
+    writeFileSync(join(repoDir, "tests", "test_app.py"), "def test_ok(): assert True\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "chore: baseline verde");
+    const baselineSha = git(repoDir, "rev-parse", "HEAD");
+
+    git(repoDir, "checkout", "-b", "feature");
+    writeFileSync(join(repoDir, "src", "app.py"), "covered = True\ndangerous = True\n");
+    writeFileSync(join(repoDir, "tests", "test_app.py"), "def test_ok(): assert True\ndef test_breaks(): assert False\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "feat: introducir regresión (#73)");
+    const secondParentGreenSha = git(repoDir, "rev-parse", "HEAD");
+
+    git(repoDir, "checkout", "main");
+    git(repoDir, "merge", "--no-ff", "feature", "-m", "Merge pull request #42 from feature");
+    const redSha = git(repoDir, "rev-parse", "HEAD");
+    const redId = "tests.test_app::test_breaks";
+    const unattributedId = "external.module::boom";
+    const red = measurement(redSha, "red", {
+      failed: [redId],
+      errors: [unattributedId],
+      uncovered_by_file: { "src/app.py": [2] },
+      at: 30,
+    });
+    const commands: string[][] = [];
+    const port: GitPort = {
+      run: async (args, cwd) => {
+        commands.push(args);
+        return execFileSync("git", args, { cwd, encoding: "utf8" });
+      },
+    };
+
+    const report = await attributeMainHealth({
+      repoDir,
+      red,
+      measurements: [
+        measurement(secondParentGreenSha, "green", { at: 20 }),
+        measurement(baselineSha, "green", { at: 10 }),
+      ],
+    }, port);
+
+    assert.equal(report.status, "attributed");
+    assert.equal(report.reason, null);
+    assert.equal(report.greenSha, baselineSha);
+    assert.deepEqual(report.newRed, [redId, unattributedId]);
+    assert.deepEqual(report.unattributedRed, [unattributedId]);
+    assert.deepEqual(report.culpritShas, [redSha]);
+    assert.equal(report.commits.length, 1);
+    assert.deepEqual(report.commits[0], {
+      sha: redSha,
+      author: { name: "Ada Tester", email: "ada@example.com" },
+      pr: 42,
+      message: "Merge pull request #42 from feature",
+      files: ["src/app.py", "tests/test_app.py"],
+      addedLinesByFile: { "src/app.py": [2], "tests/test_app.py": [2] },
+      uncoveredAddedByFile: { "src/app.py": [2] },
+      newRed: [redId],
+    });
+    assert.ok(commands.some((args) => args.join(" ") === `rev-list --first-parent --reverse ${baselineSha}..${redSha}`));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("attribution reporta explícitamente que no existe medición verde previa", async () => {
+  const sha = "a".repeat(40);
+  const port: GitPort = { run: async () => { throw new Error("git no debe ejecutarse sin verdes"); } };
+  const report = await attributeMainHealth({ repoDir: "/repo/inexistente", red: measurement(sha, "red"), measurements: [] }, port);
+
+  assert.deepEqual(report, {
+    status: "no_prior_green",
+    reason: "sin medición verde previa",
+    redSha: sha,
+    greenSha: null,
+    commits: [],
+    culpritShas: [],
+    newRed: [],
+    unattributedRed: [],
+  });
+});
+
+test("parsePullRequest reconoce el sufijo squash (#N)", () => {
+  assert.equal(parsePullRequest("feat: entregar salud (#73)\n\nCo-Authored-By: Pair <pair@example.com>"), 73);
+});
