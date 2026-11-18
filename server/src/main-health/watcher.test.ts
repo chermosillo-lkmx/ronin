@@ -319,6 +319,242 @@ test("timeout termina el grupo TERM→gracia→KILL y la cola espera close antes
   await watcher.idle();
 });
 
+test("abort de medición hace TERM→gracia→KILL y espera close antes de rechazar", async () => {
+  type Listener = (error?: Error) => void;
+  const listeners: { error?: Listener; close?: Listener } = {};
+  const removed: string[] = [];
+  const timers: Array<{ callback: () => void; ms: number; active: boolean }> = [];
+  const kills: string[] = [];
+  const factory = (watcherModule as Record<string, unknown>).createMainHealthMeasurementRunner as (deps: unknown) => (input: unknown) => Promise<void>;
+  const measure = factory({
+    graceMs: 25,
+    spawnProcess: () => ({
+      pid: 321,
+      once: (event: "error" | "close", listener: Listener) => { listeners[event] = listener; },
+      removeListener: (event: "error" | "close") => { removed.push(event); },
+      kill: () => true,
+    }),
+    killProcessGroup: (_child: unknown, signal: string) => { kills.push(signal); },
+    timers: {
+      setTimeout: (callback: () => void, ms: number) => {
+        const timer = { callback, ms, active: true };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimeout: (timer: { active: boolean }) => { timer.active = false; },
+    },
+  });
+  const controller = new AbortController();
+  const running = measure({
+    command: "measure",
+    args: [],
+    cwd: "/repo",
+    env: {},
+    timeoutMs: 1_000,
+    signal: controller.signal,
+  });
+  let settled = false;
+  void running.then(() => { settled = true; }, () => { settled = true; });
+
+  controller.abort();
+  assert.deepEqual(kills, ["SIGTERM"]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "TERM no termina la promesa antes de close");
+  assert.equal(timers[1]!.ms, 25);
+  timers[1]!.callback();
+  assert.deepEqual(kills, ["SIGTERM", "SIGKILL"]);
+  assert.equal(settled, false, "KILL tampoco termina la promesa antes de close");
+
+  listeners.close?.();
+  await assert.rejects(running, (error: any) => error?.name === "AbortError");
+  assert.equal(timers.every(({ active }) => !active), true);
+  assert.ok(removed.includes("error"));
+});
+
+test("stop aborta la medición activa, espera su close y descarta la cola", async () => {
+  const store = memoryStore();
+  const deps = baseDeps(["alpha", "beta"], store);
+  const intervals: unknown[] = [];
+  Object.assign(deps, {
+    timers: {
+      setInterval: (callback: () => void) => { intervals.push(callback); return callback; },
+      clearInterval: () => undefined,
+    },
+  });
+  const runs: string[] = [];
+  let activeSignal: AbortSignal | undefined;
+  let finishActive!: () => void;
+  deps.measure = ({ args, signal }: { args: string[]; signal?: AbortSignal }) => {
+    runs.push(args[0]!);
+    activeSignal = signal;
+    return new Promise<void>((resolve) => { finishActive = resolve; });
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.ensureMeasured("alpha", SHA_A);
+  await watcher.ensureMeasured("beta", SHA_B);
+  const stopping = watcher.stop();
+  let stopped = false;
+  void Promise.resolve(stopping).then(() => { stopped = true; });
+  assert.equal(activeSignal?.aborted, true);
+  assert.deepEqual(await watcher.ensureMeasured("beta", SHA_C), {
+    status: "ignored", reason: "stopping", repo: "beta",
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false, "stop espera que el proceso emita close/termine");
+  assert.deepEqual(runs, ["alpha"], "el job en cola nunca arranca");
+
+  finishActive();
+  await stopping;
+  assert.equal(stopped, true);
+  assert.deepEqual(runs, ["alpha"]);
+
+  deps.git.lsRemoteMain = async () => null;
+  deps.measure = async ({ args }: { args: string[] }) => { runs.push(args[0]!); };
+  watcher.start();
+  await watcher.ensureMeasured("beta", SHA_B);
+  await watcher.idle();
+  assert.deepEqual(runs, ["alpha", "beta"], "restart crea una generación limpia");
+  await watcher.stop();
+});
+
+test("stop espera evaluate/attribution en vuelo y la cerca antes de abrir o lanzar auxiliares", async () => {
+  const deps = baseDeps(["repo"]);
+  let attributionStarted!: () => void;
+  let releaseAttribution!: () => void;
+  const started = new Promise<void>((resolve) => { attributionStarted = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseAttribution = resolve; });
+  let opens = 0;
+  let fixer = 0;
+  let comments = 0;
+  deps.readSettings = () => baseSettings(["repo"], { commentOnPr: true });
+  deps.attribute = async ({ red }) => {
+    attributionStarted();
+    await gate;
+    return attribution(red);
+  };
+  deps.incidents = {
+    ...noopIncidents(),
+    openIncident: (input) => {
+      opens += 1;
+      return { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+    },
+    ensureFixer: async () => { fixer += 1; },
+  };
+  deps.commentPullRequest = async () => { comments += 1; };
+  const watcher = createMainHealthWatcher(deps);
+
+  const evaluating = watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  await started;
+  const stopping = watcher.stop();
+  let stopped = false;
+  void Promise.resolve(stopping).then(() => { stopped = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+  releaseAttribution();
+  await Promise.all([evaluating, stopping]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(opens, 0);
+  assert.equal(fixer, 0);
+  assert.equal(comments, 0);
+});
+
+test("stop espera Git en vuelo y el SHA tardío no encola una medición", async () => {
+  const deps = baseDeps(["repo"]);
+  let gitStarted!: () => void;
+  let releaseGit!: () => void;
+  const started = new Promise<void>((resolve) => { gitStarted = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseGit = resolve; });
+  let measures = 0;
+  deps.git.lsRemoteMain = async () => {
+    gitStarted();
+    await gate;
+    return SHA_A;
+  };
+  deps.measure = async () => { measures += 1; };
+  const watcher = createMainHealthWatcher(deps);
+
+  const tick = watcher.tick();
+  await started;
+  const stopping = watcher.stop();
+  await watcher.tick();
+  releaseGit();
+  await Promise.all([tick, stopping]);
+
+  assert.equal(measures, 0);
+});
+
+test("stop espera close en vuelo y no encola su notificación después de la barrera", async () => {
+  const deps = baseDeps(["repo"]);
+  const current: Incident = {
+    id: `repo@${SHA_A.slice(0, 7)}`,
+    repo: "repo",
+    firstRedSha: SHA_A,
+    openedAt: 1,
+    summary: "rojo",
+    attribution: attribution(measurement("repo", SHA_A, "red")),
+  };
+  let closeStarted!: () => void;
+  let releaseClose!: () => void;
+  const started = new Promise<void>((resolve) => { closeStarted = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseClose = resolve; });
+  let notifications = 0;
+  deps.incidents = {
+    ...noopIncidents(),
+    readIncident: () => current,
+    closeIncident: async () => {
+      closeStarted();
+      await gate;
+      return { ...current, closedAt: 2 };
+    },
+  };
+  deps.notifier.closed = async () => { notifications += 1; };
+  const watcher = createMainHealthWatcher(deps);
+
+  const evaluating = watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
+  await started;
+  const stopping = watcher.stop();
+  releaseClose();
+  await Promise.all([evaluating, stopping]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(notifications, 0);
+});
+
+test("stop aborta el signal del comentario auxiliar activo", async () => {
+  const deps = baseDeps(["repo"]);
+  deps.readSettings = () => baseSettings(["repo"], { commentOnPr: true });
+  Object.assign(deps, {
+    scheduleAuxiliaryStart: (callback: () => void) => callback(),
+    scheduleAuxiliaryDeadline: () => () => undefined,
+  });
+  let current: Incident | null = null;
+  let commentSignal: AbortSignal | undefined;
+  deps.incidents = {
+    ...noopIncidents(),
+    readIncident: () => current,
+    openIncident: (input) => {
+      current = { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+      return current;
+    },
+  };
+  deps.commentPullRequest = async (input: any) => {
+    commentSignal = input.signal;
+    await new Promise<void>((_resolve, reject) => input.signal.addEventListener(
+      "abort",
+      () => reject(new DOMException("cancelado", "AbortError")),
+      { once: true },
+    ));
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  assert.equal(commentSignal?.aborted, false);
+  await watcher.stop();
+  assert.equal(commentSignal?.aborted, true);
+});
+
 test("cache hit se reconcilia en la cola sin medir y recupera apertura/cierre", async () => {
   const store = memoryStore();
   store.measurements.set(`repo@${SHA_A}`, measurement("repo", SHA_A, "red"));
@@ -563,7 +799,7 @@ test("timer heartbeat autorizado no se solapa y auxiliares fallidos se reintenta
   await watcher.evaluate("alpha", measurement("alpha", SHA_A, "red"));
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(fixerCalls, 2, "fixer fallido libera su clave para retry");
-  watcher.stop();
+  await watcher.stop();
 });
 
 test("evaluate serializa dos cierres concurrentes y sólo uno ejecuta close", async () => {
@@ -728,8 +964,8 @@ test("heartbeat usa cadencia menor al lease e independiente de la medición", as
   assert.equal(heartbeats, heartbeatBeforeTimer + 1, "renueva antes del lease sin esperar medición");
   assert.equal(gitCalls, gitBeforeHeartbeat, "el timer de heartbeat no descubre main");
 
-  watcher.stop();
-  watcher.stop();
+  await watcher.stop();
+  await watcher.stop();
   assert.equal(installed.filter(({ cleared }) => cleared).length, 2, "stop limpia ambos timers una vez");
 });
 
@@ -771,10 +1007,10 @@ test("heartbeat colgado libera dedupe al vencer y stop/restart no hereda la prom
   heartbeatTimer.callback();
   assert.equal(calls, 2, "el deadline libera la clave aunque el efecto siga colgado");
 
-  watcher.stop();
+  await watcher.stop();
   watcher.start();
   assert.equal(calls, 3, "la generación nueva no queda suprimida por promesas anteriores");
-  watcher.stop();
+  await watcher.stop();
 });
 
 test("close invalida fixer y comentario encolados antes de que inicien", async () => {
@@ -853,7 +1089,7 @@ test("stop aborta notify activo, descarta close y una promesa vieja no toca la l
   watcher.start();
   await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
   await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
-  watcher.stop();
+  await watcher.stop();
   assert.equal(firstSignal?.aborted, true);
   watcher.start();
   await watcher.evaluate("repo", measurement("repo", SHA_C, "red"));
@@ -869,7 +1105,7 @@ test("stop aborta notify activo, descarta close y una promesa vieja no toca la l
     `open:repo@${SHA_C.slice(0, 7)}:start`,
     `open:repo@${SHA_C.slice(0, 7)}:end`,
   ]);
-  watcher.stop();
+  await watcher.stop();
 });
 
 test("start con enabled=false no hace tick ni instala interval; ticks activos no se solapan", async () => {
@@ -922,11 +1158,11 @@ test("start con enabled=false no hace tick ni instala interval; ticks activos no
   release();
   await on.idle();
   assert.equal(maxActive, 1);
-  on.stop();
-  on.stop();
+  await on.stop();
+  await on.stop();
   assert.equal(clears, 2, "stop elimina una sola vez ambos intervalos activos");
   on.start();
   assert.equal(installs, 4, "puede arrancar otra vez tras stop");
-  on.stop();
+  await on.stop();
   assert.equal(clears, 4);
 });
