@@ -37,17 +37,22 @@ test("getMainHealth devuelve filas válidas y filtra datos corruptos o cruzados"
   }
 });
 
-test("getMainHealth falla cerrado ante HTTP, JSON, shape o fetch inválidos", async () => {
+test("getMainHealth distingue éxito vacío de fallos transitorios con error genérico", async () => {
   const originalFetch = globalThis.fetch;
   try {
+    globalThis.fetch = async () => new Response(JSON.stringify([]));
+    assert.deepEqual(await api.getMainHealth(), []);
+    globalThis.fetch = async () => new Response(JSON.stringify([{ repo: "cruzado" }]));
+    assert.deepEqual(await api.getMainHealth(), [], "un envelope válido filtra filas corruptas");
+
     globalThis.fetch = async () => new Response("no", { status: 503 });
-    assert.deepEqual(await (api as any).getMainHealth(), []);
+    await assert.rejects(api.getMainHealth(), /^Error: no se pudo leer salud de main$/);
     globalThis.fetch = async () => new Response("{no-json");
-    assert.deepEqual(await (api as any).getMainHealth(), []);
+    await assert.rejects(api.getMainHealth(), /^Error: no se pudo leer salud de main$/);
     globalThis.fetch = async () => new Response(JSON.stringify({ rows: [] }));
-    assert.deepEqual(await (api as any).getMainHealth(), []);
+    await assert.rejects(api.getMainHealth(), /^Error: no se pudo leer salud de main$/);
     globalThis.fetch = async () => { throw new Error("sin red"); };
-    assert.deepEqual(await (api as any).getMainHealth(), []);
+    await assert.rejects(api.getMainHealth(), /^Error: no se pudo leer salud de main$/);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -104,11 +104,12 @@ function validMainHealthRow(value: unknown): value is MainHealthRow {
 export async function getMainHealth(): Promise<MainHealthRow[]> {
   try {
     const response = await fetch("/api/main-health");
-    if (!response.ok) return [];
-    const body: unknown = await response.json().catch(() => null);
-    return Array.isArray(body) ? body.filter(validMainHealthRow) : [];
+    if (!response.ok) throw new Error();
+    const body: unknown = await response.json();
+    if (!Array.isArray(body)) throw new Error();
+    return body.filter(validMainHealthRow);
   } catch {
-    return [];
+    throw new Error("no se pudo leer salud de main");
   }
 }
 
