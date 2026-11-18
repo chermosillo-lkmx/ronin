@@ -28,6 +28,8 @@ export interface Incident {
   summary: string;
   attribution: MainHealthAttribution;
   remoteOwner?: string;
+  claimSha?: string;
+  claimBranch?: string;
   closedAt?: number;
 }
 
@@ -107,6 +109,7 @@ export interface IncidentManagerDeps {
   pid?: () => number;
   pidAlive?: (pid: number) => boolean;
   mutexToken?: () => string;
+  mutexLeaseMs?: number;
   leaseMin?: number;
   tmux?: TmuxPort;
   host?: () => string;
@@ -118,14 +121,18 @@ export interface IncidentManagerDeps {
   atomicWrite?: (target: string, value: unknown) => void;
 }
 
-const SAFE_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const SAFE_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_SHA = /^[A-Fa-f0-9]{7,64}$/;
 const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_ALIAS = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const SAFE_MUTEX_TOKEN = /^[A-Za-z0-9-]{8,128}$/;
 
 function safeRepo(repo: string): boolean {
-  return repo !== "." && repo !== ".." && SAFE_REPO.test(repo);
+  return repo.length <= 61
+    && SAFE_REPO.test(repo)
+    && !repo.includes("..")
+    && !repo.endsWith(".")
+    && !repo.toLowerCase().endsWith(".lock");
 }
 
 function assertRepo(repo: string): void {
@@ -151,7 +158,11 @@ function isIncident(value: unknown): value is Incident {
     && Number.isFinite(value.openedAt)
     && typeof value.summary === "string"
     && isRecord(value.attribution)
+    && value.id === `${value.repo}@${value.firstRedSha.slice(0, 7)}`
     && (value.remoteOwner === undefined || typeof value.remoteOwner === "string")
+    && (value.claimSha === undefined || (typeof value.claimSha === "string" && SAFE_SHA.test(value.claimSha)))
+    && (value.claimBranch === undefined || value.claimBranch === `fix/main-health-${value.repo}`)
+    && ((value.claimSha === undefined) === (value.claimBranch === undefined))
     && (value.closedAt === undefined || (typeof value.closedAt === "number" && Number.isFinite(value.closedAt)));
 }
 
@@ -170,6 +181,7 @@ function isOwner(value: unknown): value is IncidentOwner {
 interface OwnerMutex {
   token: string;
   pid: number;
+  createdAt: number;
 }
 
 interface OwnerRecoveryGuard {
@@ -182,7 +194,9 @@ function isOwnerMutex(value: unknown): value is OwnerMutex {
     && typeof value.token === "string"
     && SAFE_MUTEX_TOKEN.test(value.token)
     && Number.isInteger(value.pid)
-    && (value.pid as number) > 0;
+    && (value.pid as number) > 0
+    && typeof value.createdAt === "number"
+    && Number.isFinite(value.createdAt);
 }
 
 function isOwnerRecoveryGuard(value: unknown): value is OwnerRecoveryGuard {
@@ -266,6 +280,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   const pid = deps.pid ?? (() => process.pid);
   const pidAlive = deps.pidAlive ?? processPidAlive;
   const mutexToken = deps.mutexToken ?? randomUUID;
+  const mutexLeaseMs = deps.mutexLeaseMs ?? 30_000;
   const host = deps.host ?? hostname;
   const leaseMs = (deps.leaseMin ?? deps.settings?.leaseMin ?? DEFAULT_MAIN_HEALTH_SETTINGS.leaseMin) * 60_000;
   const tmux = deps.tmux ?? { hasSession };
@@ -355,7 +370,7 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     let prepared = false;
     try {
       fd = fs.open(temporary, "wx");
-      fs.write(fd, `${JSON.stringify(value)}\n`);
+      writeFully(fd, `${JSON.stringify(value)}\n`);
       fs.fsync(fd);
       prepared = true;
     } finally {
@@ -376,6 +391,16 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
       try { fs.unlink(temporary); } catch { /* el hardlink publicado conserva el inode completo */ }
     }
     return true;
+  }
+
+  function writeFully(fd: number, text: string): void {
+    const data = Buffer.from(text, "utf8");
+    let offset = 0;
+    while (offset < data.byteLength) {
+      const written = fs.write(fd, data, offset, data.byteLength - offset, offset);
+      if (!Number.isInteger(written) || written <= 0) throw new Error("escritura incompleta en filesystem");
+      offset += written;
+    }
   }
 
   function publishOwnerMutex(repo: string, mutex: OwnerMutex): boolean {
@@ -417,12 +442,12 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   function acquireOwnerMutex(repo: string, ownerPid: number): OwnerMutex | null {
     const token = mutexToken();
     if (!SAFE_MUTEX_TOKEN.test(token)) throw new Error("token de mutex inválido");
-    const candidate: OwnerMutex = { token, pid: ownerPid };
+    const candidate: OwnerMutex = { token, pid: ownerPid, createdAt: now() };
     if (publishOwnerMutex(repo, candidate)) return candidate;
 
     const occupied = readOwnerMutex(repo);
     // Un mutex publicado siempre es JSON completo. Algo ilegible falla cerrado.
-    if (!occupied || pidAlive(occupied.pid)) return null;
+    if (!occupied || mutexIsLive(occupied)) return null;
 
     let guardPath = mutexRecoveryGuard(repo, occupied);
     const candidateGuard: OwnerRecoveryGuard = { observed: occupied, recovery: candidate };
@@ -460,20 +485,22 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         throw new Error("ciclo detectado en identidades de recovery");
       }
       visitedRecoveries.add(recoveryIdentity);
-      if (previous.recovery.pid !== candidate.pid && pidAlive(previous.recovery.pid)) return null;
+      if (previous.recovery.pid !== candidate.pid && mutexIsLive(previous.recovery)) return null;
       guardPath = mutexRecoveryGuard(repo, occupied, previous.recovery);
     }
   }
 
+  function mutexIsLive(mutex: OwnerMutex): boolean {
+    return pidAlive(mutex.pid) && now() - mutex.createdAt < mutexLeaseMs;
+  }
+
   function writeOwnerExclusive(repo: string, owner: IncidentOwner): void {
     const target = ownerFile(repo);
-    let fd: number | undefined;
-    try {
-      fd = fs.open(target, "wx");
-      fs.write(fd, `${JSON.stringify(owner, null, 2)}\n`);
-      fs.fsync(fd);
-    } finally {
-      if (fd !== undefined) fs.close(fd);
+    const temporary = `${target}.tmp-${owner.pid}-${randomUUID()}`;
+    if (!publishJsonExclusive(target, temporary, owner)) {
+      const error = new Error(`owner ya existe: ${repo}`) as NodeJS.ErrnoException;
+      error.code = "EEXIST";
+      throw error;
     }
   }
 

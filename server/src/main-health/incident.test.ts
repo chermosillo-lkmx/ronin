@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -76,8 +76,21 @@ test("resuelve root configurable y rechaza repo o SHA inseguros", () => {
   withRoot((root) => {
     const manager = createIncidentManager({ root });
     assert.throws(() => manager.openIncident({ repo: "../api", firstRedSha: SHA, summary: "x", attribution: ATTRIBUTION }), /repo inválido/);
+    assert.throws(() => manager.openIncident({ repo: "a..b", firstRedSha: SHA, summary: "x", attribution: ATTRIBUTION }), /repo inválido/);
+    assert.throws(() => manager.openIncident({ repo: "a.lock", firstRedSha: SHA, summary: "x", attribution: ATTRIBUTION }), /repo inválido/);
+    assert.throws(() => manager.openIncident({ repo: "a".repeat(62), firstRedSha: SHA, summary: "x", attribution: ATTRIBUTION }), /repo inválido/);
     assert.throws(() => manager.openIncident({ repo: "api", firstRedSha: "../mal", summary: "x", attribution: ATTRIBUTION }), /SHA inválido/);
     assert.equal(manager.readIncident("../api"), null);
+  });
+});
+
+test("rechaza incident.json cuyo id no corresponde al repo y SHA", () => {
+  withRoot((root) => {
+    const manager = createIncidentManager({ root });
+    const incident = manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    writeFileSync(join(root, "incidents", "api", "incident.json"), JSON.stringify({ ...incident, id: "../../escape" }));
+
+    assert.equal(manager.readIncident("api"), null);
   });
 });
 
@@ -249,7 +262,7 @@ test("recupera mutex de owner cuando su PID ya no vive", () => {
     const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
     original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
     original.claimOwner("api", "cowork-viejo");
-    writeFileSync(join(directory, "owner.mutex.json"), JSON.stringify({ token: "token-muerto", pid: 999 }));
+    writeFileSync(join(directory, "owner.mutex.json"), JSON.stringify({ token: "token-muerto", pid: 999, createdAt: 1_000 }));
     const contender = createIncidentManager({
       root,
       now: () => 70_000,
@@ -275,7 +288,7 @@ test("guard de recovery impide que un loser retire el mutex vivo instalado por e
     const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
     original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
     original.claimOwner("api", "cowork-viejo");
-    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999 }));
+    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999, createdAt: 1_000 }));
 
     let resultA: ReturnType<typeof original.claimOwner> | undefined;
     const contenderA = createIncidentManager({
@@ -324,7 +337,7 @@ test("encadena guard generacional si el recuperador anterior muere antes de reem
     const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
     original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
     original.claimOwner("api", "cowork-viejo");
-    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999 }));
+    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999, createdAt: 1_000 }));
 
     const dyingRecovery = createIncidentManager({
       root,
@@ -347,10 +360,10 @@ test("encadena guard generacional si el recuperador anterior muere antes de reem
     );
     const baseGuard = recoveryGuards(directory)[0];
     assert.deepEqual(JSON.parse(readFileSync(baseGuard, "utf8")), {
-      observed: { pid: 999, token: "token-muerto" },
-      recovery: { pid: 88, token: "token-recuperador-8888" },
+      observed: { pid: 999, token: "token-muerto", createdAt: 1_000 },
+      recovery: { pid: 88, token: "token-recuperador-8888", createdAt: 70_000 },
     });
-    assert.deepEqual(JSON.parse(readFileSync(mutex, "utf8")), { token: "token-muerto", pid: 999 });
+    assert.deepEqual(JSON.parse(readFileSync(mutex, "utf8")), { token: "token-muerto", pid: 999, createdAt: 1_000 });
 
     const successor = createIncidentManager({
       root,
@@ -368,8 +381,8 @@ test("encadena guard generacional si el recuperador anterior muere antes de reem
       .find((target) => JSON.parse(readFileSync(target, "utf8")).recovery.pid === 99);
     assert.ok(childGuard);
     assert.deepEqual(JSON.parse(readFileSync(childGuard, "utf8")), {
-      observed: { pid: 999, token: "token-muerto" },
-      recovery: { pid: 99, token: "token-sucesor-99999999" },
+      observed: { pid: 999, token: "token-muerto", createdAt: 1_000 },
+      recovery: { pid: 99, token: "token-sucesor-99999999", createdAt: 70_000 },
     });
   });
 });
@@ -381,7 +394,7 @@ test("el mismo proceso reintenta recovery tras una excepción operacional", () =
     const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
     original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
     original.claimOwner("api", "cowork-viejo");
-    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999 }));
+    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999, createdAt: 1_000 }));
     const tokens = ["token-primer-intento-7777", "token-segundo-intento-777"];
     let failOnce = true;
     const manager = createIncidentManager({
@@ -418,7 +431,7 @@ test("recovery progresa por una cadena mayor a ocho generaciones muertas", () =>
     const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
     original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
     original.claimOwner("api", "cowork-viejo");
-    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999 }));
+    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999, createdAt: 1_000 }));
 
     for (let index = 0; index < 10; index += 1) {
       const dying = createIncidentManager({
@@ -454,6 +467,30 @@ test("recovery progresa por una cadena mayor a ocho generaciones muertas", () =>
   });
 });
 
+test("recupera mutex vencido aunque el PID haya sido reutilizado y siga vivo", () => {
+  withRoot((root) => {
+    const directory = join(root, "incidents", "api");
+    const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
+    original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    original.claimOwner("api", "cowork-viejo");
+    writeFileSync(join(directory, "owner.mutex.json"), JSON.stringify({ token: "token-pid-reusado", pid: 77, createdAt: 1_000 }));
+    const contender = createIncidentManager({
+      root,
+      now: () => 70_000,
+      pid: () => 77,
+      pidAlive: () => true,
+      mutexLeaseMs: 30_000,
+      leaseMin: 1,
+      mutexToken: () => "token-nueva-generacion-77",
+    });
+
+    const result = contender.claimOwner("api", "cowork-nuevo");
+
+    assert.equal(result.acquired, true);
+    assert.equal(result.owner?.session, "cowork-nuevo");
+  });
+});
+
 test("publicación indivisible del mutex nunca deja JSON parcial visible", () => {
   withRoot((root) => {
     const directory = join(root, "incidents", "api");
@@ -475,6 +512,55 @@ test("publicación indivisible del mutex nunca deja JSON parcial visible", () =>
 
     const retry = createIncidentManager({ root, pid: () => 55 });
     assert.equal(retry.claimOwner("api", "cowork-b").acquired, true);
+  });
+});
+
+test("writeFully completa short writes al publicar mutex y owner", () => {
+  withRoot((root) => {
+    const manager = createIncidentManager({
+      root,
+      pid: () => 66,
+      fs: {
+        write(fd, buffer, offset, length, position) {
+          const data = typeof buffer === "string" ? Buffer.from(buffer) : buffer as Uint8Array;
+          const start = typeof offset === "number" ? offset : 0;
+          const requested = typeof length === "number" ? length : data.byteLength - start;
+          return writeSync(fd, data, start, Math.min(requested, 3), typeof position === "number" ? position : null);
+        },
+      },
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    const result = manager.claimOwner("api", "cowork-short-write");
+
+    assert.equal(result.acquired, true);
+    assert.equal(manager.readOwner("api")?.session, "cowork-short-write");
+  });
+});
+
+test("fallo preparando owner no deja target parcial y permite reintento", () => {
+  withRoot((root) => {
+    const directory = join(root, "incidents", "api");
+    const manager = createIncidentManager({
+      root,
+      pid: () => 67,
+      fs: {
+        write(fd, buffer, offset, length, position) {
+          const data = typeof buffer === "string" ? Buffer.from(buffer) : buffer as Uint8Array;
+          const text = Buffer.from(data).toString("utf8");
+          if (text.includes("session")) throw new Error("falla preparando owner");
+          const start = typeof offset === "number" ? offset : 0;
+          const requested = typeof length === "number" ? length : data.byteLength - start;
+          return writeSync(fd, data, start, requested, typeof position === "number" ? position : null);
+        },
+      },
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    assert.throws(() => manager.claimOwner("api", "cowork-falla"), /falla preparando owner/);
+    assert.equal(existsSync(join(directory, "owner.json")), false);
+    assert.deepEqual(readdirSync(directory).filter((name) => name.startsWith("owner.json.tmp-")), []);
+    assert.equal(createIncidentManager({ root, pid: () => 68 }).claimOwner("api", "cowork-retry").acquired, true);
   });
 });
 
