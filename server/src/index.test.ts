@@ -7,9 +7,12 @@ import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { Router } from "express";
 import { CAPABILITY_FILE, ensureCapabilityToken, readCapabilityToken } from "./capability.js";
 import { VERIFY_GATE } from "./config.js";
 import { createApp, runConfiguredClaude, startServer } from "./index.js";
+import * as indexModule from "./index.js";
+import type { MainHealthWatcher } from "./main-health/watcher.js";
 import type { TelegramRuntime } from "./telegram/service.js";
 import type { Update } from "./telegram/api.js";
 import { createTelegramStore } from "./telegram/store.js";
@@ -33,6 +36,24 @@ function fakeTelegram(events: string[] = [], over: Partial<TelegramRuntime> = {}
   };
 }
 const offlineApp = (options?: Parameters<typeof createApp>[0]) => createApp({ ...options, telegram: fakeTelegram() });
+
+function fakeMainHealthWatcher(overrides: Partial<MainHealthWatcher> = {}): MainHealthWatcher {
+  return {
+    tick: async () => {},
+    ensureMeasured: async (repo) => ({ status: "ignored", reason: "disabled", repo }),
+    evaluate: async () => {},
+    idle: async () => {},
+    start: () => {},
+    stop: () => {},
+    ...overrides,
+  };
+}
+
+function fakeMainHealth(watcher = fakeMainHealthWatcher()) {
+  const router = Router();
+  router.get("/", (_request, response) => response.json([{ repo: "fixture-main" }]));
+  return { watcher, router };
+}
 
 function envWithoutTmux(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -189,6 +210,78 @@ test("startServer does not listen until background setup is ready", async () => 
   await handle.close();
   await handle.close();
   assert.deepEqual(events, ["listen", "socket", "background"]);
+});
+
+test("createApp monta el router main-health y publica el mismo watcher", async () => {
+  const mainHealth = fakeMainHealth();
+  const app = offlineApp({ mainHealth } as Parameters<typeof createApp>[0]);
+
+  assert.equal(app.locals.mainHealthWatcher, mainHealth.watcher);
+  assert.deepEqual(await invokeGet(app, "/api/main-health"), {
+    status: 200,
+    body: [{ repo: "fixture-main" }],
+  });
+});
+
+test("startMainHealthBackground arranca y detiene el watcher una sola vez", async () => {
+  const events: string[] = [];
+  const watcher = fakeMainHealthWatcher({
+    start: () => { events.push("start"); },
+    stop: () => { events.push("stop"); },
+  });
+  const start = (indexModule as any).startMainHealthBackground;
+  assert.equal(typeof start, "function");
+  const cleanup = start({ locals: { mainHealthWatcher: watcher } });
+
+  assert.deepEqual(events, ["start"]);
+  await cleanup();
+  await cleanup();
+  assert.deepEqual(events, ["start", "stop"]);
+});
+
+test("withMainHealthVerifyDeps conecta ensureMainMeasured del watcher", async () => {
+  const calls: Array<[string, string]> = [];
+  const watcher = fakeMainHealthWatcher({
+    ensureMeasured: async (repo, sha) => {
+      calls.push([repo, sha ?? ""]);
+      return { status: "queued", repo, sha: sha! };
+    },
+  });
+  const wire = (indexModule as any).withMainHealthVerifyDeps;
+  assert.equal(typeof wire, "function");
+  const base = { marker: true };
+  const deps = wire(base, { locals: { mainHealthWatcher: watcher } });
+
+  assert.equal(deps.marker, true);
+  await deps.ensureMainMeasured("ant-liebre-api", "a".repeat(40));
+  assert.deepEqual(calls, [["ant-liebre-api", "a".repeat(40)]]);
+});
+
+test("startServer entrega el mismo app al background antes de listen", async () => {
+  const app = offlineApp({ mainHealth: fakeMainHealth() } as Parameters<typeof createApp>[0]);
+  const events: string[] = [];
+  const server = {
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43214 }),
+    close: (callback: (error?: Error) => void) => callback(),
+  };
+  const handle = await startServer({
+    port: 43214,
+    deps: {
+      createApp: () => app,
+      startBackground: async (received: unknown) => {
+        assert.equal(received, app);
+        events.push("background");
+        return () => {};
+      },
+      listen: async (received) => {
+        assert.equal(received, app);
+        events.push("listen");
+        return server as any;
+      },
+    },
+  });
+  assert.deepEqual(events, ["background", "listen"]);
+  await handle.close();
 });
 
 test("/api/health never publishes the boot token, only whether the caller presented it", async () => {
@@ -1057,6 +1150,87 @@ test("POST /api/sessions limpia la petición y pasa body.orchestrator al lanzami
   });
   assert.equal(response.status, 201);
   assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", mode: undefined, agent: undefined, request: "arregla CU-86e2", channel: "ui", orchestrator: "claude-cowork" }]);
+});
+
+test("POST /api/sessions dispara main-health después del launch sin esperar la medición", async () => {
+  const token = ensureCapabilityToken();
+  const events: string[] = [];
+  const pending = deferred<never>();
+  const watcher = fakeMainHealthWatcher({
+    ensureMeasured: (repo) => {
+      events.push(`ensure:${repo}`);
+      return pending.promise;
+    },
+  });
+  const app = offlineApp({
+    mainHealth: fakeMainHealth(watcher),
+    launchManagedSession: async () => {
+      events.push("launch");
+      return { name: "cowork-main-health", repo: "ant-liebre-api", mode: "workflow", workflowId: "wf-test", cwd: "/repo" };
+    },
+    readTmuxInventory: async () => {
+      events.push("inventory");
+      return { sessions: [], diagnostic: null };
+    },
+  } as Parameters<typeof createApp>[0]);
+
+  let response: Awaited<ReturnType<typeof invokeRequest>> | undefined;
+  void invokeRequest(app, "POST", "/api/sessions", {
+    headers: { "x-ronin-capability": token },
+    body: { repo: "ant-liebre-api", workflowId: "wf-test", name: "cowork-main-health" },
+  }).then((value) => { response = value; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(response?.status, 201);
+  assert.deepEqual(events, ["launch", "ensure:ant-liebre-api", "inventory"]);
+});
+
+test("POST /api/sessions captura el rechazo tardío de ensureMeasured", async () => {
+  const token = ensureCapabilityToken();
+  const warn = mock.method(console, "warn", () => {});
+  try {
+    const watcher = fakeMainHealthWatcher({
+      ensureMeasured: async () => { throw new Error("main caído"); },
+    });
+    const app = offlineApp({
+      mainHealth: fakeMainHealth(watcher),
+      launchManagedSession: async () => ({ name: "cowork-main-reject", repo: "ant-liebre-api", mode: "workflow", workflowId: "wf-test", cwd: "/repo" }),
+      readTmuxInventory: async () => ({ sessions: [], diagnostic: null }),
+    } as Parameters<typeof createApp>[0]);
+
+    const response = await invokeRequest(app, "POST", "/api/sessions", {
+      headers: { "x-ronin-capability": token },
+      body: { repo: "ant-liebre-api", workflowId: "wf-test", name: "cowork-main-reject" },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(response.status, 201);
+    assert.equal(warn.mock.callCount(), 1);
+  } finally {
+    warn.mock.restore();
+  }
+});
+
+test("POST /api/sessions no mide main si launch falla", async () => {
+  const token = ensureCapabilityToken();
+  let ensures = 0;
+  const watcher = fakeMainHealthWatcher({
+    ensureMeasured: async (repo) => {
+      ensures += 1;
+      return { status: "ignored", reason: "disabled", repo };
+    },
+  });
+  const app = offlineApp({
+    mainHealth: fakeMainHealth(watcher),
+    launchManagedSession: async () => { throw new Error("launch roto"); },
+    readTmuxInventory: async () => ({ sessions: [], diagnostic: null }),
+  } as Parameters<typeof createApp>[0]);
+
+  const response = await invokeRequest(app, "POST", "/api/sessions", {
+    headers: { "x-ronin-capability": token },
+    body: { repo: "ant-liebre-api", workflowId: "wf-test", name: "cowork-main-fail" },
+  });
+  assert.equal(response.status, 500);
+  assert.equal(ensures, 0);
 });
 
 test("POST /api/sessions sólo reenvía inputs que sean un objeto plano de strings", async () => {
