@@ -172,6 +172,17 @@ test("main-health devuelve la caché inmediatamente sin volver a correr la suite
   assert.equal(readFileSync(fx.marker, "utf8").trim(), "1");
 });
 
+test("main-health imprime una caché roja, sale 1 y no corre la suite", (t) => {
+  const fx = fixture(t);
+  mkdirSync(dirname(fx.jsonPath), { recursive: true });
+  const cached = JSON.stringify({ sha: fx.sha, repo: REPO, status: "red", failed: ["tests.test_app::test_f"] }) + "\n";
+  writeFileSync(fx.jsonPath, cached);
+  const result = fx.run({ FAKE_GATE_RC: "99" });
+  assert.equal(result.code, 1, result.out);
+  assert.equal(result.out, cached);
+  assert.equal(existsSync(fx.marker), false, result.out);
+});
+
 test("main-health espera un lock vivo hasta que aparece su JSON", async (t) => {
   const fx = fixture(t);
   mkdirSync(fx.lockPath, { recursive: true });

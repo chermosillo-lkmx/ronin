@@ -1222,6 +1222,21 @@ test("61. la medición se busca por basename del remoto origin, no por nombre de
   assert.match(r.out, /heredado de main/);
 });
 
+test("61b. sin nombre utilizable de origin cae al basename del directorio", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir, base } = seedMainHealth(fx, {}, REPO);
+  fx.git("remote", "remove", "origin");
+  const r = fx.run({
+    ...withoutExtra,
+    UNIT_GATE_BASE: base,
+    MAIN_HEALTH_DIR: healthDir,
+    UNIT_GATE_MAIN_HEALTH_AUTO: "0",
+  });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /heredado de main/);
+});
+
 test("62. base_measurement usa main-health para permitir el WARN de piso heredado", (t) => {
   const fx = fixture(t);
   fx.setSuite([OTHER_PASS, APP("passed")]);
@@ -1231,6 +1246,22 @@ test("62. base_measurement usa main-health para permitir el WARN de piso heredad
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, new RegExp(`piso heredado de main: 90\\.00 % < piso 99\\.70 %, igual o mejor que la base ${base.slice(0, 7)} \\(89\\.00 %\\)`));
   assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
+test("62b. rojas heredadas no escriben caché de cobertura del HEAD", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir } = seedMainHealth(fx, { total: 89 });
+  const stateDir = join(fx.tmp, "state-heredado");
+  const head = fx.git("rev-parse", "HEAD").trim();
+  const r = fx.run({
+    ...withoutExtra,
+    MAIN_HEALTH_DIR: healthDir,
+    UNIT_GATE_MAIN_HEALTH_AUTO: "0",
+    UNIT_GATE_STATE_DIR: stateDir,
+  });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(existsSync(join(stateDir, "coverage", REPO, `${head}.json`)), false, r.out);
 });
 
 test("63. Node con pnpm-lock y sin node_modules pide pnpm install --frozen-lockfile", (t) => {
