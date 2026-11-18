@@ -165,6 +165,8 @@ export interface CreateAppOptions {
   };
   /** Seams del lanzamiento gestionado y el inventario para pruebas HTTP sin tmux. */
   launchManagedSession?: typeof launchManagedSession;
+  /** Gate compartido por el auto-fixer para no reclamar antes de que el server esté listo. */
+  mainHealthLaunchReady?: () => Promise<void>;
   readTmuxInventory?: typeof readTmuxInventory;
   /** Puerto de sesiones para /mcp; en producción se construye con las dependencias reales. */
   mcpSessions?: McpSessionPort;
@@ -195,7 +197,7 @@ export interface CreateAppOptions {
   /** Factory aislable que recibe exactamente el launch gestionado de este app. */
   createMainHealthRuntime?: (
     app: express.Express,
-    launch: IncidentLaunchPort["launchManagedSession"],
+    launch: IncidentLaunchPort,
   ) => { watcher: MainHealthWatcher; router: express.Router };
   /** Costuras de las rutas KB para pruebas HTTP con un repositorio temporal. */
   kb?: {
@@ -283,7 +285,7 @@ export function resolveMainHealthWorkflowId(catalogDirectory?: string): string |
 
 function defaultMainHealthRuntime(
   app: express.Express,
-  launchManagedSession: IncidentLaunchPort["launchManagedSession"],
+  launch: IncidentLaunchPort,
   catalogDirectory?: string,
 ): { watcher: MainHealthWatcher; router: express.Router } {
   const readSettings = () => readMainHealthSettings();
@@ -292,7 +294,7 @@ function defaultMainHealthRuntime(
   const incidents = createIncidentManager({
     settings,
     workflowId: () => resolveMainHealthWorkflowId(catalogDirectory),
-    launch: { launchManagedSession },
+    launch,
   });
   const telegram = app.locals.telegram as TelegramRuntime;
   const watcher = createMainHealthWatcher({
@@ -454,10 +456,13 @@ app.use("/api/telegram", createTelegramRouter({
   now: options.telegramDeps?.now,
 }));
 const createMainHealth = options.createMainHealthRuntime
-  ?? ((runtimeApp: express.Express, launch: IncidentLaunchPort["launchManagedSession"]) => (
+  ?? ((runtimeApp: express.Express, launch: IncidentLaunchPort) => (
     defaultMainHealthRuntime(runtimeApp, launch, catalogDirectory)
   ));
-const mainHealth = options.mainHealth ?? createMainHealth(app, performLaunchManagedSession);
+const mainHealth = options.mainHealth ?? createMainHealth(app, {
+  ready: options.mainHealthLaunchReady,
+  launchManagedSession: performLaunchManagedSession,
+});
 app.locals.mainHealthWatcher = mainHealth.watcher;
 app.use("/api/main-health", mainHealth.router);
 const mcpMemory = options.mcpMemory ?? createMemoryPort(memoryApi.store());
@@ -1493,6 +1498,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
   let app: express.Express;
   try {
     app = deps.createApp({
+      mainHealthLaunchReady: async () => { await readiness; },
       launchManagedSession: async (input) => {
         const configPath = await readiness;
         return deps.launchManagedSession(input, {

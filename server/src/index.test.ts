@@ -601,7 +601,7 @@ test("fixer temprano usa el launch preparado y espera readiness con workflow est
               workflowId: () => "wf-estable-fixture",
               settings: { aliases: {}, autoFix: true, remoteClaim: false },
               tmux: { hasSession: async () => false },
-              launch: { launchManagedSession: launch },
+              launch,
             });
             manager.openIncident({
               repo: "api",
@@ -673,23 +673,39 @@ test("resolver main-health obtiene por nombre el ID estable del catálogo", asyn
   }
 });
 
-test("fallo de boot rechaza fixer temprano sin llamar launch real", async () => {
+test("fallo de listen rechaza fixer temprano antes de owner o claim remoto", async () => {
   const root = mkdtempSync(join(tmpdir(), "ronin-main-health-launch-fail-"));
   let fixing!: Promise<unknown>;
   let launches = 0;
+  let pushes = 0;
+  let ownerObservedDuringPush = false;
+  let manager!: ReturnType<typeof createIncidentManager>;
   try {
     const starting = startServer({
       deps: {
         createApp: (options) => createApp({
           ...options,
           telegram: fakeTelegram(),
-          createMainHealthRuntime: (_app: unknown, launch: any) => {
-            const manager = createIncidentManager({
+          createMainHealthRuntime: (_app: unknown, launchPort: any) => {
+            manager = createIncidentManager({
               root,
               workflowId: () => "wf-estable-fixture",
-              settings: { aliases: {}, autoFix: true, remoteClaim: false },
+              settings: { aliases: {}, autoFix: true, remoteClaim: true },
               tmux: { hasSession: async () => false },
-              launch: { launchManagedSession: launch },
+              git: {
+                run: async (args) => {
+                  if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+                  if (args[0] === "commit-tree") return `${"c".repeat(40)}\n`;
+                  if (args[0] === "ls-remote") return "";
+                  if (args[0] === "push") {
+                    pushes += 1;
+                    ownerObservedDuringPush = manager.readOwner("api") !== null;
+                    return "";
+                  }
+                  throw new Error(`git inesperado: ${args.join(" ")}`);
+                },
+              },
+              launch: launchPort,
             });
             manager.openIncident({
               repo: "api",
@@ -710,17 +726,22 @@ test("fallo de boot rechaza fixer temprano sin llamar launch real", async () => 
         } as any),
         startBackground: async (app) => {
           app.locals.mainHealthWatcher.start();
-          await new Promise<void>((resolve) => setImmediate(resolve));
-          throw new Error("boot roto");
+          return async () => { await app.locals.mainHealthWatcher.stop(); };
         },
-        listen: async () => { throw new Error("no debe escuchar"); },
+        listen: async () => {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          throw new Error("listen roto");
+        },
         launchManagedSession: (async () => { launches += 1; return { name: "no" }; }) as any,
       },
     });
 
-    await assert.rejects(starting, /boot roto/);
+    await assert.rejects(starting, /listen roto/);
     await assert.rejects(fixing, /servidor no disponible/);
     assert.equal(launches, 0);
+    assert.equal(pushes, 0);
+    assert.equal(ownerObservedDuringPush, false);
+    assert.equal(manager.readOwner("api"), null);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

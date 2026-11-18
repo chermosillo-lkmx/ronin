@@ -80,6 +80,8 @@ export interface IncidentLaunchInput {
 }
 
 export interface IncidentLaunchPort {
+  /** Espera a que el runtime pueda lanzar sin publicar ownership remoto prematuramente. */
+  ready?(): Promise<void>;
   launchManagedSession(input: IncidentLaunchInput): Promise<{ name: string }>;
 }
 
@@ -1267,6 +1269,8 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     const resolvedWorkflowId = deps.workflowId?.();
     const workflowId = typeof resolvedWorkflowId === "string" ? resolvedWorkflowId.trim() : "";
     if (!workflowId) throw new Error("workflow de main-health no disponible");
+    await launch.ready?.();
+    if (readIncident(repo)?.closingAt !== undefined) return { status: "busy", session: null };
 
     const logicalName = `main-health-${alias}`;
     const expectedSession = `cowork-${logicalName}`;
