@@ -774,6 +774,7 @@ for repo in "${candidates[@]}"; do
     acquire_suite_slot
     # -p pytest_ronin_sigterm (scripts/): el SIGTERM de Ronin al cortar por timeout se vuelve
     # KeyboardInterrupt y pytest corre el teardown de sus fixtures antes del SIGKILL.
+    if [ "${UNIT_GATE_REAL_PG:-0}" = "1" ]; then export RUN_REAL_PG=1; fi
     COVERAGE_FILE="$(cd "$REPORTS" && pwd)/.coverage" PYTHONPATH="$GATE_SCRIPTS_DIR${PYTHONPATH:+:$PYTHONPATH}" \
     "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider -p pytest_ronin_sigterm "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
     suite_pid=$!
@@ -781,12 +782,19 @@ for repo in "${candidates[@]}"; do
     suite_pid=""
     release_suite_slot
   elif [ "$runner" = "node" ]; then
-    [ -d node_modules ] || { bad "$name: sin node_modules en el worktree (corre npm ci antes)"; continue; }
+    if [ -f pnpm-lock.yaml ]; then
+      node_runner=(pnpm exec)
+      install_hint="pnpm install --frozen-lockfile"
+    else
+      node_runner=(npx)
+      install_hint="npm ci"
+    fi
+    [ -d node_modules ] || { bad "$name: sin node_modules en el worktree (corre $install_hint antes)"; continue; }
     coverage_xml="$REPORTS/coverage-gate/cobertura-coverage.xml"
     mkdir -p "$REPORTS/coverage-gate"; rm -f "$coverage_xml"
-    say "   → npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory=$REPORTS/coverage-gate --reporter=junit --outputFile=$junit"
+    say "   → ${node_runner[*]} vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory=$REPORTS/coverage-gate --reporter=junit --outputFile=$junit"
     acquire_suite_slot
-    npx vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory="$REPORTS/coverage-gate" --reporter=junit --outputFile="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
+    "${node_runner[@]}" vitest run --coverage --coverage.reporter=cobertura --coverage.reportsDirectory="$REPORTS/coverage-gate" --reporter=junit --outputFile="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
     suite_pid=$!
     wait "$suite_pid"; rc=$?
     suite_pid=""

@@ -97,6 +97,7 @@ function fixture(t) {
     `if [ "$1" = "-c" ] && [ "$2" = "import xdist" ]; then [ "\${FAKE_XDIST:-}" = "1" ]; exit $?; fi\n` +
     `[ -n "\${FAKE_MARKER:-}" ] && : > "$FAKE_MARKER"\n` +
     `[ -n "\${FAKE_ARGV:-}" ] && printf '%s\\n' "$@" > "$FAKE_ARGV"\n` +
+    `[ -n "\${FAKE_REAL_PG:-}" ] && printf '%s' "\${RUN_REAL_PG:-}" > "$FAKE_REAL_PG"\n` +
     `[ -n "\${FAKE_COVFILE:-}" ] && printf '%s' "\${COVERAGE_FILE:-}" > "$FAKE_COVFILE"\n` +
     `for a in "$@"; do case "$a" in\n` +
     `  --junitxml=*) cp "$FAKE_SUITE_JUNIT" "\${a#--junitxml=}";;\n` +
@@ -203,11 +204,11 @@ function nodeFixture(t) {
   );
   chmodSync(npx, 0o755);
   return {
-    repo,
+    repo, fakeBin, suiteJunit, suiteCoverage,
     write,
     config,
     setCoverage: (options = {}) => writeFileSync(suiteCoverage, cobertura({ source: repo, ...options })),
-    run: () => {
+    run: (env = {}) => {
       const r = spawnSync("bash", [GATE, session], {
         encoding: "utf8",
         env: {
@@ -216,6 +217,7 @@ function nodeFixture(t) {
           UNIT_GATE_BASE: "origin/main",
           FAKE_SUITE_JUNIT: suiteJunit,
           FAKE_SUITE_COVERAGE: suiteCoverage,
+          ...env,
         },
       });
       return { code: r.status, out: r.stdout + r.stderr };
@@ -1199,4 +1201,41 @@ test("62. base_measurement usa main-health para permitir el WARN de piso heredad
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, new RegExp(`piso heredado de main: 90\\.00 % < piso 99\\.70 %, igual o mejor que la base ${base.slice(0, 7)} \\(89\\.00 %\\)`));
   assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
+test("63. Node con pnpm-lock y sin node_modules pide pnpm install --frozen-lockfile", (t) => {
+  const fx = nodeFixture(t);
+  fx.write("pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+  rmSync(join(fx.repo, "node_modules"), { recursive: true, force: true });
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /pnpm install --frozen-lockfile/);
+  assert.doesNotMatch(r.out, /corre npm ci antes/);
+});
+
+test("64. Node con pnpm-lock ejecuta pnpm exec vitest", (t) => {
+  const fx = nodeFixture(t);
+  fx.write("pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+  const argv = join(dirname(fx.fakeBin), "pnpm-argv");
+  const pnpm = join(fx.fakeBin, "pnpm");
+  writeFileSync(
+    pnpm,
+    `#!/bin/bash\nprintf '%s\\n' "$@" > "$FAKE_PNPM_ARGV"\n` +
+      `for a in "$@"; do case "$a" in --outputFile=*) cp "$FAKE_SUITE_JUNIT" "\${a#--outputFile=}";; esac; done\n` +
+      `mkdir -p reports/coverage-gate\ncp "$FAKE_SUITE_COVERAGE" reports/coverage-gate/cobertura-coverage.xml\nexit 0\n`,
+  );
+  chmodSync(pnpm, 0o755);
+  const r = fx.run({ FAKE_PNPM_ARGV: argv });
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(readFileSync(argv, "utf8").split("\n").slice(0, 3), ["exec", "vitest", "run"]);
+  assert.match(r.out, /pnpm exec vitest run/);
+});
+
+test("65. UNIT_GATE_REAL_PG=1 exporta RUN_REAL_PG=1 a pytest", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const seen = join(fx.tmp, "real-pg");
+  const r = fx.run({ ...withoutExtra, UNIT_GATE_REAL_PG: "1", FAKE_REAL_PG: seen });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(readFileSync(seen, "utf8"), "1");
 });
