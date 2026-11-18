@@ -87,6 +87,10 @@ export interface MainHealthWatcherDeps {
   notifier: MainHealthNotifier;
   commentPullRequest(input: PullRequestCommentInput): Promise<void>;
   timers?: MainHealthTimers;
+  /** Lease de dedupe de efectos externos; no cancela la llamada subyacente. */
+  auxiliaryLeaseMs?: number;
+  scheduleAuxiliaryDeadline?: (callback: () => void, ms: number) => () => void;
+  scheduleAuxiliaryStart?: (callback: () => void) => void;
   now?: () => number;
   logError?: (error: unknown) => void;
 }
@@ -204,15 +208,37 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     clearInterval: (handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>),
   };
   const now = deps.now ?? Date.now;
+  const auxiliaryLeaseMs = deps.auxiliaryLeaseMs ?? 30_000;
+  const scheduleAuxiliaryStart = deps.scheduleAuxiliaryStart ?? queueMicrotask;
+  const scheduleAuxiliaryDeadline = deps.scheduleAuxiliaryDeadline ?? ((callback: () => void, ms: number) => {
+    const handle = setTimeout(callback, ms);
+    handle.unref();
+    return () => clearTimeout(handle);
+  });
   const pending = new Set<string>();
   const queue: Array<{ repo: string; sha: string; measure: boolean }> = [];
   const idleWaiters: Array<() => void> = [];
-  const auxiliaryRuns = new Map<string, Promise<void>>();
+  type AuxiliaryKind = "heartbeat" | "fixer" | "comment";
+  interface AuxiliaryRun {
+    generation: number;
+    kind: AuxiliaryKind;
+    repo: string;
+    incidentId?: string;
+    started: boolean;
+    cancelDeadline?: () => void;
+  }
+  const auxiliaryRuns = new Map<string, AuxiliaryRun>();
+  const notificationLanes = new Map<string, {
+    running: string | null;
+    queued: Array<{ key: string; effect: () => Promise<unknown> }>;
+  }>();
   let pumping = false;
   let tickRun: Promise<void> | null = null;
   let evaluationTail: Promise<void> = Promise.resolve();
+  let lifecycleGeneration = 0;
   let started = false;
-  let interval: unknown;
+  let measurementInterval: unknown;
+  let heartbeatInterval: unknown;
 
   function safeRepo(repo: string): boolean {
     return repo.length <= 61
@@ -237,19 +263,99 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     }
   }
 
-  function launchAuxiliary(key: string, effect: () => Promise<unknown>): void {
+  function launchAuxiliary(
+    key: string,
+    effect: () => Promise<unknown>,
+    options: { kind: AuxiliaryKind; repo: string; incidentId?: string; guard?: () => boolean },
+  ): void {
     if (auxiliaryRuns.has(key)) return;
-    let result: Promise<unknown>;
-    try {
-      result = Promise.resolve(effect());
-    } catch (error) {
-      log(error);
+    const run: AuxiliaryRun = {
+      generation: lifecycleGeneration,
+      kind: options.kind,
+      repo: options.repo,
+      incidentId: options.incidentId,
+      started: false,
+    };
+    auxiliaryRuns.set(key, run);
+    scheduleAuxiliaryStart(() => {
+      if (auxiliaryRuns.get(key) !== run || run.generation !== lifecycleGeneration) return;
+      if (options.guard && !options.guard()) {
+        auxiliaryRuns.delete(key);
+        return;
+      }
+      run.started = true;
+      run.cancelDeadline = scheduleAuxiliaryDeadline(() => {
+        if (auxiliaryRuns.get(key) === run) auxiliaryRuns.delete(key);
+      }, auxiliaryLeaseMs);
+      let result: Promise<unknown>;
+      try {
+        result = Promise.resolve(effect());
+      } catch (error) {
+        log(error);
+        run.cancelDeadline();
+        if (auxiliaryRuns.get(key) === run) auxiliaryRuns.delete(key);
+        return;
+      }
+      void result.catch(log).finally(() => {
+        run.cancelDeadline?.();
+        if (auxiliaryRuns.get(key) === run) auxiliaryRuns.delete(key);
+      });
+    });
+  }
+
+  function incidentStillOpen(repo: string, incidentId: string): boolean {
+    const current = deps.incidents.readIncident(repo);
+    return current?.id === incidentId && current.closingAt === undefined && current.closedAt === undefined;
+  }
+
+  function cancelQueuedOpenAuxiliaries(repo: string, incidentId: string): void {
+    for (const [key, run] of auxiliaryRuns) {
+      if (!run.started && run.repo === repo && run.incidentId === incidentId) {
+        run.cancelDeadline?.();
+        auxiliaryRuns.delete(key);
+      }
+    }
+  }
+
+  function pumpNotifications(repo: string): void {
+    const lane = notificationLanes.get(repo);
+    if (!lane || lane.running) return;
+    const task = lane.queued.shift();
+    if (!task) {
+      notificationLanes.delete(repo);
       return;
     }
-    const tracked = result.catch(log).then(() => undefined).finally(() => {
-      if (auxiliaryRuns.get(key) === tracked) auxiliaryRuns.delete(key);
+    lane.running = task.key;
+    let result: Promise<unknown>;
+    try {
+      result = Promise.resolve(task.effect());
+    } catch (error) {
+      log(error);
+      lane.running = null;
+      pumpNotifications(repo);
+      return;
+    }
+    void result.catch(log).finally(() => {
+      if (lane.running === task.key) lane.running = null;
+      pumpNotifications(repo);
     });
-    auxiliaryRuns.set(key, tracked);
+  }
+
+  function enqueueNotification(repo: string, key: string, effect: () => Promise<unknown>): void {
+    const lane = notificationLanes.get(repo) ?? { running: null, queued: [] };
+    if (!notificationLanes.has(repo)) notificationLanes.set(repo, lane);
+    if (lane.running === key || lane.queued.some((task) => task.key === key)) return;
+    lane.queued.push({ key, effect });
+    pumpNotifications(repo);
+  }
+
+  function cancelQueuedOpenNotification(repo: string, incidentId: string): boolean {
+    const lane = notificationLanes.get(repo);
+    if (!lane) return false;
+    const key = `notify-open:${incidentId}`;
+    const before = lane.queued.length;
+    lane.queued = lane.queued.filter((task) => task.key !== key);
+    return lane.queued.length !== before;
   }
 
   async function evaluateCore(repo: string, measurement: MainHealthMeasurement): Promise<void> {
@@ -260,7 +366,11 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     if (measurement.status === "red") {
       const existing = deps.incidents.readIncident(repo);
       if (existing) {
-        launchAuxiliary(`fixer:${repo}`, () => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)));
+        launchAuxiliary(
+          `fixer:${repo}`,
+          () => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)),
+          { kind: "fixer", repo, incidentId: existing.id, guard: () => incidentStillOpen(repo, existing.id) },
+        );
         return;
       }
       const report = await deps.attribute({
@@ -275,22 +385,37 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
         summary: `main rojo: ${failures} prueba${failures === 1 ? "" : "s"} fallida${failures === 1 ? "" : "s"}`,
         attribution: report,
       });
-      launchAuxiliary(`notify-open:${incident.id}`, () => deps.notifier.opened(incident));
+      enqueueNotification(repo, `notify-open:${incident.id}`, () => deps.notifier.opened(incident));
       if (settings.commentOnPr) {
-        launchAuxiliary(`comment:${incident.id}`, () => deps.commentPullRequest({
-          repo,
-          repoDir: repoDir(deps.repoRoot, repo),
-          incident,
-          attribution: report,
-        }));
+        launchAuxiliary(
+          `comment:${incident.id}`,
+          () => deps.commentPullRequest({
+            repo,
+            repoDir: repoDir(deps.repoRoot, repo),
+            incident,
+            attribution: report,
+          }),
+          { kind: "comment", repo, incidentId: incident.id, guard: () => incidentStillOpen(repo, incident.id) },
+        );
       }
-      launchAuxiliary(`fixer:${repo}`, () => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)));
+      launchAuxiliary(
+        `fixer:${repo}`,
+        () => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)),
+        { kind: "fixer", repo, incidentId: incident.id, guard: () => incidentStillOpen(repo, incident.id) },
+      );
       return;
     }
 
-    if (!deps.incidents.readIncident(repo)) return;
+    const open = deps.incidents.readIncident(repo);
+    if (!open) return;
+    cancelQueuedOpenAuxiliaries(repo, open.id);
     const closed = await deps.incidents.closeIncident(repo, repoDir(deps.repoRoot, repo));
-    if (closed) launchAuxiliary(`notify-close:${closed.id}:${closed.closedAt ?? "closed"}`, () => deps.notifier.closed(closed));
+    if (closed) {
+      const droppedOpen = cancelQueuedOpenNotification(repo, closed.id);
+      if (!droppedOpen) {
+        enqueueNotification(repo, `notify-close:${closed.id}:${closed.closedAt ?? "closed"}`, () => deps.notifier.closed(closed));
+      }
+    }
   }
 
   function evaluate(repo: string, measurement: MainHealthMeasurement): Promise<void> {
@@ -387,10 +512,20 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     const settings = deps.readSettings();
     if (!settings.enabled) return;
     for (const repo of settings.repos) {
-      if (!repoRejection(settings, repo)) {
-        launchAuxiliary(`heartbeat:${repo}`, () => deps.incidents.heartbeatOwner(repo));
-      }
       await ensureMeasured(repo);
+    }
+  }
+
+  function heartbeatTick(): void {
+    const settings = deps.readSettings();
+    if (!settings.enabled) return;
+    for (const repo of settings.repos) {
+      if (repoRejection(settings, repo)) continue;
+      launchAuxiliary(
+        `heartbeat:${repo}`,
+        () => deps.incidents.heartbeatOwner(repo),
+        { kind: "heartbeat", repo },
+      );
     }
   }
 
@@ -414,16 +549,30 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     if (started) return;
     const settings = deps.readSettings();
     if (!settings.enabled) return;
-    interval = timers.setInterval(() => { void tick(); }, settings.intervalMin * 60_000);
+    const measurementMs = settings.intervalMin * 60_000;
+    const heartbeatMs = Math.min(measurementMs, Math.max(1_000, settings.leaseMin * 60_000 / 2));
+    measurementInterval = timers.setInterval(() => { void tick(); }, measurementMs);
+    heartbeatInterval = timers.setInterval(heartbeatTick, heartbeatMs);
     started = true;
     void tick();
+    heartbeatTick();
   }
 
   function stop(): void {
-    if (!started) return;
-    started = false;
-    timers.clearInterval(interval);
-    interval = undefined;
+    lifecycleGeneration += 1;
+    for (const run of auxiliaryRuns.values()) run.cancelDeadline?.();
+    auxiliaryRuns.clear();
+    for (const [repo, lane] of notificationLanes) {
+      lane.queued.length = 0;
+      if (!lane.running) notificationLanes.delete(repo);
+    }
+    if (started) {
+      started = false;
+      timers.clearInterval(measurementInterval);
+      timers.clearInterval(heartbeatInterval);
+      measurementInterval = undefined;
+      heartbeatInterval = undefined;
+    }
   }
 
   return { tick, ensureMeasured, evaluate, idle, start, stop };

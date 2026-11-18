@@ -509,7 +509,7 @@ test("auxiliares colgados no bloquean core ni idle y se deduplican mientras sigu
   assert.equal(fixerCalls, 1, "un auxiliar pendiente no se duplica");
 });
 
-test("tick heartbeat autorizado no se solapa y auxiliares fallidos se reintentan", async () => {
+test("timer heartbeat autorizado no se solapa y auxiliares fallidos se reintentan", async () => {
   const store = memoryStore();
   store.measurements.set(`alpha@${SHA_A}`, measurement("alpha", SHA_A, "red"));
   store.measurements.set(`beta@${SHA_B}`, measurement("beta", SHA_B, "green"));
@@ -526,6 +526,17 @@ test("tick heartbeat autorizado no se solapa y auxiliares fallidos se reintentan
   const heartbeats: string[] = [];
   let fixerCalls = 0;
   const heartbeatNever = new Promise<never>(() => undefined);
+  const intervals: Array<{ callback: () => void; ms: number }> = [];
+  deps.readSettings = () => baseSettings(["alpha", "beta", "ant-liebre-app"], { intervalMin: 60 });
+  deps.git.lsRemoteMain = async () => null;
+  deps.timers = {
+    setInterval: (callback: () => void, ms: number) => {
+      const timer = { callback, ms };
+      intervals.push(timer);
+      return timer;
+    },
+    clearInterval: () => undefined,
+  };
   deps.incidents = {
     readIncident: (repo) => repo === "alpha" ? current : null,
     openIncident: () => { throw new Error("no debe abrir"); },
@@ -539,17 +550,20 @@ test("tick heartbeat autorizado no se solapa y auxiliares fallidos se reintentan
   };
   const watcher = createMainHealthWatcher(deps);
 
-  await watcher.tick();
-  await watcher.idle();
+  watcher.start();
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(heartbeats, ["alpha", "beta"]);
-  assert.equal(fixerCalls, 1);
 
-  await watcher.tick();
-  await watcher.idle();
+  intervals.find(({ ms }) => ms === 900_000)!.callback();
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(heartbeats, ["alpha", "beta", "beta"], "alpha pendiente no solapa; beta fallido reintenta");
+
+  await watcher.evaluate("alpha", measurement("alpha", SHA_A, "red"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await watcher.evaluate("alpha", measurement("alpha", SHA_A, "red"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(fixerCalls, 2, "fixer fallido libera su clave para retry");
+  watcher.stop();
 });
 
 test("evaluate serializa dos cierres concurrentes y sólo uno ejecuta close", async () => {
@@ -594,6 +608,207 @@ test("evaluate serializa dos cierres concurrentes y sólo uno ejecuta close", as
   assert.equal(closeCalls, 1);
 });
 
+test("notify close espera a que notify open del mismo repo termine sin bloquear core", async () => {
+  const deps = baseDeps(["repo"]);
+  let current: Incident | null = null;
+  let releaseOpen!: () => void;
+  const openGate = new Promise<void>((resolve) => { releaseOpen = resolve; });
+  const events: string[] = [];
+  deps.incidents = {
+    readIncident: () => current,
+    openIncident: (input) => {
+      current = { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+      return current;
+    },
+    heartbeatOwner: async () => false,
+    ensureFixer: async () => ({ status: "disabled" as const, session: null }),
+    closeIncident: async () => {
+      const closed = current;
+      current = null;
+      return closed;
+    },
+  };
+  deps.notifier = {
+    opened: async () => { events.push("open:start"); await openGate; events.push("open:end"); },
+    closed: async () => { events.push("close"); },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
+  assert.deepEqual(events, ["open:start"], "close core terminó, pero su aviso conserva orden causal");
+  releaseOpen();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["open:start", "open:end", "close"]);
+});
+
+test("heartbeat usa cadencia menor al lease e independiente de la medición", async () => {
+  const deps = baseDeps(["repo"]);
+  deps.readSettings = () => baseSettings(["repo"], { intervalMin: 60, leaseMin: 30 });
+  const installed: Array<{ callback: () => void; ms: number; cleared: boolean }> = [];
+  deps.timers = {
+    setInterval: (callback: () => void, ms: number) => {
+      const timer = { callback, ms, cleared: false };
+      installed.push(timer);
+      return timer;
+    },
+    clearInterval: (timer: { cleared: boolean }) => { timer.cleared = true; },
+  };
+  let gitCalls = 0;
+  let heartbeats = 0;
+  deps.git.lsRemoteMain = async () => { gitCalls += 1; return SHA_A; };
+  deps.incidents.heartbeatOwner = async () => { heartbeats += 1; return true; };
+  const watcher = createMainHealthWatcher(deps);
+
+  watcher.start();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(installed.map(({ ms }) => ms).sort((a, b) => a - b), [900_000, 3_600_000]);
+  const heartbeatTimer = installed.find(({ ms }) => ms === 900_000)!;
+  const gitBeforeHeartbeat = gitCalls;
+  const heartbeatBeforeTimer = heartbeats;
+  heartbeatTimer.callback();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(heartbeats, heartbeatBeforeTimer + 1, "renueva antes del lease sin esperar medición");
+  assert.equal(gitCalls, gitBeforeHeartbeat, "el timer de heartbeat no descubre main");
+
+  watcher.stop();
+  watcher.stop();
+  assert.equal(installed.filter(({ cleared }) => cleared).length, 2, "stop limpia ambos timers una vez");
+});
+
+test("heartbeat colgado libera dedupe al vencer y stop/restart no hereda la promesa", async () => {
+  const deps = baseDeps(["repo"]);
+  deps.readSettings = () => baseSettings(["repo"], { intervalMin: 60 });
+  const intervals: Array<{ callback: () => void; ms: number }> = [];
+  const deadlines: Array<{ callback: () => void; cancelled: boolean }> = [];
+  deps.timers = {
+    setInterval: (callback: () => void, ms: number) => {
+      const timer = { callback, ms };
+      intervals.push(timer);
+      return timer;
+    },
+    clearInterval: () => undefined,
+  };
+  Object.assign(deps, {
+    auxiliaryLeaseMs: 500,
+    scheduleAuxiliaryStart: (callback: () => void) => callback(),
+    scheduleAuxiliaryDeadline: (callback: () => void, ms: number) => {
+      assert.equal(ms, 500);
+      const deadline = { callback, cancelled: false };
+      deadlines.push(deadline);
+      return () => { deadline.cancelled = true; };
+    },
+  });
+  let calls = 0;
+  const never = new Promise<never>(() => undefined);
+  deps.incidents.heartbeatOwner = async () => { calls += 1; return never; };
+  deps.git.lsRemoteMain = async () => null;
+  const watcher = createMainHealthWatcher(deps);
+
+  watcher.start();
+  assert.equal(calls, 1);
+  const heartbeatTimer = intervals.find(({ ms }) => ms === 900_000)!;
+  heartbeatTimer.callback();
+  assert.equal(calls, 1, "no solapa dentro del lease");
+  deadlines[0]!.callback();
+  heartbeatTimer.callback();
+  assert.equal(calls, 2, "el deadline libera la clave aunque el efecto siga colgado");
+
+  watcher.stop();
+  watcher.start();
+  assert.equal(calls, 3, "la generación nueva no queda suprimida por promesas anteriores");
+  watcher.stop();
+});
+
+test("close invalida fixer y comentario encolados antes de que inicien", async () => {
+  const deps = baseDeps(["repo"]);
+  deps.readSettings = () => baseSettings(["repo"], { commentOnPr: true });
+  const starts: Array<() => void> = [];
+  Object.assign(deps, { scheduleAuxiliaryStart: (callback: () => void) => { starts.push(callback); } });
+  let current: Incident | null = null;
+  let fixer = 0;
+  let comments = 0;
+  deps.incidents = {
+    readIncident: () => current,
+    openIncident: (input) => {
+      current = { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+      return current;
+    },
+    heartbeatOwner: async () => false,
+    ensureFixer: async () => { fixer += 1; },
+    closeIncident: async () => {
+      const closed = current;
+      current = null;
+      return closed;
+    },
+  };
+  deps.commentPullRequest = async () => { comments += 1; };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
+  for (const start of starts) start();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(fixer, 0);
+  assert.equal(comments, 0);
+});
+
+test("stop descarta avisos aún no iniciados y restart no los deja suprimidos", async () => {
+  const deps = baseDeps(["repo"]);
+  const timers: Array<() => void> = [];
+  deps.timers = {
+    setInterval: (callback: () => void) => { timers.push(callback); return callback; },
+    clearInterval: () => undefined,
+  };
+  deps.git.lsRemoteMain = async () => null;
+  let current: Incident | null = null;
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const events: string[] = [];
+  deps.incidents = {
+    readIncident: () => current,
+    openIncident: (input) => {
+      current = { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+      return current;
+    },
+    heartbeatOwner: async () => false,
+    ensureFixer: async () => ({ status: "disabled" as const }),
+    closeIncident: async () => {
+      const closed = current;
+      current = null;
+      return closed;
+    },
+  };
+  deps.notifier = {
+    opened: async (incident) => {
+      events.push(`open:${incident.id}:start`);
+      if (incident.firstRedSha === SHA_A) await firstGate;
+      events.push(`open:${incident.id}:end`);
+    },
+    closed: async (incident) => { events.push(`close:${incident.id}`); },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  watcher.start();
+  await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
+  watcher.stop();
+  watcher.start();
+  await watcher.evaluate("repo", measurement("repo", SHA_C, "red"));
+  assert.deepEqual(events, [`open:repo@${SHA_A.slice(0, 7)}:start`]);
+  releaseFirst();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, [
+    `open:repo@${SHA_A.slice(0, 7)}:start`,
+    `open:repo@${SHA_A.slice(0, 7)}:end`,
+    `open:repo@${SHA_C.slice(0, 7)}:start`,
+    `open:repo@${SHA_C.slice(0, 7)}:end`,
+  ]);
+  watcher.stop();
+});
+
 test("start con enabled=false no hace tick ni instala interval; ticks activos no se solapan", async () => {
   const disabled = baseDeps(["repo"]);
   disabled.readSettings = () => baseSettings(["repo"], { enabled: false });
@@ -610,7 +825,8 @@ test("start con enabled=false no hace tick ni instala interval; ticks activos no
   assert.equal(gitCalls, 0);
 
   const enabled = baseDeps(["repo"]);
-  let callback!: () => void;
+  enabled.readSettings = () => baseSettings(["repo"], { leaseMin: 5 });
+  let measurementCallback!: () => void;
   let installs = 0;
   let clears = 0;
   let active = 0;
@@ -627,8 +843,8 @@ test("start con enabled=false no hace tick ni instala interval; ticks activos no
   enabled.timers = {
     setInterval: (fn: () => void, ms: number) => {
       installs += 1;
-      callback = fn;
-      assert.equal(ms, 600_000);
+      if (ms === 600_000) measurementCallback = fn;
+      else assert.equal(ms, 150_000);
       return undefined;
     },
     clearInterval: (_handle: unknown) => { clears += 1; },
@@ -636,8 +852,8 @@ test("start con enabled=false no hace tick ni instala interval; ticks activos no
   const on = createMainHealthWatcher(enabled);
   on.start();
   on.start();
-  assert.equal(installs, 1, "start idempotente aunque el handle sea undefined");
-  callback();
+  assert.equal(installs, 2, "start idempotente aunque los handles sean undefined");
+  measurementCallback();
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(active, 1);
   release();
@@ -645,9 +861,9 @@ test("start con enabled=false no hace tick ni instala interval; ticks activos no
   assert.equal(maxActive, 1);
   on.stop();
   on.stop();
-  assert.equal(clears, 1, "stop elimina una sola vez el intervalo activo");
+  assert.equal(clears, 2, "stop elimina una sola vez ambos intervalos activos");
   on.start();
-  assert.equal(installs, 2, "puede arrancar otra vez tras stop");
+  assert.equal(installs, 4, "puede arrancar otra vez tras stop");
   on.stop();
-  assert.equal(clears, 2);
+  assert.equal(clears, 4);
 });
