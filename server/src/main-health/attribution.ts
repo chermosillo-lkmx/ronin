@@ -113,23 +113,6 @@ function parseAddedLines(diff: string): Record<string, number[]> {
   return result;
 }
 
-function coverageIntersection(
-  added: Record<string, number[]>,
-  uncovered: Record<string, number[]>,
-): Record<string, number[]> {
-  const uncoveredByPath = new Map(
-    Object.entries(uncovered).map(([file, values]) => [normalizedPath(file), new Set(values)]),
-  );
-  const result: Record<string, number[]> = {};
-  for (const [file, addedLines] of Object.entries(added)) {
-    const expected = uncoveredByPath.get(normalizedPath(file));
-    if (!expected) continue;
-    const intersection = addedLines.filter((line) => expected.has(line));
-    if (intersection.length > 0) result[file] = intersection;
-  }
-  return result;
-}
-
 function redIdTouchesFile(id: string, file: string): boolean {
   const normalizedId = id.toLowerCase().replaceAll("\\", "/");
   const path = normalizedPath(file).toLowerCase();
@@ -170,7 +153,6 @@ async function inspectCommit(
   git: GitPort,
   repoDir: string,
   sha: string,
-  uncovered: Record<string, number[]>,
 ): Promise<AttributionCommit> {
   const metadata = await git.run(["show", "-s", "--format=%an%x00%ae%x00%B", sha, "--"], repoDir);
   const [name = "", email = "", ...messageParts] = metadata.split("\0");
@@ -184,9 +166,36 @@ async function inspectCommit(
     message,
     files,
     addedLinesByFile,
-    uncoveredAddedByFile: coverageIntersection(addedLinesByFile, uncovered),
+    uncoveredAddedByFile: {},
     newRed: [],
   };
+}
+
+function blameByFinalLine(output: string): Map<number, string> {
+  const result = new Map<number, string>();
+  for (const line of output.split(/\r?\n/)) {
+    const header = /^\^?([A-Fa-f0-9]{40,64}) \d+ (\d+)(?: \d+)?$/.exec(line);
+    if (header) result.set(Number(header[2]), header[1].toLowerCase());
+  }
+  return result;
+}
+
+async function assignUncoveredLines(
+  git: GitPort,
+  repoDir: string,
+  red: MainHealthMeasurement,
+  commits: AttributionCommit[],
+): Promise<void> {
+  const bySha = new Map(commits.map((commit) => [commit.sha.toLowerCase(), commit]));
+  for (const [file, uncoveredLines] of Object.entries(red.uncovered_by_file)) {
+    if (uncoveredLines.length === 0) continue;
+    const output = await git.run(["blame", "--first-parent", "--line-porcelain", red.sha, "--", file], repoDir);
+    const blamed = blameByFinalLine(output);
+    for (const finalLine of uncoveredLines) {
+      const commit = bySha.get(blamed.get(finalLine) ?? "");
+      if (commit) (commit.uncoveredAddedByFile[file] ??= []).push(finalLine);
+    }
+  }
 }
 
 export async function attributeMainHealth(
@@ -211,8 +220,9 @@ export async function attributeMainHealth(
   );
   const commits: AttributionCommit[] = [];
   for (const sha of lines(range)) {
-    commits.push(await inspectCommit(git, input.repoDir, sha, input.red.uncovered_by_file));
+    commits.push(await inspectCommit(git, input.repoDir, sha));
   }
+  await assignUncoveredLines(git, input.repoDir, input.red, commits);
 
   const previousRed = new Set([...green.failed, ...green.errors]);
   const newRed = unique([...input.red.failed, ...input.red.errors]).filter((id) => !previousRed.has(id));

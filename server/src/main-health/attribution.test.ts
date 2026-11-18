@@ -104,6 +104,47 @@ test("attribution usa el verde first-parent y cruza PR, autor, líneas y roja nu
   }
 });
 
+test("attribution conserva coordenadas finales de cobertura cuando un commit posterior desplaza líneas", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cowork-main-health-lines-"));
+  const repoDir = join(root, "repo");
+  mkdirSync(join(repoDir, "src"), { recursive: true });
+  try {
+    git(repoDir, "init", "-b", "main");
+    git(repoDir, "config", "user.name", "Ada Tester");
+    git(repoDir, "config", "user.email", "ada@example.com");
+    writeFileSync(join(repoDir, "src", "shift.py"), "top = 1\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "chore: baseline");
+    const greenSha = git(repoDir, "rev-parse", "HEAD");
+
+    writeFileSync(join(repoDir, "src", "shift.py"), "top = 1\ntarget = 2\n");
+    git(repoDir, "commit", "-am", "feat: añadir objetivo");
+    const authorSha = git(repoDir, "rev-parse", "HEAD");
+
+    writeFileSync(join(repoDir, "src", "shift.py"), "inserted = 0\ntop = 1\ntarget = 2\n");
+    git(repoDir, "commit", "-am", "refactor: insertar encabezado");
+    const redSha = git(repoDir, "rev-parse", "HEAD");
+
+    const report = await attributeMainHealth({
+      repoDir,
+      red: measurement(redSha, "red", { uncovered_by_file: { "src/shift.py": [3] } }),
+      measurements: [measurement(greenSha, "green")],
+    });
+
+    assert.deepEqual(report.culpritShas, [authorSha]);
+    assert.deepEqual(report.commits.map((commit) => ({
+      sha: commit.sha,
+      added: commit.addedLinesByFile,
+      uncovered: commit.uncoveredAddedByFile,
+    })), [
+      { sha: authorSha, added: { "src/shift.py": [2] }, uncovered: { "src/shift.py": [3] } },
+      { sha: redSha, added: { "src/shift.py": [1] }, uncovered: {} },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("attribution reporta explícitamente que no existe medición verde previa", async () => {
   const sha = "a".repeat(40);
   const port: GitPort = { run: async () => { throw new Error("git no debe ejecutarse sin verdes"); } };
