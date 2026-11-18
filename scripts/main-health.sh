@@ -101,6 +101,10 @@ if [ -f "$json" ]; then
   exit $?
 fi
 
+# Un dueño muerto puede dejar tanto la ruta como el registro administrativo del worktree.
+# La recuperación se hace siempre desde el repo fuente y sólo sobre la ruta exacta de este SHA.
+git -C "$source_repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+git -C "$source_repo" worktree prune >/dev/null 2>&1 || true
 mkdir -p "$wt_parent"
 git -C "$source_repo" worktree add -q --detach "$wt" "$sha" || {
   printf 'main-health: no pude crear el worktree para %s@%s\n' "$repo" "$short" >&2

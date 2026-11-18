@@ -234,6 +234,20 @@ test("main-health roba un lock cuyo PID murió", (t) => {
   assert.equal(existsSync(fx.lockPath), false);
 });
 
+test("main-health recupera y limpia un worktree residual al robar un lock muerto", (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  const residual = join(fx.healthDir, REPO, `wt-${fx.sha.slice(0, 7)}`, REPO);
+  mkdirSync(dirname(residual), { recursive: true });
+  sh("git", ["worktree", "add", "-q", "--detach", residual, fx.sha], { cwd: fx.repo });
+  mkdirSync(fx.lockPath, { recursive: true });
+  writeFileSync(join(fx.lockPath, "pid"), "99999999\n");
+  const result = fx.run();
+  assert.equal(result.code, 0, result.out);
+  assert.equal(existsSync(residual), false, result.out);
+  assert.doesNotMatch(sh("git", ["worktree", "list", "--porcelain"], { cwd: fx.repo }), /wt-/);
+});
+
 test("main-health escribe error JSON y sale 2 cuando no hay junit", (t) => {
   const fx = fixture(t);
   fx.setJunit(passingCases);
