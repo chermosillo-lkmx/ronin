@@ -179,7 +179,7 @@ test("attribution conserva paths Unicode con espacios mediante salida NUL", asyn
 
     const failingPort: GitPort = {
       run: async (args, cwd) => {
-        if (args[0] === "blame" && args.at(-1) === relativeFile) throw new Error("falló blame tocado");
+        if (args.includes("blame") && args.at(-1) === relativeFile) throw new Error("falló blame tocado");
         return execFileSync("git", args, { cwd, encoding: "utf8" });
       },
     };
@@ -218,6 +218,39 @@ test("attribution trata __proto__ como path Git sin indexar prototipos", async (
     assert.deepEqual(report.commits[0].addedLinesByFile, bySpecialPath);
     assert.deepEqual(report.commits[0].uncoveredAddedByFile, bySpecialPath);
     assert.doesNotThrow(() => JSON.stringify(report));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("attribution trata pathspecs mágicos y backslash como filenames literales", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cowork-main-health-literal-"));
+  const repoDir = join(root, "repo");
+  const files = ["*.ts", ":(exclude)x", "back\\slash.ts", "other.ts"];
+  mkdirSync(repoDir, { recursive: true });
+  try {
+    git(repoDir, "init", "-b", "main");
+    git(repoDir, "config", "user.name", "Ada Tester");
+    git(repoDir, "config", "user.email", "ada@example.com");
+    for (const file of files) writeFileSync(join(repoDir, file), "base\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "chore: baseline literal");
+    const greenSha = git(repoDir, "rev-parse", "HEAD");
+
+    for (const file of files) writeFileSync(join(repoDir, file), "base\nadded\n");
+    git(repoDir, "commit", "-am", "feat: tocar paths literales");
+    const redSha = git(repoDir, "rev-parse", "HEAD");
+    const uncovered = Object.fromEntries(files.slice(0, 3).map((file) => [file, [2]]));
+
+    const report = await attributeMainHealth({
+      repoDir,
+      red: measurement(redSha, "red", { uncovered_by_file: uncovered }),
+      measurements: [measurement(greenSha, "green")],
+    });
+
+    assert.deepEqual(report.commits[0].files, files);
+    assert.deepEqual(report.commits[0].addedLinesByFile, Object.fromEntries(files.map((file) => [file, [2]])));
+    assert.deepEqual(report.commits[0].uncoveredAddedByFile, uncovered);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

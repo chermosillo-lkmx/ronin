@@ -121,7 +121,7 @@ function parseAddedLines(diff: string): number[] {
 }
 
 function nulPaths(output: string): string[] {
-  return output.split("\0").filter((path) => path.length > 0).map(normalizedPath);
+  return output.split("\0").filter((path) => path.length > 0);
 }
 
 function redIdTouchesFile(id: string, file: string): boolean {
@@ -169,7 +169,7 @@ async function commitDiff(git: GitPort, repoDir: string, sha: string): Promise<{
     const fileOutput = await git.run(["diff", "--name-only", "-z", "--no-renames", parent, sha, "--"], repoDir);
     const files = nulPaths(fileOutput);
     const addedLinesByFile = await diffsByFile(git, repoDir, files, (file) => [
-      "diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames", parent!, sha, "--", file,
+      "--literal-pathspecs", "diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames", parent!, sha, "--", file,
     ]);
     return { files, addedLinesByFile };
   }
@@ -180,7 +180,7 @@ async function commitDiff(git: GitPort, repoDir: string, sha: string): Promise<{
   );
   const files = nulPaths(fileOutput);
   const addedLinesByFile = await diffsByFile(git, repoDir, files, (file) => [
-    "diff-tree", "--root", "--no-commit-id", "-p", "-U0", "--no-color", "--no-ext-diff", "--no-renames", sha, "--", file,
+    "--literal-pathspecs", "diff-tree", "--root", "--no-commit-id", "-p", "-U0", "--no-color", "--no-ext-diff", "--no-renames", sha, "--", file,
   ]);
   return { files, addedLinesByFile };
 }
@@ -226,7 +226,10 @@ async function assignUncoveredLines(
   const touchedFiles = new Set(commits.flatMap((commit) => commit.files));
   for (const [file, uncoveredLines] of Object.entries(red.uncovered_by_file)) {
     if (uncoveredLines.length === 0 || !touchedFiles.has(file)) continue;
-    const output = await git.run(["blame", "--first-parent", "--line-porcelain", red.sha, "--", file], repoDir);
+    const output = await git.run(
+      ["--literal-pathspecs", "blame", "--first-parent", "--line-porcelain", red.sha, "--", file],
+      repoDir,
+    );
     const blamed = blameByFinalLine(output);
     for (const finalLine of uncoveredLines) {
       const commit = bySha.get(blamed.get(finalLine) ?? "");
