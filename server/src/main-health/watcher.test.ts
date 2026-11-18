@@ -744,7 +744,7 @@ test("main promueve un baseline en vuelo del mismo SHA y lo evalúa una sola vez
   release();
   await watcher.idle();
 
-  assert.equal(gitCalls, 2, "resuelve main y lo revalida antes de publicar");
+  assert.ok(gitCalls >= 2, "resuelve main y lo revalida antes de publicar y ejecutar auxiliares");
   assert.equal(store.operational.get("repo"), SHA_A);
   assert.equal(opens, 1);
 });
@@ -775,6 +775,55 @@ test("job operacional no publica ni evalúa si origin/main avanzó durante la me
   assert.equal(store.operational.size, 0);
   assert.equal(opens, 0);
   assert.ok(store.measurements.has(`repo@${SHA_A}`), "la medición baseline queda disponible para gate");
+});
+
+test("main que avanza durante attribution no publica ni ejecuta efectos del SHA histórico", async () => {
+  const store = memoryStore();
+  store.measurements.set(`repo@${SHA_A}`, measurement("repo", SHA_A, "red"));
+  const deps = baseDeps(["repo"], store);
+  deps.readSettings = () => baseSettings(["repo"], { commentOnPr: true });
+  let remote = SHA_A;
+  deps.git.lsRemoteMain = async () => remote;
+  let attributionStarted!: () => void;
+  let releaseAttribution!: () => void;
+  const started = new Promise<void>((resolve) => { attributionStarted = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseAttribution = resolve; });
+  deps.attribute = async ({ red }) => {
+    attributionStarted();
+    await gate;
+    return attribution(red);
+  };
+  let opens = 0;
+  let fixers = 0;
+  let comments = 0;
+  let notifications = 0;
+  deps.incidents = {
+    ...noopIncidents(),
+    openIncident: (input) => {
+      opens += 1;
+      return { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+    },
+    ensureFixer: async () => { fixers += 1; },
+  };
+  deps.commentPullRequest = async () => { comments += 1; };
+  deps.notifier = {
+    opened: async () => { notifications += 1; },
+    closed: async () => { notifications += 1; },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  assert.equal((await watcher.ensureMeasured("repo")).status, "cached");
+  await started;
+  remote = SHA_B;
+  releaseAttribution();
+  await watcher.idle();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(store.operational.has("repo"), false, "el puntero no conserva el SHA que dejó de ser main");
+  assert.equal(opens, 0);
+  assert.equal(fixers, 0);
+  assert.equal(comments, 0);
+  assert.equal(notifications, 0);
 });
 
 test("evaluate abre una vez, delega fixer, respeta commentOnPr=false y luego cierra", async () => {

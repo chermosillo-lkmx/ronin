@@ -454,6 +454,41 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     return lane.queued.length !== before;
   }
 
+  async function operationalMainStillCurrent(
+    repo: string,
+    measurement: MainHealthMeasurement,
+    generation: number,
+  ): Promise<boolean> {
+    if (stopping || generation !== lifecycleGeneration) return false;
+    if (repoRejection(deps.readSettings(), repo)) return false;
+    const currentMain = await resolveMain(repo);
+    return !stopping
+      && generation === lifecycleGeneration
+      && currentMain === measurement.sha;
+  }
+
+  async function confirmOperationalMain(
+    repo: string,
+    measurement: MainHealthMeasurement,
+    generation: number,
+  ): Promise<boolean> {
+    if (!await operationalMainStillCurrent(repo, measurement, generation)) return false;
+    deps.store.confirmOperationalMeasurement(repo, measurement.sha);
+    return true;
+  }
+
+  function onlyWhileOperational(
+    repo: string,
+    measurement: MainHealthMeasurement,
+    generation: number,
+    effect: (signal: AbortSignal) => Promise<unknown>,
+  ): (signal: AbortSignal) => Promise<unknown> {
+    return async (signal) => {
+      if (signal.aborted || !await operationalMainStillCurrent(repo, measurement, generation) || signal.aborted) return;
+      return effect(signal);
+    };
+  }
+
   async function evaluateCore(repo: string, measurement: MainHealthMeasurement, generation: number): Promise<void> {
     if (stopping || generation !== lifecycleGeneration) return;
     const settings = deps.readSettings();
@@ -463,9 +498,15 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     if (measurement.status === "red") {
       const existing = deps.incidents.readIncident(repo);
       if (existing) {
+        if (!await confirmOperationalMain(repo, measurement, generation)) return;
         launchAuxiliary(
           `fixer:${repo}`,
-          () => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)),
+          onlyWhileOperational(
+            repo,
+            measurement,
+            generation,
+            () => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)),
+          ),
           { kind: "fixer", repo, incidentId: existing.id, guard: () => incidentStillOpen(repo, existing.id) },
         );
         return;
@@ -476,6 +517,7 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
         measurements: deps.store.listMeasurements(repo),
       });
       if (stopping || generation !== lifecycleGeneration) return;
+      if (!await confirmOperationalMain(repo, measurement, generation)) return;
       const failures = measurement.failed.length + measurement.errors.length;
       const incident = deps.incidents.openIncident({
         repo,
@@ -483,29 +525,39 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
         summary: `main rojo: ${failures} prueba${failures === 1 ? "" : "s"} fallida${failures === 1 ? "" : "s"}`,
         attribution: report,
       });
-      enqueueNotification(repo, `notify-open:${incident.id}`, (signal) => deps.notifier.opened(incident, signal));
+      enqueueNotification(
+        repo,
+        `notify-open:${incident.id}`,
+        onlyWhileOperational(repo, measurement, generation, (signal) => deps.notifier.opened(incident, signal)),
+      );
       if (settings.commentOnPr) {
         launchAuxiliary(
           `comment:${incident.id}`,
-          (signal) => deps.commentPullRequest({
+          onlyWhileOperational(repo, measurement, generation, (signal) => deps.commentPullRequest({
             repo,
             repoDir: repoDir(deps.repoRoot, repo),
             incident,
             attribution: report,
             signal,
-          }),
+          })),
           { kind: "comment", repo, incidentId: incident.id, guard: () => incidentStillOpen(repo, incident.id) },
         );
       }
       launchAuxiliary(
         `fixer:${repo}`,
-        () => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)),
+        onlyWhileOperational(
+          repo,
+          measurement,
+          generation,
+          () => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)),
+        ),
         { kind: "fixer", repo, incidentId: incident.id, guard: () => incidentStillOpen(repo, incident.id) },
       );
       return;
     }
 
     const open = deps.incidents.readIncident(repo);
+    if (!await confirmOperationalMain(repo, measurement, generation)) return;
     if (!open) return;
     cancelQueuedOpenAuxiliaries(repo, open.id);
     const closed = await deps.incidents.closeIncident(repo, repoDir(deps.repoRoot, repo));
@@ -516,7 +568,7 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
         enqueueNotification(
           repo,
           `notify-close:${closed.id}:${closed.closedAt ?? "closed"}`,
-          (signal) => deps.notifier.closed(closed, signal),
+          onlyWhileOperational(repo, measurement, generation, (signal) => deps.notifier.closed(closed, signal)),
         );
       }
     }
@@ -574,9 +626,6 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
       job.terminalBaseline = true;
       return;
     }
-    const currentMain = await resolveMain(job.repo);
-    if (stopping || job.generation !== lifecycleGeneration || currentMain !== job.sha) return;
-    deps.store.confirmOperationalMeasurement(job.repo, job.sha);
     await scheduleEvaluation(job.repo, result);
   }
 
