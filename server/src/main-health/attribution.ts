@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import type { MainHealthMeasurement } from "./store.js";
+import { isMainHealthMeasurement, type MainHealthMeasurement } from "./store.js";
 
 export interface GitPort {
   run(args: string[], cwd: string): Promise<string>;
@@ -31,6 +31,25 @@ export interface AttributionInput {
   repoDir: string;
   red: MainHealthMeasurement;
   measurements: MainHealthMeasurement[];
+}
+
+const FULL_SHA = /^(?:[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64})$/;
+const SAFE_REPO = /^[A-Za-z0-9._-]+$/;
+
+function safeRepo(repo: string): boolean {
+  return repo !== "." && repo !== ".." && SAFE_REPO.test(repo);
+}
+
+function validateInput(input: AttributionInput): void {
+  if (!isMainHealthMeasurement(input.red)) throw new Error("medición roja inválida");
+  if (input.red.status !== "red") throw new Error("attribution requiere una medición roja");
+  if (!safeRepo(input.red.repo)) throw new Error(`repo rojo inválido: ${input.red.repo}`);
+  if (!FULL_SHA.test(input.red.sha)) throw new Error(`SHA rojo inválido: ${input.red.sha}`);
+  for (const measurement of input.measurements) {
+    if (!isMainHealthMeasurement(measurement)) throw new Error("medición candidata inválida");
+    if (!safeRepo(measurement.repo)) throw new Error(`repo candidato inválido: ${measurement.repo}`);
+    if (!FULL_SHA.test(measurement.sha)) throw new Error(`SHA candidato inválido: ${measurement.sha}`);
+  }
 }
 
 /** Puerto Git real; los tests y consumidores pueden sustituirlo sin tocar procesos globales. */
@@ -224,7 +243,7 @@ export async function attributeMainHealth(
   input: AttributionInput,
   git: GitPort = createExecFileGitPort(),
 ): Promise<MainHealthAttribution> {
-  if (input.red.status !== "red") throw new Error("attribution requiere una medición roja");
+  validateInput(input);
   const greens = input.measurements.filter(
     (measurement) => measurement.status === "green" && measurement.repo === input.red.repo,
   );

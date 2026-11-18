@@ -266,6 +266,50 @@ test("attribution reporta explícitamente que no existe medición verde previa",
   });
 });
 
+test("attribution rechaza un SHA con aspecto de opción antes de invocar git", async () => {
+  let called = false;
+  const port: GitPort = {
+    run: async () => {
+      called = true;
+      throw new Error("git no debe ejecutarse");
+    },
+  };
+
+  await assert.rejects(
+    () => attributeMainHealth({ repoDir: "/repo", red: measurement("--all", "red"), measurements: [] }, port),
+    /SHA rojo inválido/,
+  );
+  await assert.rejects(
+    () => attributeMainHealth({ repoDir: "/repo", red: measurement("a".repeat(40), "green"), measurements: [] }, port),
+    /requiere una medición roja/,
+  );
+  await assert.rejects(
+    () => attributeMainHealth({
+      repoDir: "/repo",
+      red: measurement("a".repeat(40), "red", { repo: "../api" }),
+      measurements: [],
+    }, port),
+    /repo rojo inválido/,
+  );
+  await assert.rejects(
+    () => attributeMainHealth({
+      repoDir: "/repo",
+      red: { ...measurement("a".repeat(40), "red"), tests: "uno" } as unknown as MainHealthMeasurement,
+      measurements: [],
+    }, port),
+    /medición roja inválida/,
+  );
+  await assert.rejects(
+    () => attributeMainHealth({
+      repoDir: "/repo",
+      red: measurement("a".repeat(40), "red"),
+      measurements: [measurement("--all", "green")],
+    }, port),
+    /SHA candidato inválido/,
+  );
+  assert.equal(called, false);
+});
+
 test("parsePullRequest reconoce el sufijo squash (#N)", () => {
   assert.equal(parsePullRequest("feat: entregar salud (#73)\n\nCo-Authored-By: Pair <pair@example.com>"), 73);
 });
