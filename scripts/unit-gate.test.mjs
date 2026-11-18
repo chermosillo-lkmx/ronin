@@ -51,7 +51,7 @@ function sh(cmd, args, opts = {}) {
   return r.stdout;
 }
 
-function fixture(t) {
+function fixture(t, repoName = REPO) {
   const tmp = mkdtempSync(join(tmpdir(), "unit-gate-test-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const gitEnv = {
@@ -63,11 +63,11 @@ function fixture(t) {
 
   const origin = join(tmp, "origin.git");
   const session = join(tmp, "session");
-  const repo = join(session, REPO);
+  const repo = join(session, repoName);
   const mainRoot = join(tmp, "main-root");
   mkdirSync(session, { recursive: true });
   git(tmp, "init", "-q", "--bare", "-b", "main", origin);
-  git(session, "clone", "-q", origin, REPO);
+  git(session, "clone", "-q", origin, repoName);
 
   const write = (rel, body) => {
     mkdirSync(dirname(join(repo, rel)), { recursive: true });
@@ -89,7 +89,7 @@ function fixture(t) {
   git(repo, "commit", "-q", "-m", "change");
 
   // Intérprete falso: copia los reportes elegidos a las rutas pedidas por pytest.
-  const py = join(mainRoot, REPO, ".venv", "bin", "python");
+  const py = join(mainRoot, repoName, ".venv", "bin", "python");
   mkdirSync(dirname(py), { recursive: true });
   writeFileSync(
     py,
@@ -97,6 +97,7 @@ function fixture(t) {
     `if [ "$1" = "-c" ] && [ "$2" = "import xdist" ]; then [ "\${FAKE_XDIST:-}" = "1" ]; exit $?; fi\n` +
     `[ -n "\${FAKE_MARKER:-}" ] && : > "$FAKE_MARKER"\n` +
     `[ -n "\${FAKE_ARGV:-}" ] && printf '%s\\n' "$@" > "$FAKE_ARGV"\n` +
+    `[ -n "\${FAKE_ENVFILE:-}" ] && printf '%s' "\${RUN_REAL_PG-<unset>}" > "$FAKE_ENVFILE"\n` +
     `[ -n "\${FAKE_COVFILE:-}" ] && printf '%s' "\${COVERAGE_FILE:-}" > "$FAKE_COVFILE"\n` +
     `for a in "$@"; do case "$a" in\n` +
     `  --junitxml=*) cp "$FAKE_SUITE_JUNIT" "\${a#--junitxml=}";;\n` +
@@ -1349,4 +1350,30 @@ test("64. Node con pnpm-lock ejecuta pnpm exec vitest", (t) => {
   assert.equal(r.code, 0, r.out);
   assert.deepEqual(readFileSync(argv, "utf8").split("\n").slice(0, 3), ["exec", "vitest", "run"]);
   assert.match(r.out, /pnpm exec vitest run/);
+});
+
+test("cfdis: la suite corre con RUN_REAL_PG=1 (se mide con Postgres real) y no se filtra a otro repo", (t) => {
+  const state = mkdtempSync(join(tmpdir(), "unit-gate-state-"));
+  t.after(() => rmSync(state, { recursive: true, force: true }));
+  for (const [name, expected] of [["ant-ms-cfdis", "1"], ["ant-fake-api", "<unset>"]]) {
+    const fx = fixture(t, name);
+    fx.setSuite([OTHER_PASS, APP("passed")]);
+    const envFile = join(fx.tmp, "env.txt");
+    const env = { FAKE_ENVFILE: envFile, UNIT_GATE_STATE_DIR: state };
+    delete process.env.RUN_REAL_PG;
+    const r = fx.run(env);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(readFileSync(envFile, "utf8"), expected, `${name}: ${r.out}`);
+  }
+});
+
+test("cfdis: un RUN_REAL_PG explícito del llamador se respeta", (t) => {
+  const state = mkdtempSync(join(tmpdir(), "unit-gate-state-"));
+  t.after(() => rmSync(state, { recursive: true, force: true }));
+  const fx = fixture(t, "ant-ms-cfdis");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const envFile = join(fx.tmp, "env.txt");
+  const r = fx.run({ FAKE_ENVFILE: envFile, UNIT_GATE_STATE_DIR: state, RUN_REAL_PG: "0" });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(readFileSync(envFile, "utf8"), "0");
 });
