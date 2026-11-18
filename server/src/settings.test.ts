@@ -99,6 +99,27 @@ test("discoverMainHealthRepos conserva repos git únicos bajo LIEBRE_ROOT", () =
     (repo: string) => paths[repo],
     "/liebre",
     (cwd: string) => cwd !== "/liebre/archivo",
+    (path: string) => path,
+  );
+  assert.deepEqual(repos, ["api"]);
+});
+
+test("discoverMainHealthRepos excluye symlinks cuya ruta real sale de LIEBRE_ROOT", () => {
+  const paths: Record<string, { cwd: string; real: boolean }> = {
+    api: { cwd: "/liebre/api", real: true },
+    enlace: { cwd: "/liebre/enlace", real: true },
+  };
+  const realPaths: Record<string, string> = {
+    "/liebre": "/real/liebre",
+    "/liebre/api": "/real/liebre/api",
+    "/liebre/enlace": "/fuera/api",
+  };
+  const repos = discoverMainHealthRepos(
+    ["api", "enlace"],
+    (repo: string) => paths[repo],
+    "/liebre",
+    () => true,
+    (path: string) => realPaths[path],
   );
   assert.deepEqual(repos, ["api"]);
 });
@@ -146,6 +167,14 @@ test("readMainHealthSettings sanea valores válidos de mainHealth", () => {
       leaseMin: 120,
       aliases: { "repo-remoto": "api-2" },
     });
+  });
+});
+
+test("readMainHealthSettings acepta sólo nombres de repo simples seguros y únicos", () => {
+  conSettings(JSON.stringify({ mainHealth: {
+    repos: ["api", "../api", "a/b", ".", "..", "dex.repo", "i18n_repo", ".oculto", "api"],
+  } }), (file) => {
+    assert.deepEqual(readMainHealthSettings(file, () => ["default"]).repos, ["api", "dex.repo", "i18n_repo", ".oculto"]);
   });
 });
 

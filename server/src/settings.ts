@@ -26,15 +26,27 @@ export function discoverMainHealthRepos(
   resolveRepo: (repo: string) => { cwd: string; real: boolean },
   liebreRoot: string,
   isGitRepo: (cwd: string) => boolean,
+  realPath: (path: string) => string,
 ): string[] {
-  const root = resolve(liebreRoot);
+  let root: string;
+  try {
+    root = resolve(realPath(liebreRoot));
+  } catch {
+    return [];
+  }
   const seen = new Set<string>();
   return repos.filter((repo) => {
     if (seen.has(repo)) return false;
     seen.add(repo);
-    const resolved = resolveRepo(repo);
-    const fromRoot = relative(root, resolve(resolved.cwd));
-    return resolved.real && fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot) && isGitRepo(resolved.cwd);
+    try {
+      const resolved = resolveRepo(repo);
+      if (!resolved.real) return false;
+      const cwd = resolve(realPath(resolved.cwd));
+      const fromRoot = relative(root, cwd);
+      return fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot) && isGitRepo(cwd);
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -71,13 +83,14 @@ export const MAIN_HEALTH_LEASE_RANGE = { min: 1, max: 1_440 } as const;
 
 const SAFE_MAIN_HEALTH_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_MAIN_HEALTH_ALIAS = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const SIMPLE_MAIN_HEALTH_REPO = /^[A-Za-z0-9._-]+$/;
 
-function uniqueNonEmptyStrings(value: unknown): string[] | undefined {
+function uniqueSafeRepoNames(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const out: string[] = [];
   for (const item of value) {
     const text = typeof item === "string" ? item.trim() : "";
-    if (text && !out.includes(text)) out.push(text);
+    if (text !== "." && text !== ".." && SIMPLE_MAIN_HEALTH_REPO.test(text) && !out.includes(text)) out.push(text);
   }
   return out;
 }
@@ -97,7 +110,7 @@ function sanitizeMainHealth(raw: unknown): Partial<MainHealthSettings> {
   const value = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
   const intervalMin = boundedInt(value.intervalMin, MAIN_HEALTH_INTERVAL_RANGE);
   const leaseMin = boundedInt(value.leaseMin, MAIN_HEALTH_LEASE_RANGE);
-  const repos = uniqueNonEmptyStrings(value.repos);
+  const repos = uniqueSafeRepoNames(value.repos);
   const aliases = sanitizeAliases(value.aliases);
   return {
     ...(typeof value.enabled === "boolean" ? { enabled: value.enabled } : {}),
@@ -116,7 +129,7 @@ export function defaultMainHealthSettings(repos: string[]): MainHealthSettings {
 }
 
 function discoverDefaultMainHealthRepos(): string[] {
-  return discoverMainHealthRepos(listRepos(), resolveCwd, LIEBRE_ROOT, (cwd) => existsSync(join(cwd, ".git")));
+  return discoverMainHealthRepos(listRepos(), resolveCwd, LIEBRE_ROOT, (cwd) => existsSync(join(cwd, ".git")), realpathSync);
 }
 
 export function readMainHealthSettings(
