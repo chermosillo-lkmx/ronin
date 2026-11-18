@@ -1178,6 +1178,50 @@ test("58b. suite agregada roja sin IDs identificables falla cerrado", (t) => {
   assert.doesNotMatch(r.out, /heredado de main .*: 0 rojas/);
 });
 
+test("58c. agregado con dos rojas y sólo un testcase rojo falla cerrado", (t) => {
+  const fx = fixture(t);
+  fx.setRawSuite(
+    `<?xml version="1.0"?><testsuites><testsuite tests="2" failures="2" errors="0" skipped="0">` +
+    `<testcase classname="tests.test_other" name="test_other"><failure>rojo</failure></testcase>` +
+    `<testcase classname="tests.test_app" name="test_app_db"/>` +
+    `</testsuite></testsuites>\n`,
+  );
+  const { healthDir } = seedMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /JUnit rojo incoherente/);
+  assert.doesNotMatch(r.out, /heredado de main/);
+});
+
+test("58d. testcase rojo sin classname falla cerrado", (t) => {
+  const fx = fixture(t);
+  fx.setRawSuite(
+    `<?xml version="1.0"?><testsuites><testsuite tests="1" failures="1" errors="0" skipped="0">` +
+    `<testcase name="test_other"><failure>rojo</failure></testcase>` +
+    `</testsuite></testsuites>\n`,
+  );
+  const { healthDir } = seedMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /JUnit rojo incoherente/);
+  assert.doesNotMatch(r.out, /rojas nuevas/);
+});
+
+test("58e. IDs rojos duplicados no ocultan faltantes del agregado", (t) => {
+  const fx = fixture(t);
+  fx.setRawSuite(
+    `<?xml version="1.0"?><testsuites><testsuite tests="2" failures="2" errors="0" skipped="0">` +
+    `<testcase classname="tests.test_other" name="test_other"><failure>uno</failure></testcase>` +
+    `<testcase classname="tests.test_other" name="test_other"><failure>dos</failure></testcase>` +
+    `</testsuite></testsuites>\n`,
+  );
+  const { healthDir } = seedMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /JUnit rojo incoherente/);
+  assert.doesNotMatch(r.out, /heredado de main/);
+});
+
 test("59. rojas heredadas pero cobertura menor que main fallan", (t) => {
   const fx = fixture(t);
   fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);

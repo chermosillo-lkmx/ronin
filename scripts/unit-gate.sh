@@ -162,13 +162,29 @@ except (OSError, ValueError, TypeError, KeyError):
     print("MISSING")
     raise SystemExit
 
-current = set()
-for case in ET.parse(junit).getroot().iter("testcase"):
-    if case.find("failure") is not None or case.find("error") is not None:
-        current.add(f'{case.get("classname") or ""}::{case.get("name") or ""}')
-if not current:
+root = ET.parse(junit).getroot()
+local = lambda element: element.tag.rsplit("}", 1)[-1]
+suites = [element for element in list(root) if local(element) == "testsuite"] or [root]
+try:
+    aggregate_red = sum(int(suite.get("failures", 0) or 0) + int(suite.get("errors", 0) or 0) for suite in suites)
+except ValueError:
+    print("INCOHERENT")
+    raise SystemExit
+
+red_ids = []
+for case in (element for element in root.iter() if local(element) == "testcase"):
+    children = {local(child) for child in case}
+    if "failure" in children or "error" in children:
+        classname = case.get("classname") or ""
+        name = case.get("name") or ""
+        red_ids.append(f"{classname}::{name}" if classname and name else "")
+if not red_ids:
     print("UNIDENTIFIED")
     raise SystemExit
+if len(red_ids) != aggregate_red or any(not test_id or test_id == "::" for test_id in red_ids) or len(set(red_ids)) != len(red_ids):
+    print("INCOHERENT")
+    raise SystemExit
+current = set(red_ids)
 new = sorted(current - base_red)
 if new:
     print("NEW", len(new), base_total, "-", "-", json.dumps(new, ensure_ascii=False), sep="\t")
@@ -832,6 +848,10 @@ for repo in "${candidates[@]}"; do
         ;;
       UNIDENTIFIED)
         bad "$name: suite en ROJO — sin IDs rojos identificables en $junit"
+        continue
+        ;;
+      INCOHERENT)
+        bad "$name: suite en ROJO — JUnit rojo incoherente entre agregado y testcases en $junit"
         continue
         ;;
       *)
