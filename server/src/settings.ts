@@ -3,7 +3,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { LIEBRE_ROOT } from "./config.js";
 import { dataPath } from "./data-dir.js";
 import { DEFAULT_ENGINE, sanitizeEngine, type EngineChoice } from "./engine-config.js";
-import { listRepos, resolveCwd } from "./repos.js";
+import { listRepos } from "./repos.js";
 
 const SETTINGS_FILE = dataPath("settings.json");
 
@@ -20,12 +20,13 @@ export function boundedInt(v: unknown, { min, max }: { min: number; max: number 
   return typeof v === "number" && Number.isInteger(v) && v >= min && v <= max ? v : undefined;
 }
 
-/** Repos configurados que resuelven a un checkout git dentro de LIEBRE_ROOT. */
+const SIMPLE_MAIN_HEALTH_REPO = /^[A-Za-z0-9._-]+$/;
+
+/** Nombres configurados cuyo path efectivo LIEBRE_ROOT/repo es un checkout git contenido en el root. */
 export function discoverMainHealthRepos(
   repos: string[],
-  resolveRepo: (repo: string) => { cwd: string; real: boolean },
   liebreRoot: string,
-  isGitRepo: (cwd: string) => boolean,
+  exists: (path: string) => boolean,
   realPath: (path: string) => string,
 ): string[] {
   let root: string;
@@ -36,18 +37,33 @@ export function discoverMainHealthRepos(
   }
   const seen = new Set<string>();
   return repos.filter((repo) => {
-    if (seen.has(repo)) return false;
+    if (repo === "." || repo === ".." || !SIMPLE_MAIN_HEALTH_REPO.test(repo) || seen.has(repo)) return false;
     seen.add(repo);
     try {
-      const resolved = resolveRepo(repo);
-      if (!resolved.real) return false;
-      const cwd = resolve(realPath(resolved.cwd));
+      const cwd = resolve(realPath(join(liebreRoot, repo)));
       const fromRoot = relative(root, cwd);
-      return fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot) && isGitRepo(cwd);
+      return fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot) && exists(join(cwd, ".git"));
     } catch {
       return false;
     }
   });
+}
+
+export interface MainHealthRepoDiscovery {
+  listRepos(): string[];
+  liebreRoot: string;
+  exists(path: string): boolean;
+  realPath(path: string): string;
+}
+
+/** Defaults de repos según el mismo path LIEBRE_ROOT/repo que consume main-health.sh. */
+export function defaultMainHealthRepos(deps: MainHealthRepoDiscovery = {
+  listRepos,
+  liebreRoot: LIEBRE_ROOT,
+  exists: existsSync,
+  realPath: realpathSync,
+}): string[] {
+  return discoverMainHealthRepos(deps.listRepos(), deps.liebreRoot, deps.exists, deps.realPath);
 }
 
 export interface MainHealthSettings {
@@ -83,7 +99,6 @@ export const MAIN_HEALTH_LEASE_RANGE = { min: 1, max: 1_440 } as const;
 
 const SAFE_MAIN_HEALTH_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_MAIN_HEALTH_ALIAS = /^[a-z0-9][a-z0-9-]{0,39}$/;
-const SIMPLE_MAIN_HEALTH_REPO = /^[A-Za-z0-9._-]+$/;
 
 function uniqueSafeRepoNames(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -128,13 +143,9 @@ export function defaultMainHealthSettings(repos: string[]): MainHealthSettings {
   return { ...DEFAULT_MAIN_HEALTH_SETTINGS, repos: [...repos], aliases: { ...DEFAULT_MAIN_HEALTH_ALIASES } };
 }
 
-function discoverDefaultMainHealthRepos(): string[] {
-  return discoverMainHealthRepos(listRepos(), resolveCwd, LIEBRE_ROOT, (cwd) => existsSync(join(cwd, ".git")), realpathSync);
-}
-
 export function readMainHealthSettings(
   file = SETTINGS_FILE,
-  discoverRepos: () => string[] = discoverDefaultMainHealthRepos,
+  discoverRepos: () => string[] = defaultMainHealthRepos,
 ): MainHealthSettings {
   const defaults = defaultMainHealthSettings(discoverRepos());
   const stored = load(file).mainHealth;

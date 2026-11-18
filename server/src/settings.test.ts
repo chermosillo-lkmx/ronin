@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import {
+  defaultMainHealthRepos,
   defaultMainHealthSettings,
   discoverMainHealthRepos,
   readAllowedRoots,
@@ -88,27 +89,16 @@ test("saveEngine conserva el gate escrito a mano", () => {
 });
 
 test("discoverMainHealthRepos conserva repos git únicos bajo LIEBRE_ROOT", () => {
-  const paths: Record<string, { cwd: string; real: boolean }> = {
-    api: { cwd: "/liebre/api", real: true },
-    externo: { cwd: "/otro/externo", real: true },
-    falso: { cwd: "/liebre/falso", real: false },
-    archivo: { cwd: "/liebre/archivo", real: true },
-  };
   const repos = discoverMainHealthRepos(
-    ["api", "externo", "falso", "archivo", "api"],
-    (repo: string) => paths[repo],
+    ["api", "missing", "api"],
     "/liebre",
-    (cwd: string) => cwd !== "/liebre/archivo",
+    (path: string) => path === "/liebre/api/.git",
     (path: string) => path,
   );
   assert.deepEqual(repos, ["api"]);
 });
 
 test("discoverMainHealthRepos excluye symlinks cuya ruta real sale de LIEBRE_ROOT", () => {
-  const paths: Record<string, { cwd: string; real: boolean }> = {
-    api: { cwd: "/liebre/api", real: true },
-    enlace: { cwd: "/liebre/enlace", real: true },
-  };
   const realPaths: Record<string, string> = {
     "/liebre": "/real/liebre",
     "/liebre/api": "/real/liebre/api",
@@ -116,11 +106,25 @@ test("discoverMainHealthRepos excluye symlinks cuya ruta real sale de LIEBRE_ROO
   };
   const repos = discoverMainHealthRepos(
     ["api", "enlace"],
-    (repo: string) => paths[repo],
     "/liebre",
     () => true,
     (path: string) => realPaths[path],
   );
+  assert.deepEqual(repos, ["api"]);
+});
+
+test("defaultMainHealthRepos valida LIEBRE_ROOT/repo y no mappings al root", () => {
+  const realPaths: Record<string, string> = {
+    "/liebre": "/real/liebre",
+    "/liebre/monorepo": "/real/liebre/monorepo",
+    "/liebre/api": "/real/liebre/api",
+  };
+  const repos = defaultMainHealthRepos({
+    listRepos: () => ["monorepo", "api", "../escape", "api"],
+    liebreRoot: "/liebre",
+    realPath: (path: string) => realPaths[path],
+    exists: (path: string) => path === "/real/liebre/.git" || path === "/real/liebre/api/.git",
+  });
   assert.deepEqual(repos, ["api"]);
 });
 
