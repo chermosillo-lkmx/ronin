@@ -7,6 +7,7 @@ import {
   resolveMainMergeBase,
   type VerifyDriverDepSources,
 } from "./verify-driver-deps.js";
+import * as verifyDepsModule from "./verify-driver-deps.js";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
@@ -275,6 +276,51 @@ test("el driver real lee el mtime de los sentinelas (vuelta a pre-merge desde pr
   const deps = createVerifyDriverDeps(sources({}));
   assert.equal(typeof deps.sentinelAt, "function");
   assert.equal(deps.sentinelAt!("/no/existe/ronin-ciclo", "pre-merge"), null);
+});
+
+test("puerto main-base impone timeout y Git/SSH no interactivos sin pisar un SSH configurado", async () => {
+  const factory = (verifyDepsModule as any).createMainMergeBaseGitPort;
+  assert.equal(typeof factory, "function");
+  const calls: Array<{ command: string; args: string[]; options: any }> = [];
+  const git = factory({
+    timeoutMs: 1_234,
+    env: { PATH: "/fixture/bin", GIT_TERMINAL_PROMPT: "1", GIT_SSH_COMMAND: "ssh-fixture --safe" },
+    execFile: (command: string, args: string[], options: any, callback: (error: Error | null, stdout: string) => void) => {
+      calls.push({ command, args, options });
+      callback(Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }), "parcial");
+    },
+  });
+
+  assert.deepEqual(await git.run(["fetch", "-q", "origin", "main"], "/repo"), { ok: false, out: "parcial" });
+  assert.deepEqual(calls.map(({ command, args }) => ({ command, args })), [
+    { command: "git", args: ["fetch", "-q", "origin", "main"] },
+  ]);
+  assert.equal(calls[0]!.options.cwd, "/repo");
+  assert.equal(calls[0]!.options.timeout, 1_234);
+  assert.equal(calls[0]!.options.encoding, "utf8");
+  assert.equal(calls[0]!.options.env.PATH, "/fixture/bin");
+  assert.equal(calls[0]!.options.env.GIT_TERMINAL_PROMPT, "0");
+  assert.equal(calls[0]!.options.env.GIT_SSH_COMMAND, "ssh-fixture --safe");
+});
+
+test("puerto main-base agrega SSH batch/timeout y el resolver falla cerrado ante error", async () => {
+  const factory = (verifyDepsModule as any).createMainMergeBaseGitPort;
+  assert.equal(typeof factory, "function");
+  let options: any;
+  const git = factory({
+    env: { PATH: "/fixture/bin" },
+    execFile: (_command: string, _args: string[], received: any, callback: (error: Error | null, stdout: string) => void) => {
+      options = received;
+      callback(new Error("sin red"), "");
+    },
+  });
+
+  assert.equal(
+    await resolveMainMergeBase("/wt/cycle", { repo: "api", sha: SHA_A, dirty: false }, git, (path) => path),
+    null,
+  );
+  assert.match(options.env.GIT_SSH_COMMAND, /BatchMode=yes/);
+  assert.match(options.env.GIT_SSH_COMMAND, /ConnectTimeout=10/);
 });
 
 test("resolveMainMergeBase usa root/hijo, deriva repo canónico de HTTPS, scp y path", async () => {

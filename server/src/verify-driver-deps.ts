@@ -1,11 +1,12 @@
 import { deliverPromptWhenReady } from "./engine.js";
-import { realGitPort, type GitPort, type RepoHead } from "./gate-cache.js";
+import type { GitPort, RepoHead } from "./gate-cache.js";
 import { getRepoGate, type RepoGate } from "./repo-config.js";
 import { readLaunchRecord, readTmuxInventory } from "./sessions.js";
 import { readGateSettings, type GateSettings } from "./settings.js";
 import { cycleDirForSession, detectStage, readFlow } from "./stages.js";
 import { realGateDeps, type DriverDeps, type GateStage, type LaunchInfo } from "./verify-driver.js";
 import { resolveFlow } from "./workflow.js";
+import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { basename, resolve, sep } from "node:path";
 
@@ -90,11 +91,63 @@ function canonicalRepoFromRemote(remote: string): string | null {
   return safeRepo(repo) ? repo : null;
 }
 
+interface MainMergeBaseExecOptions {
+  cwd: string;
+  encoding: "utf8";
+  env: NodeJS.ProcessEnv;
+  maxBuffer: number;
+  timeout: number;
+}
+
+type MainMergeBaseExecFile = (
+  command: string,
+  args: string[],
+  options: MainMergeBaseExecOptions,
+  callback: (error: Error | null, stdout: string) => void,
+) => unknown;
+
+export interface MainMergeBaseGitPortDeps {
+  execFile?: MainMergeBaseExecFile;
+  env?: Readonly<NodeJS.ProcessEnv>;
+  timeoutMs?: number;
+}
+
+/** Git acotado y no interactivo, aislado del puerto que usa el resto del gate. */
+export function createMainMergeBaseGitPort(deps: MainMergeBaseGitPortDeps = {}): GitPort {
+  const runExec: MainMergeBaseExecFile = deps.execFile ?? ((command, args, options, callback) => {
+    execFile(command, args, options, (error, stdout) => callback(error, String(stdout ?? "")));
+  });
+  const timeoutMs = deps.timeoutMs ?? 30_000;
+  return {
+    run(args, cwd) {
+      const inherited = deps.env ?? process.env;
+      const env: NodeJS.ProcessEnv = {
+        ...inherited,
+        GIT_TERMINAL_PROMPT: "0",
+        ...(inherited.GIT_SSH_COMMAND === undefined && inherited.GIT_SSH === undefined
+          ? { GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=10" }
+          : {}),
+      };
+      return new Promise((resolveResult) => {
+        try {
+          runExec("git", args, { cwd, encoding: "utf8", env, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs }, (error, stdout) => {
+            resolveResult({ ok: !error, out: String(stdout ?? "") });
+          });
+        } catch {
+          resolveResult({ ok: false, out: "" });
+        }
+      });
+    },
+  };
+}
+
+export const mainMergeBaseGitPort = createMainMergeBaseGitPort();
+
 /** Resuelve el main común usando sólo el puerto Git; todo dato dudoso falla cerrado. */
 export async function resolveMainMergeBase(
   worktree: string,
   head: RepoHead,
-  git: GitPort = realGitPort,
+  git: GitPort = mainMergeBaseGitPort,
   realPath: (path: string) => string = realpathSync,
 ): Promise<{ repo: string; sha: string } | null> {
   if (!safeRepo(head.repo) || !CANONICAL_SHA.test(head.sha)) return null;
@@ -140,7 +193,7 @@ export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverD
     cycleFor: sources.cycleDirForSession,
     detect: sources.detectStage,
     ...realGateDeps,
-    mainMergeBase: (worktree, head) => resolveMainMergeBase(worktree, head, realGitPort, sources.realPath ?? realpathSync),
+    mainMergeBase: (worktree, head) => resolveMainMergeBase(worktree, head, mainMergeBaseGitPort, sources.realPath ?? realpathSync),
     ...(sources.ensureMainMeasured ? { ensureMainMeasured: sources.ensureMainMeasured } : {}),
     // Se lee en cada llamada: un cambio en settings.json o repo-config.json aplica sin reiniciar.
     gateConfig: (repo) => gateConfigFrom(sources.gateSettings(), sources.repoGate(repo)),
