@@ -8,8 +8,9 @@ import type { MainHealthNotifier } from "./notify.js";
 import { isMainHealthMeasurement, type MainHealthMeasurement, type MainHealthStore } from "./store.js";
 import type { MainHealthSettings } from "../settings.js";
 
-const FULL_SHA = /^(?:[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64})$/;
-const INPUT_SHA = /^[A-Fa-f0-9]{7,64}$/;
+const CANONICAL_SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const SAFE_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const VETOED_REPO = "ant-liebre-app";
 const DEFAULT_SCRIPT = fileURLToPath(new URL("../../../scripts/main-health.sh", import.meta.url));
 
 export interface MainHealthGitPort {
@@ -24,9 +25,34 @@ export interface MeasurementRunInput {
   timeoutMs: number;
 }
 
+export type MeasurementSignal = "SIGTERM" | "SIGKILL";
+
+export interface MeasurementChildPort {
+  pid?: number;
+  once(event: "error", listener: (error: Error) => void): unknown;
+  once(event: "close", listener: () => void): unknown;
+  kill(signal: MeasurementSignal): unknown;
+}
+
+export interface MeasurementRunnerDeps {
+  platform?: NodeJS.Platform;
+  graceMs?: number;
+  spawnProcess?: (
+    command: string,
+    args: string[],
+    options: { cwd: string; env: NodeJS.ProcessEnv; stdio: "ignore"; detached: boolean },
+  ) => MeasurementChildPort;
+  killProcessGroup?: (child: MeasurementChildPort, signal: MeasurementSignal) => void;
+  timers?: {
+    setTimeout(callback: () => void, ms: number): unknown;
+    clearTimeout(handle: unknown): void;
+  };
+}
+
 export interface MainHealthIncidentPort {
   readIncident(repo: string): Incident | null;
   openIncident(input: OpenIncidentInput): Incident;
+  heartbeatOwner(repo: string): Promise<boolean>;
   ensureFixer(repo: string, repoDir: string): Promise<unknown>;
   closeIncident(repo: string, repoDir?: string): Promise<Incident | null>;
 }
@@ -69,14 +95,14 @@ export type EnsureMeasuredResult =
   | { status: "cached"; measurement: MainHealthMeasurement }
   | { status: "queued"; repo: string; sha: string; deduplicated?: true }
   | { status: "suppressed"; reason: "recent-error"; repo: string; sha: string }
-  | { status: "ignored"; reason: "repo-not-configured"; repo: string }
+  | { status: "ignored"; reason: "disabled" | "repo-not-configured" | "repo-vetoed"; repo: string }
   | { status: "unavailable"; reason: "main-unavailable" | "invalid-sha"; repo: string };
 
 export interface MainHealthWatcher {
   tick(): Promise<void>;
   ensureMeasured(repo: string, sha?: string): Promise<EnsureMeasuredResult>;
   evaluate(repo: string, measurement: MainHealthMeasurement): Promise<void>;
-  /** Espera el tick vigente y toda la cola; sólo existe para coordinación y apagado limpio. */
+  /** Espera el tick vigente y el core de su cola; no auxiliares externos ni `evaluate` suelto. */
   idle(): Promise<void>;
   start(): void;
   stop(): void;
@@ -95,40 +121,73 @@ export function createMainHealthGitPort(): MainHealthGitPort {
         }, (error, stdout) => {
           if (error) return reject(error);
           const first = stdout.trim().split(/\s+/, 1)[0] ?? "";
-          resolve(FULL_SHA.test(first) ? first.toLowerCase() : null);
+          resolve(CANONICAL_SHA.test(first) ? first : null);
         });
       });
     },
   };
 }
 
-/**
- * Runner real de la medición. Un rc 1 (main rojo) y rc 2 (error registrado) son desenlaces
- * normales: quien decide es el JSON que el watcher relee al cerrar el proceso.
- */
-export function runMainHealthMeasurement(input: MeasurementRunInput): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(input.command, input.args, {
-      cwd: input.cwd,
-      env: { ...process.env, ...input.env },
-      stdio: "ignore",
-    });
-    let settled = false;
-    const finish = (error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) reject(error);
-      else resolve();
-    };
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(new Error(`timeout midiendo main-health tras ${input.timeoutMs} ms`));
-    }, input.timeoutMs);
-    child.once("error", (error) => finish(error));
-    child.once("close", () => finish());
+/** Construye el runner real dejando proceso, señales y reloj totalmente sustituibles. */
+export function createMainHealthMeasurementRunner(runtime: MeasurementRunnerDeps = {}) {
+  const platform = runtime.platform ?? process.platform;
+  const graceMs = runtime.graceMs ?? 5_000;
+  const spawnProcess = runtime.spawnProcess ?? ((command, args, options) => spawn(command, args, options));
+  const timers = runtime.timers ?? {
+    setTimeout: (callback: () => void, ms: number) => setTimeout(callback, ms),
+    clearTimeout: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  };
+  const killProcessGroup = runtime.killProcessGroup ?? ((child: MeasurementChildPort, signal: MeasurementSignal) => {
+    if (platform !== "win32" && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, signal);
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      }
+    }
+    child.kill(signal);
   });
+
+  /**
+   * rc 1 (main rojo) y rc 2 (error registrado) son desenlaces normales. Incluso tras timeout
+   * se espera `close`: el trap del script conserva la oportunidad de limpiar worktree y lock.
+   */
+  return function run(input: MeasurementRunInput): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawnProcess(input.command, input.args, {
+        cwd: input.cwd,
+        env: { ...process.env, ...input.env },
+        stdio: "ignore",
+        detached: platform !== "win32",
+      });
+      let closed = false;
+      let timedOut = false;
+      let spawnError: Error | undefined;
+      let graceTimer: unknown;
+      const timeoutTimer = timers.setTimeout(() => {
+        if (closed) return;
+        timedOut = true;
+        try { killProcessGroup(child, "SIGTERM"); } catch { /* se espera close igualmente */ }
+        graceTimer = timers.setTimeout(() => {
+          if (closed) return;
+          try { killProcessGroup(child, "SIGKILL"); } catch { /* se espera close igualmente */ }
+        }, graceMs);
+      }, input.timeoutMs);
+      child.once("error", (error) => { spawnError = error; });
+      child.once("close", () => {
+        closed = true;
+        timers.clearTimeout(timeoutTimer);
+        if (graceTimer !== undefined) timers.clearTimeout(graceTimer);
+        if (spawnError) reject(spawnError);
+        else if (timedOut) reject(new Error(`timeout midiendo main-health tras ${input.timeoutMs} ms`));
+        else resolve();
+      });
+    });
+  };
 }
+
+export const runMainHealthMeasurement = createMainHealthMeasurementRunner();
 
 export function defaultMainHealthRepoRoot(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -146,11 +205,29 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
   };
   const now = deps.now ?? Date.now;
   const pending = new Set<string>();
-  const queue: Array<{ repo: string; sha: string }> = [];
+  const queue: Array<{ repo: string; sha: string; measure: boolean }> = [];
   const idleWaiters: Array<() => void> = [];
+  const auxiliaryRuns = new Map<string, Promise<void>>();
   let pumping = false;
   let tickRun: Promise<void> | null = null;
+  let evaluationTail: Promise<void> = Promise.resolve();
+  let started = false;
   let interval: unknown;
+
+  function safeRepo(repo: string): boolean {
+    return repo.length <= 61
+      && SAFE_REPO.test(repo)
+      && !repo.includes("..")
+      && !repo.endsWith(".")
+      && !repo.toLowerCase().endsWith(".lock");
+  }
+
+  function repoRejection(settings: MainHealthSettings, repo: string): "disabled" | "repo-not-configured" | "repo-vetoed" | null {
+    if (!settings.enabled) return "disabled";
+    if (repo === VETOED_REPO) return "repo-vetoed";
+    if (!safeRepo(repo) || !settings.repos.includes(repo)) return "repo-not-configured";
+    return null;
+  }
 
   function log(error: unknown): void {
     try {
@@ -160,17 +237,32 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     }
   }
 
-  async function safe(effect: () => Promise<unknown>): Promise<void> {
+  function launchAuxiliary(key: string, effect: () => Promise<unknown>): void {
+    if (auxiliaryRuns.has(key)) return;
+    let result: Promise<unknown>;
     try {
-      await effect();
+      result = Promise.resolve(effect());
     } catch (error) {
       log(error);
+      return;
     }
+    const tracked = result.catch(log).then(() => undefined).finally(() => {
+      if (auxiliaryRuns.get(key) === tracked) auxiliaryRuns.delete(key);
+    });
+    auxiliaryRuns.set(key, tracked);
   }
 
-  async function evaluate(repo: string, measurement: MainHealthMeasurement): Promise<void> {
+  async function evaluateCore(repo: string, measurement: MainHealthMeasurement): Promise<void> {
+    const settings = deps.readSettings();
+    if (repoRejection(settings, repo)
+      || measurement.repo !== repo
+      || !CANONICAL_SHA.test(measurement.sha)) return;
     if (measurement.status === "red") {
-      if (deps.incidents.readIncident(repo)) return;
+      const existing = deps.incidents.readIncident(repo);
+      if (existing) {
+        launchAuxiliary(`fixer:${repo}`, () => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)));
+        return;
+      }
       const report = await deps.attribute({
         repoDir: repoDir(deps.repoRoot, repo),
         red: measurement,
@@ -183,36 +275,44 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
         summary: `main rojo: ${failures} prueba${failures === 1 ? "" : "s"} fallida${failures === 1 ? "" : "s"}`,
         attribution: report,
       });
-      await safe(() => deps.notifier.opened(incident));
-      if (deps.readSettings().commentOnPr) {
-        await safe(() => deps.commentPullRequest({
+      launchAuxiliary(`notify-open:${incident.id}`, () => deps.notifier.opened(incident));
+      if (settings.commentOnPr) {
+        launchAuxiliary(`comment:${incident.id}`, () => deps.commentPullRequest({
           repo,
           repoDir: repoDir(deps.repoRoot, repo),
           incident,
           attribution: report,
         }));
       }
-      await safe(() => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)));
+      launchAuxiliary(`fixer:${repo}`, () => deps.incidents.ensureFixer(repo, repoDir(deps.repoRoot, repo)));
       return;
     }
 
     if (!deps.incidents.readIncident(repo)) return;
     const closed = await deps.incidents.closeIncident(repo, repoDir(deps.repoRoot, repo));
-    if (closed) await safe(() => deps.notifier.closed(closed));
+    if (closed) launchAuxiliary(`notify-close:${closed.id}:${closed.closedAt ?? "closed"}`, () => deps.notifier.closed(closed));
   }
 
-  async function runJob(job: { repo: string; sha: string }): Promise<void> {
-    const config = deps.gateConfig(job.repo);
-    try {
-      await deps.measure({
-        command: script,
-        args: [job.repo, "--sha", job.sha],
-        cwd: deps.repoRoot,
-        env: { MAIN_HEALTH_REPO_ROOT: deps.repoRoot, ...config.env },
-        timeoutMs: config.timeoutMs,
-      });
-    } catch (error) {
-      log(error);
+  function evaluate(repo: string, measurement: MainHealthMeasurement): Promise<void> {
+    const run = evaluationTail.then(() => evaluateCore(repo, measurement));
+    evaluationTail = run.catch(() => undefined);
+    return run;
+  }
+
+  async function runJob(job: { repo: string; sha: string; measure: boolean }): Promise<void> {
+    if (job.measure) {
+      const config = deps.gateConfig(job.repo);
+      try {
+        await deps.measure({
+          command: script,
+          args: [job.repo, "--sha", job.sha],
+          cwd: deps.repoRoot,
+          env: { MAIN_HEALTH_REPO_ROOT: deps.repoRoot, ...config.env },
+          timeoutMs: config.timeoutMs,
+        });
+      } catch (error) {
+        log(error);
+      }
     }
     const result = deps.store.readMeasurement(job.repo, job.sha);
     if (!result || !isMainHealthMeasurement(result) || result.repo !== job.repo || result.sha !== job.sha) return;
@@ -243,11 +343,11 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     }
   }
 
-  function enqueue(repo: string, sha: string): boolean {
+  function enqueue(repo: string, sha: string, measure: boolean): boolean {
     const key = `${repo}@${sha}`;
     if (pending.has(key)) return false;
     pending.add(key);
-    queue.push({ repo, sha });
+    queue.push({ repo, sha, measure });
     void pump();
     return true;
   }
@@ -263,18 +363,22 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
 
   async function ensureMeasured(repo: string, requestedSha?: string): Promise<EnsureMeasuredResult> {
     const settings = deps.readSettings();
-    if (!settings.repos.includes(repo)) return { status: "ignored", reason: "repo-not-configured", repo };
+    const rejection = repoRejection(settings, repo);
+    if (rejection) return { status: "ignored", reason: rejection, repo };
     const sha = requestedSha ?? await resolveMain(repo);
     if (!sha) return { status: "unavailable", reason: "main-unavailable", repo };
-    if (!INPUT_SHA.test(sha)) return { status: "unavailable", reason: "invalid-sha", repo };
+    if (!CANONICAL_SHA.test(sha)) return { status: "unavailable", reason: "invalid-sha", repo };
     const cached = deps.store.readMeasurement(repo, sha);
-    if (cached) return { status: "cached", measurement: cached };
+    if (cached) {
+      enqueue(repo, sha, false);
+      return { status: "cached", measurement: cached };
+    }
     const error = deps.store.readError(repo, sha);
     const errorAge = error ? now() - error.at : -1;
     if (errorAge >= 0 && errorAge < 60 * 60_000) {
       return { status: "suppressed", reason: "recent-error", repo, sha };
     }
-    return enqueue(repo, sha)
+    return enqueue(repo, sha, true)
       ? { status: "queued", repo, sha }
       : { status: "queued", repo, sha, deduplicated: true };
   }
@@ -282,7 +386,12 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
   async function discover(): Promise<void> {
     const settings = deps.readSettings();
     if (!settings.enabled) return;
-    for (const repo of settings.repos) await ensureMeasured(repo);
+    for (const repo of settings.repos) {
+      if (!repoRejection(settings, repo)) {
+        launchAuxiliary(`heartbeat:${repo}`, () => deps.incidents.heartbeatOwner(repo));
+      }
+      await ensureMeasured(repo);
+    }
   }
 
   function tick(): Promise<void> {
@@ -302,15 +411,17 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
   }
 
   function start(): void {
-    if (interval !== undefined) return;
+    if (started) return;
     const settings = deps.readSettings();
     if (!settings.enabled) return;
-    void tick();
     interval = timers.setInterval(() => { void tick(); }, settings.intervalMin * 60_000);
+    started = true;
+    void tick();
   }
 
   function stop(): void {
-    if (interval === undefined) return;
+    if (!started) return;
+    started = false;
     timers.clearInterval(interval);
     interval = undefined;
   }

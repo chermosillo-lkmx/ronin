@@ -4,6 +4,7 @@ import type { Incident, OpenIncidentInput } from "./incident.js";
 import type { MainHealthAttribution } from "./attribution.js";
 import type { MainHealthError, MainHealthMeasurement } from "./store.js";
 import { createMainHealthWatcher } from "./watcher.js";
+import * as watcherModule from "./watcher.js";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
@@ -74,6 +75,7 @@ function noopIncidents() {
   return {
     readIncident: (_repo: string): Incident | null => null,
     openIncident: (_input: OpenIncidentInput): Incident => { throw new Error("open inesperado"); },
+    heartbeatOwner: async (_repo: string) => false,
     ensureFixer: async (_repo: string, _repoDir: string) => ({ status: "disabled" as const, session: null }),
     closeIncident: async (_repo: string, _repoDir?: string): Promise<Incident | null> => null,
   };
@@ -163,6 +165,57 @@ test("la ventana del error reciente usa el reloj inyectado y el error leído del
   await watcher.idle();
 });
 
+test("ensureMeasured respeta disabled/veto app y rechaza SHA no canónico", async () => {
+  let gitCalls = 0;
+  let measures = 0;
+  const disabled = baseDeps(["repo"]);
+  disabled.readSettings = () => baseSettings(["repo"], { enabled: false });
+  disabled.git.lsRemoteMain = async () => { gitCalls += 1; return SHA_A; };
+  disabled.measure = async () => { measures += 1; };
+  assert.deepEqual(await createMainHealthWatcher(disabled).ensureMeasured("repo"), {
+    status: "ignored", reason: "disabled", repo: "repo",
+  });
+
+  const deps = baseDeps(["repo", "ant-liebre-app"]);
+  deps.git.lsRemoteMain = async () => { gitCalls += 1; return SHA_A.toUpperCase(); };
+  deps.measure = async () => { measures += 1; };
+  const watcher = createMainHealthWatcher(deps);
+  assert.deepEqual(await watcher.ensureMeasured("ant-liebre-app", SHA_A), {
+    status: "ignored", reason: "repo-vetoed", repo: "ant-liebre-app",
+  });
+  for (const sha of [SHA_A.slice(0, 7), SHA_A.toUpperCase()]) {
+    assert.deepEqual(await watcher.ensureMeasured("repo", sha), {
+      status: "unavailable", reason: "invalid-sha", repo: "repo",
+    });
+  }
+  assert.deepEqual(await watcher.ensureMeasured("repo"), {
+    status: "unavailable", reason: "invalid-sha", repo: "repo",
+  });
+  assert.equal(gitCalls, 1, "disabled y veto no consultan Git");
+  assert.equal(measures, 0);
+});
+
+test("evaluate veta entradas deshabilitadas, inseguras, app, repo cruzado y SHA no canónico", async () => {
+  const deps = baseDeps(["repo", "a..b", "ant-liebre-app"]);
+  let paths = 0;
+  let attributions = 0;
+  deps.repoDir = (root, repo) => { paths += 1; return `${root}/${repo}`; };
+  deps.attribute = async ({ red }) => { attributions += 1; return attribution(red); };
+  const watcher = createMainHealthWatcher(deps);
+
+  const disabled = baseDeps(["repo"]);
+  disabled.readSettings = () => baseSettings(["repo"], { enabled: false });
+  await createMainHealthWatcher(disabled).evaluate("repo", measurement("repo", SHA_A, "red"));
+  await watcher.evaluate("a..b", measurement("a..b", SHA_A, "red"));
+  await watcher.evaluate("ant-liebre-app", measurement("ant-liebre-app", SHA_A, "red"));
+  await watcher.evaluate("repo", measurement("otro", SHA_A, "red"));
+  await watcher.evaluate("repo", measurement("repo", SHA_A.slice(0, 7), "red"));
+  await watcher.evaluate("repo", measurement("repo", SHA_A.toUpperCase(), "red"));
+
+  assert.equal(paths, 0);
+  assert.equal(attributions, 0);
+});
+
 test("cola global es serie, deduplica repo+sha y continúa tras error de medición", async () => {
   const store = memoryStore();
   const deps = baseDeps(["alpha", "beta"], store);
@@ -202,6 +255,115 @@ test("cola global es serie, deduplica repo+sha y continúa tras error de medici�
   assert.ok(store.measurements.has(`beta@${SHA_B}`), "el trabajo siguiente sí terminó");
 });
 
+test("timeout termina el grupo TERM→gracia→KILL y la cola espera close antes del siguiente job", async () => {
+  type Listener = (error?: Error) => void;
+  const children: Array<{
+    pid: number;
+    listeners: { error?: Listener; close?: Listener };
+    once(event: "error" | "close", listener: Listener): void;
+    kill(signal: string): boolean;
+    close(): void;
+  }> = [];
+  const spawnOptions: Array<{ detached?: boolean }> = [];
+  const timers: Array<{ callback: () => void; ms: number; active: boolean }> = [];
+  const kills: string[] = [];
+  const factory = (watcherModule as Record<string, unknown>).createMainHealthMeasurementRunner;
+  assert.equal(typeof factory, "function", "debe exponer runner con spawn/timers inyectables");
+  const measure = (factory as (deps: unknown) => (input: unknown) => Promise<void>)({
+    platform: "darwin",
+    graceMs: 50,
+    spawnProcess: (_command: string, _args: string[], options: { detached?: boolean }) => {
+      spawnOptions.push(options);
+      const child = {
+        pid: 100 + children.length,
+        listeners: {} as { error?: Listener; close?: Listener },
+        once(event: "error" | "close", listener: Listener) { this.listeners[event] = listener; },
+        kill: (_signal: string) => true,
+        close() { this.listeners.close?.(); },
+      };
+      children.push(child);
+      return child;
+    },
+    killProcessGroup: (child: { pid: number }, signal: string) => { kills.push(`${child.pid}:${signal}`); },
+    timers: {
+      setTimeout: (callback: () => void, ms: number) => {
+        const timer = { callback, ms, active: true };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimeout: (timer: { active: boolean }) => { timer.active = false; },
+    },
+  });
+  const deps = baseDeps(["alpha", "beta"]);
+  deps.measure = measure;
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.ensureMeasured("alpha", SHA_A);
+  await watcher.ensureMeasured("beta", SHA_B);
+  assert.equal(children.length, 1);
+  assert.equal(spawnOptions[0]!.detached, true);
+  assert.equal(timers[0]!.ms, 123_000);
+
+  timers[0]!.callback();
+  assert.deepEqual(kills, ["100:SIGTERM"]);
+  assert.equal(children.length, 1, "TERM no libera la cola antes de close");
+  assert.equal(timers[1]!.ms, 50);
+  timers[1]!.callback();
+  assert.deepEqual(kills, ["100:SIGTERM", "100:SIGKILL"]);
+  assert.equal(children.length, 1, "KILL tampoco libera hasta close");
+
+  children[0]!.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(children.length, 2, "el siguiente job empieza sólo tras close");
+  children[1]!.close();
+  await watcher.idle();
+});
+
+test("cache hit se reconcilia en la cola sin medir y recupera apertura/cierre", async () => {
+  const store = memoryStore();
+  store.measurements.set(`repo@${SHA_A}`, measurement("repo", SHA_A, "red"));
+  store.measurements.set(`repo@${SHA_B}`, measurement("repo", SHA_B, "green"));
+  const deps = baseDeps(["repo"], store);
+  let current: Incident | null = null;
+  let measures = 0;
+  let opens = 0;
+  let closes = 0;
+  const notified: string[] = [];
+  deps.measure = async () => { measures += 1; };
+  deps.incidents = {
+    readIncident: () => current,
+    openIncident: (input) => {
+      opens += 1;
+      current = { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+      return current;
+    },
+    heartbeatOwner: async () => false,
+    ensureFixer: async () => ({ status: "disabled" as const, session: null }),
+    closeIncident: async () => {
+      closes += 1;
+      const closed = current ? { ...current, closedAt: 2 } : null;
+      current = null;
+      return closed;
+    },
+  };
+  deps.notifier = {
+    opened: async () => { notified.push("open"); },
+    closed: async () => { notified.push("close"); },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  assert.equal((await watcher.ensureMeasured("repo", SHA_A)).status, "cached");
+  await watcher.idle();
+  assert.equal(opens, 1);
+  assert.equal(current?.firstRedSha, SHA_A);
+  assert.equal((await watcher.ensureMeasured("repo", SHA_B)).status, "cached");
+  await watcher.idle();
+
+  assert.equal(measures, 0);
+  assert.equal(closes, 1);
+  assert.deepEqual(notified, ["open", "close"]);
+});
+
 test("evaluate abre una vez, delega fixer, respeta commentOnPr=false y luego cierra", async () => {
   const store = memoryStore();
   const deps = baseDeps(["repo"], store);
@@ -218,6 +380,7 @@ test("evaluate abre una vez, delega fixer, respeta commentOnPr=false y luego cie
       current = { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
       return current;
     },
+    heartbeatOwner: async () => false,
     ensureFixer: async () => { fixer += 1; return { status: "adopted" as const, session: "cowork-main-health-repo" }; },
     closeIncident: async () => {
       closes += 1;
@@ -241,7 +404,7 @@ test("evaluate abre una vez, delega fixer, respeta commentOnPr=false y luego cie
   await watcher.evaluate("repo", measurement("repo", SHA_C, "green"));
 
   assert.equal(opens, 1);
-  assert.equal(fixer, 1, "adoptar/lanzar queda delegado al manager");
+  assert.equal(fixer, 2, "cada rojo reconciliado reintenta adoptar/lanzar vía manager");
   assert.equal(comments, 0);
   assert.equal(closes, 1);
   assert.deepEqual(notifications, [`open:repo@${SHA_A.slice(0, 7)}`, `close:repo@${SHA_A.slice(0, 7)}`]);
@@ -261,6 +424,7 @@ test("fallos de notify, comentario y fixer no rompen evaluación ni la cola", as
       opened.push(input.repo);
       return value;
     },
+    heartbeatOwner: async () => false,
     ensureFixer: async () => { throw new Error("fixer caído"); },
     closeIncident: async () => null,
   };
@@ -280,6 +444,156 @@ test("fallos de notify, comentario y fixer no rompen evaluación ni la cola", as
   assert.deepEqual(opened, ["alpha", "beta"]);
 });
 
+test("auxiliares colgados no bloquean core ni idle y se deduplican mientras siguen pendientes", async () => {
+  const store = memoryStore();
+  const deps = baseDeps(["alpha", "beta"], store);
+  deps.readSettings = () => baseSettings(["alpha", "beta"], { commentOnPr: true });
+  const betaIncident: Incident = {
+    id: `beta@${SHA_B.slice(0, 7)}`,
+    repo: "beta",
+    firstRedSha: SHA_B,
+    openedAt: 1,
+    summary: "rojo",
+    attribution: attribution(measurement("beta", SHA_B, "red")),
+  };
+  const incidents = new Map<string, Incident>([["beta", betaIncident]]);
+  let closes = 0;
+  let notifyCalls = 0;
+  let commentCalls = 0;
+  let fixerCalls = 0;
+  let notifyStarted!: () => void;
+  const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+  const never = new Promise<never>(() => undefined);
+  deps.incidents = {
+    readIncident: (repo) => incidents.get(repo) ?? null,
+    openIncident: (input) => {
+      const value: Incident = { id: `${input.repo}@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+      incidents.set(input.repo, value);
+      return value;
+    },
+    heartbeatOwner: async () => false,
+    ensureFixer: async () => { fixerCalls += 1; return never; },
+    closeIncident: async (repo) => {
+      closes += 1;
+      const value = incidents.get(repo) ?? null;
+      incidents.delete(repo);
+      return value;
+    },
+  };
+  deps.notifier = {
+    opened: async () => { notifyCalls += 1; notifyStarted(); return never; },
+    closed: async () => never,
+  };
+  deps.commentPullRequest = async () => { commentCalls += 1; return never; };
+  deps.measure = async ({ args }: { args: string[] }) => {
+    const repo = args[0]!;
+    const sha = args[2]!;
+    store.measurements.set(`${repo}@${sha}`, measurement(repo, sha, repo === "alpha" ? "red" : "green"));
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.ensureMeasured("alpha", SHA_A);
+  await watcher.ensureMeasured("beta", SHA_B);
+  const idle = watcher.idle();
+  await started;
+  let idleDone = false;
+  void idle.then(() => { idleDone = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(idleDone, true, "idle no incluye auxiliares");
+  assert.equal(closes, 1, "el close core siguiente sí se ejecutó");
+  assert.equal(notifyCalls, 1);
+  assert.equal(commentCalls, 1);
+  assert.equal(fixerCalls, 1);
+  await watcher.evaluate("alpha", measurement("alpha", SHA_A, "red"));
+  assert.equal(fixerCalls, 1, "un auxiliar pendiente no se duplica");
+});
+
+test("tick heartbeat autorizado no se solapa y auxiliares fallidos se reintentan", async () => {
+  const store = memoryStore();
+  store.measurements.set(`alpha@${SHA_A}`, measurement("alpha", SHA_A, "red"));
+  store.measurements.set(`beta@${SHA_B}`, measurement("beta", SHA_B, "green"));
+  const deps = baseDeps(["alpha", "beta", "ant-liebre-app"], store);
+  deps.git.lsRemoteMain = async (repoDir) => repoDir.endsWith("/alpha") ? SHA_A : repoDir.endsWith("/beta") ? SHA_B : SHA_C;
+  const current: Incident = {
+    id: `alpha@${SHA_A.slice(0, 7)}`,
+    repo: "alpha",
+    firstRedSha: SHA_A,
+    openedAt: 1,
+    summary: "rojo",
+    attribution: attribution(measurement("alpha", SHA_A, "red")),
+  };
+  const heartbeats: string[] = [];
+  let fixerCalls = 0;
+  const heartbeatNever = new Promise<never>(() => undefined);
+  deps.incidents = {
+    readIncident: (repo) => repo === "alpha" ? current : null,
+    openIncident: () => { throw new Error("no debe abrir"); },
+    heartbeatOwner: async (repo: string) => {
+      heartbeats.push(repo);
+      if (repo === "alpha") return heartbeatNever;
+      throw new Error("heartbeat roto");
+    },
+    ensureFixer: async () => { fixerCalls += 1; throw new Error("fixer roto"); },
+    closeIncident: async () => null,
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.tick();
+  await watcher.idle();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(heartbeats, ["alpha", "beta"]);
+  assert.equal(fixerCalls, 1);
+
+  await watcher.tick();
+  await watcher.idle();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(heartbeats, ["alpha", "beta", "beta"], "alpha pendiente no solapa; beta fallido reintenta");
+  assert.equal(fixerCalls, 2, "fixer fallido libera su clave para retry");
+});
+
+test("evaluate serializa dos cierres concurrentes y sólo uno ejecuta close", async () => {
+  const deps = baseDeps(["repo"]);
+  let current: Incident | null = {
+    id: `repo@${SHA_A.slice(0, 7)}`,
+    repo: "repo",
+    firstRedSha: SHA_A,
+    openedAt: 1,
+    summary: "rojo",
+    attribution: attribution(measurement("repo", SHA_A, "red")),
+  };
+  let closeCalls = 0;
+  let closeStarted!: () => void;
+  let releaseClose!: () => void;
+  const started = new Promise<void>((resolve) => { closeStarted = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseClose = resolve; });
+  deps.incidents = {
+    readIncident: () => current,
+    openIncident: () => { throw new Error("no debe abrir"); },
+    heartbeatOwner: async () => false,
+    ensureFixer: async () => ({ status: "disabled" as const, session: null }),
+    closeIncident: async () => {
+      closeCalls += 1;
+      closeStarted();
+      await gate;
+      const value = current;
+      current = null;
+      return value;
+    },
+  };
+  const watcher = createMainHealthWatcher(deps);
+  const green = measurement("repo", SHA_B, "green");
+
+  const first = watcher.evaluate("repo", green);
+  const second = watcher.evaluate("repo", green);
+  await started;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(closeCalls, 1);
+  releaseClose();
+  await Promise.all([first, second]);
+  assert.equal(closeCalls, 1);
+});
+
 test("start con enabled=false no hace tick ni instala interval; ticks activos no se solapan", async () => {
   const disabled = baseDeps(["repo"]);
   disabled.readSettings = () => baseSettings(["repo"], { enabled: false });
@@ -297,6 +611,8 @@ test("start con enabled=false no hace tick ni instala interval; ticks activos no
 
   const enabled = baseDeps(["repo"]);
   let callback!: () => void;
+  let installs = 0;
+  let clears = 0;
   let active = 0;
   let maxActive = 0;
   let release!: () => void;
@@ -309,11 +625,18 @@ test("start con enabled=false no hace tick ni instala interval; ticks activos no
     return SHA_A;
   };
   enabled.timers = {
-    setInterval: (fn: () => void, ms: number) => { callback = fn; assert.equal(ms, 600_000); return 2; },
-    clearInterval: (_handle: unknown) => undefined,
+    setInterval: (fn: () => void, ms: number) => {
+      installs += 1;
+      callback = fn;
+      assert.equal(ms, 600_000);
+      return undefined;
+    },
+    clearInterval: (_handle: unknown) => { clears += 1; },
   };
   const on = createMainHealthWatcher(enabled);
   on.start();
+  on.start();
+  assert.equal(installs, 1, "start idempotente aunque el handle sea undefined");
   callback();
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(active, 1);
@@ -321,4 +644,10 @@ test("start con enabled=false no hace tick ni instala interval; ticks activos no
   await on.idle();
   assert.equal(maxActive, 1);
   on.stop();
+  on.stop();
+  assert.equal(clears, 1, "stop elimina una sola vez el intervalo activo");
+  on.start();
+  assert.equal(installs, 2, "puede arrancar otra vez tras stop");
+  on.stop();
+  assert.equal(clears, 2);
 });
