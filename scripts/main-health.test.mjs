@@ -183,6 +183,40 @@ test("main-health espera un lock vivo hasta que aparece su JSON", async (t) => {
   assert.equal(existsSync(fx.marker), false, output);
 });
 
+test("main-health no roba un lock mientras su dueño todavía publica el PID", async (t) => {
+  const fx = fixture(t);
+  mkdirSync(fx.lockPath, { recursive: true });
+  const fakeBin = join(fx.root, "fake-bin");
+  const signal = join(fx.root, "primer-cat-pid");
+  const realCat = sh("bash", ["-c", "command -v cat"]);
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(fakeBin, "cat"),
+    `#!/bin/bash\nif [ "$1" = "$FAKE_LOCK_PID" ] && [ ! -f "$FAKE_CAT_SIGNAL" ]; then : > "$FAKE_CAT_SIGNAL"; exit 0; fi\n` +
+    `exec "${realCat}" "$@"\n`);
+  chmodSync(join(fakeBin, "cat"), 0o755);
+  const child = fx.spawnRun({
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    FAKE_LOCK_PID: join(fx.lockPath, "pid"),
+    FAKE_CAT_SIGNAL: signal,
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  const deadline = Date.now() + 2000;
+  while (!existsSync(signal) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(existsSync(signal), true, output);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  const survived = existsSync(fx.lockPath);
+  if (survived) {
+    writeFileSync(join(fx.lockPath, "pid"), `${process.pid}\n`);
+    writeFileSync(fx.jsonPath, JSON.stringify({ sha: fx.sha, status: "green" }) + "\n");
+  }
+  await closed;
+  assert.equal(survived, true, `se robó el lock durante su inicialización\n${output}`);
+  assert.equal(existsSync(fx.marker), false, output);
+});
+
 test("main-health roba un lock cuyo PID murió", (t) => {
   const fx = fixture(t);
   fx.setJunit(passingCases);

@@ -16,6 +16,8 @@ health_root="${MAIN_HEALTH_DIR:-$HOME/.cowork/main-health}"
 source_repo="$repo_root/$repo"
 poll="${MAIN_HEALTH_POLL:-15}"
 [[ "$poll" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || poll=15
+lock_grace="${MAIN_HEALTH_LOCK_GRACE:-0.1}"
+[[ "$lock_grace" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || lock_grace=0.1
 [ -d "$source_repo/.git" ] || { printf 'main-health: no existe el repo %s\n' "$source_repo" >&2; exit 2; }
 
 git -C "$source_repo" fetch -q origin main || { printf 'main-health: falló git fetch origin main en %s\n' "$repo" >&2; exit 2; }
@@ -58,7 +60,16 @@ while ! mkdir "$lock" 2>/dev/null; do
     sleep "$poll"
     continue
   fi
+  # mkdir es atómico, pero el dueño necesita un instante para publicar pid. Un lock todavía
+  # vacío sólo se considera abandonado si sigue idéntico después de la gracia de inicialización.
+  if ! [[ "$owner" =~ ^[1-9][0-9]*$ ]]; then
+    sleep "$lock_grace"
+    [ -f "$json" ] && { print_cached; exit $?; }
+  fi
   current="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [[ "$current" =~ ^[1-9][0-9]*$ ]] && kill -0 "$current" 2>/dev/null; then
+    continue
+  fi
   if [ "$current" = "$owner" ]; then
     stale="$lock.stale.$$.$RANDOM"
     if mv "$lock" "$stale" 2>/dev/null; then
@@ -66,7 +77,8 @@ while ! mkdir "$lock" 2>/dev/null; do
     fi
   fi
 done
-printf '%s\n' "$$" > "$lock/pid"
+printf '%s\n' "$$" > "$lock/.pid.$$"
+mv "$lock/.pid.$$" "$lock/pid"
 owns_lock=1
 
 cleanup() {
