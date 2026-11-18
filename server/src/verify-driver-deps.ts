@@ -51,7 +51,7 @@ export function gateConfigFrom(global: GateSettings, repo: RepoGate): { timeoutM
       UNIT_GATE_REPORTS_DIR: GATE_REPORTS_DIR,
       UNIT_GATE_MAX_SUITES: String(global.maxConcurrent),
       ...(repo.xdist ? { UNIT_GATE_XDIST: String(repo.xdist) } : {}),
-      ...(repo.realPg === true ? { UNIT_GATE_REAL_PG: "1" } : {}),
+      UNIT_GATE_REAL_PG: repo.realPg === true ? "1" : "0",
     },
   };
 }
