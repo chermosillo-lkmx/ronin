@@ -159,12 +159,12 @@ async function commitDiff(git: GitPort, repoDir: string, sha: string): Promise<{
   files: string[];
   addedLinesByFile: Map<string, number[]>;
 }> {
-  let parent: string | null = null;
-  try {
-    parent = (await git.run(["rev-parse", "--verify", `${sha}^1`], repoDir)).trim();
-  } catch {
-    // Un commit raíz no tiene ^1.
+  const parentLine = (await git.run(["rev-list", "--parents", "-n1", sha], repoDir)).trim();
+  const commitAndParents = parentLine.split(/\s+/).filter(Boolean);
+  if (commitAndParents.length === 0 || commitAndParents[0].toLowerCase() !== sha.toLowerCase()) {
+    throw new Error(`respuesta inválida al consultar parents de ${sha}`);
   }
+  const parent = commitAndParents[1] ?? null;
   if (parent) {
     const fileOutput = await git.run(["diff", "--name-only", "-z", "--no-renames", parent, sha, "--"], repoDir);
     const files = nulPaths(fileOutput);

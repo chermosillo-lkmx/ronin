@@ -310,6 +310,68 @@ test("attribution rechaza un SHA con aspecto de opción antes de invocar git", a
   assert.equal(called, false);
 });
 
+test("attribution propaga un fallo al consultar parents en vez de tratarlo como root", async () => {
+  const greenSha = "a".repeat(40);
+  const redSha = "b".repeat(40);
+  const port: GitPort = {
+    run: async (args) => {
+      if (args[0] === "rev-list" && args.includes("--reverse")) return `${redSha}\n`;
+      if (args[0] === "rev-list" && args.includes("--parents")) throw new Error("falló consulta de parents");
+      if (args[0] === "rev-list") return `${redSha}\n${greenSha}\n`;
+      if (args[0] === "show") return "Ada Tester\0ada@example.com\0feat: cambio\n";
+      if (args[0] === "rev-parse") throw new Error("falló consulta de parents");
+      if (args[0] === "diff-tree") return "";
+      throw new Error(`comando inesperado: ${args.join(" ")}`);
+    },
+  };
+
+  await assert.rejects(
+    () => attributeMainHealth({
+      repoDir: "/repo",
+      red: measurement(redSha, "red"),
+      measurements: [measurement(greenSha, "green")],
+    }, port),
+    /falló consulta de parents/,
+  );
+});
+
+test("attribution obtiene el diff de un commit raíz real sin confundirlo con un error Git", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cowork-main-health-root-"));
+  const repoDir = join(root, "repo");
+  mkdirSync(repoDir, { recursive: true });
+  try {
+    git(repoDir, "init", "-b", "main");
+    git(repoDir, "config", "user.name", "Ada Tester");
+    git(repoDir, "config", "user.email", "ada@example.com");
+    writeFileSync(join(repoDir, "root.txt"), "primera línea\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-m", "feat: commit raíz");
+    const redSha = git(repoDir, "rev-parse", "HEAD");
+    const syntheticGreenSha = "a".repeat(40);
+    const port: GitPort = {
+      run: async (args, cwd) => {
+        if (args[0] === "rev-list" && args.includes("--parents")) {
+          return execFileSync("git", args, { cwd, encoding: "utf8" });
+        }
+        if (args[0] === "rev-list" && args.includes("--reverse")) return `${redSha}\n`;
+        if (args[0] === "rev-list" && args.includes("--first-parent")) return `${redSha}\n${syntheticGreenSha}\n`;
+        return execFileSync("git", args, { cwd, encoding: "utf8" });
+      },
+    };
+
+    const report = await attributeMainHealth({
+      repoDir,
+      red: measurement(redSha, "red"),
+      measurements: [measurement(syntheticGreenSha, "green")],
+    }, port);
+
+    assert.deepEqual(report.commits[0].files, ["root.txt"]);
+    assert.deepEqual(report.commits[0].addedLinesByFile, { "root.txt": [1] });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("parsePullRequest reconoce el sufijo squash (#N)", () => {
   assert.equal(parsePullRequest("feat: entregar salud (#73)\n\nCo-Authored-By: Pair <pair@example.com>"), 73);
 });
