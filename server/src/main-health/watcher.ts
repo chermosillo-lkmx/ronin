@@ -243,6 +243,8 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     cancelDeadline?: () => void;
   }
   const auxiliaryRuns = new Map<string, AuxiliaryRun>();
+  const activeAuxiliaryRuns = new Set<AuxiliaryRun>();
+  const auxiliaryEffects = new Set<Promise<void>>();
   interface NotificationTask {
     key: string;
     generation: number;
@@ -260,6 +262,8 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     queued: NotificationTask[];
   }
   const notificationLanes = new Map<string, NotificationLane>();
+  const activeNotificationRuns = new Set<NotificationRun>();
+  const notificationEffects = new Set<Promise<void>>();
   let pumping = false;
   let tickRun: Promise<void> | null = null;
   let evaluationTail: Promise<void> = Promise.resolve();
@@ -316,6 +320,7 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
         return;
       }
       run.started = true;
+      activeAuxiliaryRuns.add(run);
       run.cancelDeadline = scheduleAuxiliaryDeadline(() => {
         if (auxiliaryRuns.get(key) === run) {
           run.controller.abort();
@@ -328,13 +333,21 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
       } catch (error) {
         log(error);
         run.cancelDeadline();
+        activeAuxiliaryRuns.delete(run);
         if (auxiliaryRuns.get(key) === run) auxiliaryRuns.delete(key);
         return;
       }
-      void result.catch(log).finally(() => {
+      const terminal = result.then(
+        () => undefined,
+        (error) => { log(error); },
+      ).finally(() => {
         run.cancelDeadline?.();
+        activeAuxiliaryRuns.delete(run);
+        auxiliaryEffects.delete(terminal);
         if (auxiliaryRuns.get(key) === run) auxiliaryRuns.delete(key);
       });
+      auxiliaryEffects.add(terminal);
+      void terminal;
     });
   }
 
@@ -374,11 +387,13 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
       controller: new AbortController(),
     };
     lane.running = run;
+    activeNotificationRuns.add(run);
     let result: Promise<unknown>;
     try {
       result = Promise.resolve(task.effect(run.controller.signal));
     } catch (error) {
       log(error);
+      activeNotificationRuns.delete(run);
       finishNotification(repo, lane, run);
       return;
     }
@@ -395,9 +410,16 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
         finishNotification(repo, lane, run);
       }
     }
-    void result.catch(log).finally(() => {
+    const terminal = result.then(
+      () => undefined,
+      (error) => { log(error); },
+    ).finally(() => {
+      activeNotificationRuns.delete(run);
+      notificationEffects.delete(terminal);
       finishNotification(repo, lane, run);
     });
+    notificationEffects.add(terminal);
+    void terminal;
   }
 
   function enqueueNotification(repo: string, key: string, effect: (signal: AbortSignal) => Promise<unknown>): void {
@@ -661,13 +683,22 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
       run.cancelDeadline?.();
       run.controller.abort();
     }
+    for (const run of activeAuxiliaryRuns) {
+      run.cancelDeadline?.();
+      run.controller.abort();
+    }
     auxiliaryRuns.clear();
     for (const lane of notificationLanes.values()) {
       lane.queued.length = 0;
       lane.running?.cancelDeadline?.();
       lane.running?.controller.abort();
     }
+    for (const run of activeNotificationRuns) {
+      run.cancelDeadline?.();
+      run.controller.abort();
+    }
     notificationLanes.clear();
+    const externalEffects = [...auxiliaryEffects, ...notificationEffects];
     queue.length = 0;
     pending.clear();
     activeMeasurement?.controller.abort();
@@ -683,6 +714,7 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
       if (activeTick) await activeTick.catch(log);
       await waitForPump();
       await evaluationTail.catch(log);
+      await Promise.allSettled(externalEffects);
     })();
     const run = draining.finally(() => {
       if (stopRun !== run) return;

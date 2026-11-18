@@ -761,7 +761,8 @@ test("timer heartbeat autorizado no se solapa y auxiliares fallidos se reintenta
   };
   const heartbeats: string[] = [];
   let fixerCalls = 0;
-  const heartbeatNever = new Promise<never>(() => undefined);
+  let releaseHeartbeat!: () => void;
+  const heartbeatGate = new Promise<void>((resolve) => { releaseHeartbeat = resolve; });
   const intervals: Array<{ callback: () => void; ms: number }> = [];
   deps.readSettings = () => baseSettings(["alpha", "beta", "ant-liebre-app"], { intervalMin: 60 });
   deps.git.lsRemoteMain = async () => null;
@@ -778,7 +779,7 @@ test("timer heartbeat autorizado no se solapa y auxiliares fallidos se reintenta
     openIncident: () => { throw new Error("no debe abrir"); },
     heartbeatOwner: async (repo: string) => {
       heartbeats.push(repo);
-      if (repo === "alpha") return heartbeatNever;
+      if (repo === "alpha") return heartbeatGate.then(() => true);
       throw new Error("heartbeat roto");
     },
     ensureFixer: async () => { fixerCalls += 1; throw new Error("fixer roto"); },
@@ -799,7 +800,9 @@ test("timer heartbeat autorizado no se solapa y auxiliares fallidos se reintenta
   await watcher.evaluate("alpha", measurement("alpha", SHA_A, "red"));
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(fixerCalls, 2, "fixer fallido libera su clave para retry");
-  await watcher.stop();
+  const stopping = watcher.stop();
+  releaseHeartbeat();
+  await stopping;
 });
 
 test("evaluate serializa dos cierres concurrentes y sólo uno ejecuta close", async () => {
@@ -969,7 +972,7 @@ test("heartbeat usa cadencia menor al lease e independiente de la medición", as
   assert.equal(installed.filter(({ cleared }) => cleared).length, 2, "stop limpia ambos timers una vez");
 });
 
-test("heartbeat colgado libera dedupe al vencer y stop/restart no hereda la promesa", async () => {
+test("stop espera todos los heartbeat iniciados aunque el deadline haya liberado el dedupe", async () => {
   const deps = baseDeps(["repo"]);
   deps.readSettings = () => baseSettings(["repo"], { intervalMin: 60 });
   const intervals: Array<{ callback: () => void; ms: number }> = [];
@@ -993,8 +996,12 @@ test("heartbeat colgado libera dedupe al vencer y stop/restart no hereda la prom
     },
   });
   let calls = 0;
-  const never = new Promise<never>(() => undefined);
-  deps.incidents.heartbeatOwner = async () => { calls += 1; return never; };
+  const releases: Array<() => void> = [];
+  deps.incidents.heartbeatOwner = async () => {
+    calls += 1;
+    await new Promise<void>((resolve) => { releases.push(resolve); });
+    return true;
+  };
   deps.git.lsRemoteMain = async () => null;
   const watcher = createMainHealthWatcher(deps);
 
@@ -1007,10 +1014,68 @@ test("heartbeat colgado libera dedupe al vencer y stop/restart no hereda la prom
   heartbeatTimer.callback();
   assert.equal(calls, 2, "el deadline libera la clave aunque el efecto siga colgado");
 
-  await watcher.stop();
+  const stopping = watcher.stop();
+  let stopped = false;
+  void stopping.then(() => { stopped = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false, "stop conserva las dos ejecuciones terminales aunque ya no estén en dedupe");
+  releases[0]!();
+  await Promise.resolve();
+  assert.equal(stopped, false, "todavía espera el segundo heartbeat iniciado");
+  releases[1]!();
+  await stopping;
+
   watcher.start();
-  assert.equal(calls, 3, "la generación nueva no queda suprimida por promesas anteriores");
-  await watcher.stop();
+  assert.equal(calls, 3, "el restart sólo inicia una generación nueva después del drain anterior");
+  const restartedStop = watcher.stop();
+  releases[2]!();
+  await restartedStop;
+});
+
+test("stop espera un fixer iniciado que ignora abort antes de permitir restart", async () => {
+  const deps = baseDeps(["repo"]);
+  Object.assign(deps, {
+    scheduleAuxiliaryStart: (callback: () => void) => callback(),
+    scheduleAuxiliaryDeadline: () => () => undefined,
+  });
+  const current: Incident = {
+    id: `repo@${SHA_A.slice(0, 7)}`,
+    repo: "repo",
+    firstRedSha: SHA_A,
+    openedAt: 1,
+    summary: "rojo",
+    attribution: attribution(measurement("repo", SHA_A, "red")),
+  };
+  const releases: Array<() => void> = [];
+  let calls = 0;
+  deps.incidents = {
+    ...noopIncidents(),
+    readIncident: () => current,
+    ensureFixer: async () => {
+      calls += 1;
+      await new Promise<void>((resolve) => { releases.push(resolve); });
+    },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  assert.equal(calls, 1);
+  const stopping = watcher.stop();
+  let stopped = false;
+  void stopping.then(() => { stopped = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+  await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  assert.equal(calls, 1, "no inicia otra generación mientras stop drena la anterior");
+
+  releases[0]!();
+  await stopping;
+  watcher.start();
+  await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  assert.equal(calls, 2);
+  const restartedStop = watcher.stop();
+  releases[1]!();
+  await restartedStop;
 });
 
 test("close invalida fixer y comentario encolados antes de que inicien", async () => {
@@ -1047,7 +1112,7 @@ test("close invalida fixer y comentario encolados antes de que inicien", async (
   assert.equal(comments, 0);
 });
 
-test("stop aborta notify activo, descarta close y una promesa vieja no toca la lane reiniciada", async () => {
+test("stop aborta y espera notify activo antes de crear la lane reiniciada", async () => {
   const deps = baseDeps(["repo"]);
   const timers: Array<() => void> = [];
   deps.timers = {
@@ -1089,22 +1154,25 @@ test("stop aborta notify activo, descarta close y una promesa vieja no toca la l
   watcher.start();
   await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
   await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
-  await watcher.stop();
+  const stopping = watcher.stop();
   assert.equal(firstSignal?.aborted, true);
+  let stopped = false;
+  void stopping.then(() => { stopped = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false, "stop espera el notifier aunque ignore el abort");
+  watcher.start();
+  await watcher.evaluate("repo", measurement("repo", SHA_C, "red"));
+  assert.equal(events.includes(`open:repo@${SHA_C.slice(0, 7)}:start`), false, "no reinicia durante stop");
+
+  rejectFirst(new DOMException("cancelado", "AbortError"));
+  await stopping;
   watcher.start();
   await watcher.evaluate("repo", measurement("repo", SHA_C, "red"));
   assert.deepEqual(events, [
     `open:repo@${SHA_A.slice(0, 7)}:start`,
     `open:repo@${SHA_C.slice(0, 7)}:start`,
     `open:repo@${SHA_C.slice(0, 7)}:end`,
-  ], "restart crea una lane nueva sin esperar la promesa abortada");
-  rejectFirst(new DOMException("cancelado", "AbortError"));
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(events, [
-    `open:repo@${SHA_A.slice(0, 7)}:start`,
-    `open:repo@${SHA_C.slice(0, 7)}:start`,
-    `open:repo@${SHA_C.slice(0, 7)}:end`,
-  ]);
+  ], "restart crea una lane nueva sólo tras terminar la promesa vieja");
   await watcher.stop();
 });
 
