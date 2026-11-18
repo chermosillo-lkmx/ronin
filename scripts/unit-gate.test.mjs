@@ -1360,3 +1360,16 @@ test("65. UNIT_GATE_REAL_PG=1 exporta RUN_REAL_PG=1 a pytest", (t) => {
   assert.equal(r.code, 0, r.out);
   assert.equal(readFileSync(seen, "utf8"), "1");
 });
+
+test("66. RUN_REAL_PG heredado se limpia si UNIT_GATE_REAL_PG no es 1", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  for (const value of [undefined, "0"]) {
+    const seen = join(fx.tmp, `real-pg-${value ?? "ausente"}`);
+    const env = { ...withoutExtra, RUN_REAL_PG: "1", FAKE_REAL_PG: seen };
+    if (value !== undefined) env.UNIT_GATE_REAL_PG = value;
+    const r = fx.run(env);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(readFileSync(seen, "utf8"), "", `UNIT_GATE_REAL_PG=${value ?? "ausente"}`);
+  }
+});
