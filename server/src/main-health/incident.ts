@@ -11,7 +11,7 @@ import {
   writeSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { writeJsonAtomic } from "../atomic.js";
@@ -340,11 +340,13 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   }
 
   function mutexRecoveryGuard(repo: string, observed: OwnerMutex, previous?: OwnerMutex): string {
-    const base = `owner.mutex.recover-${observed.pid}-${observed.token}`;
-    return join(
-      incidentDir(repo),
-      previous ? `${base}.after-${previous.pid}-${previous.token}` : base,
-    );
+    const digest = (value: unknown) => createHash("sha256")
+      .update(JSON.stringify(value))
+      .digest("hex")
+      .slice(0, 24);
+    const observedHash = digest(observed);
+    const generationHash = previous ? digest({ observed, previous }) : "root";
+    return join(incidentDir(repo), `owner.mutex.recover-${observedHash}-${generationHash}`);
   }
 
   /** Prepara JSON completo fuera del destino y lo publica con link(2) exclusivo. */
@@ -424,7 +426,11 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
 
     let guardPath = mutexRecoveryGuard(repo, occupied);
     const candidateGuard: OwnerRecoveryGuard = { observed: occupied, recovery: candidate };
-    for (let generation = 0; generation < 8; generation += 1) {
+    const visitedPaths = new Set<string>();
+    const visitedRecoveries = new Set<string>();
+    while (true) {
+      if (visitedPaths.has(guardPath)) throw new Error("ciclo detectado en guards de recovery");
+      visitedPaths.add(guardPath);
       if (publishRecoveryGuard(guardPath, candidateGuard)) {
         const confirmed = readOwnerMutex(repo);
         if (!confirmed
@@ -442,11 +448,21 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
       const previous = readRecoveryGuard(guardPath);
       if (!previous
         || previous.observed.token !== occupied.token
-        || previous.observed.pid !== occupied.pid
-        || pidAlive(previous.recovery.pid)) return null;
+        || previous.observed.pid !== occupied.pid) {
+        throw new Error(`guard de recovery corrupto: ${guardPath}`);
+      }
+      const confirmed = readOwnerMutex(repo);
+      if (!confirmed
+        || confirmed.token !== occupied.token
+        || confirmed.pid !== occupied.pid) return null;
+      const recoveryIdentity = `${previous.recovery.pid}:${previous.recovery.token}`;
+      if (visitedRecoveries.has(recoveryIdentity)) {
+        throw new Error("ciclo detectado en identidades de recovery");
+      }
+      visitedRecoveries.add(recoveryIdentity);
+      if (previous.recovery.pid !== candidate.pid && pidAlive(previous.recovery.pid)) return null;
       guardPath = mutexRecoveryGuard(repo, occupied, previous.recovery);
     }
-    return null;
   }
 
   function writeOwnerExclusive(repo: string, owner: IncidentOwner): void {

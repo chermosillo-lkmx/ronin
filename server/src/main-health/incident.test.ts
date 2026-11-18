@@ -41,6 +41,12 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
+function recoveryGuards(directory: string): string[] {
+  return readdirSync(directory)
+    .filter((name) => name.startsWith("owner.mutex.recover-") && !name.includes(".tmp-"))
+    .map((name) => join(directory, name));
+}
+
 test("abre un solo incidente rojo, lo lee y lo lista", () => {
   withRoot((root) => {
     let now = 1_700_000_000_000;
@@ -258,7 +264,7 @@ test("recupera mutex de owner cuando su PID ya no vive", () => {
     assert.equal(result.acquired, true);
     assert.equal(result.owner?.session, "cowork-nuevo");
     assert.equal(existsSync(join(directory, "owner.mutex.json")), false);
-    assert.equal(existsSync(join(directory, "owner.mutex.recover-999-token-muerto")), true);
+    assert.equal(recoveryGuards(directory).length, 1);
   });
 });
 
@@ -290,7 +296,7 @@ test("guard de recovery impide que un loser retire el mutex vivo instalado por e
       mutexToken: () => "token-b-22222222",
       fs: {
         link(source, target) {
-          if (!interleaved && target === join(directory, "owner.mutex.recover-999-token-muerto")) {
+          if (!interleaved && String(target).includes("owner.mutex.recover-") && !String(target).includes(".tmp-")) {
             interleaved = true;
             // B ya leyó el mutex muerto. A gana recovery completo antes de que B continúe.
             resultA = contenderA.claimOwner("api", "cowork-a");
@@ -307,7 +313,7 @@ test("guard de recovery impide que un loser retire el mutex vivo instalado por e
     assert.equal(contenderA.readOwner("api")?.session, "cowork-a");
     assert.equal(contenderB.claimOwner("api", "cowork-b").acquired, false);
     assert.equal(contenderA.readOwner("api")?.session, "cowork-a");
-    assert.equal(existsSync(join(directory, "owner.mutex.recover-999-token-muerto")), true);
+    assert.equal(recoveryGuards(directory).length, 1);
   });
 });
 
@@ -315,8 +321,6 @@ test("encadena guard generacional si el recuperador anterior muere antes de reem
   withRoot((root) => {
     const directory = join(root, "incidents", "api");
     const mutex = join(directory, "owner.mutex.json");
-    const baseGuard = join(directory, "owner.mutex.recover-999-token-muerto");
-    const childGuard = join(directory, "owner.mutex.recover-999-token-muerto.after-88-token-recuperador-8888");
     const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
     original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
     original.claimOwner("api", "cowork-viejo");
@@ -341,6 +345,7 @@ test("encadena guard generacional si el recuperador anterior muere antes de reem
       () => dyingRecovery.claimOwner("api", "cowork-no-llega"),
       /recuperador murió antes de reemplazar/,
     );
+    const baseGuard = recoveryGuards(directory)[0];
     assert.deepEqual(JSON.parse(readFileSync(baseGuard, "utf8")), {
       observed: { pid: 999, token: "token-muerto" },
       recovery: { pid: 88, token: "token-recuperador-8888" },
@@ -359,10 +364,93 @@ test("encadena guard generacional si el recuperador anterior muere antes de reem
 
     assert.equal(result.acquired, true);
     assert.equal(result.owner?.session, "cowork-recuperado");
+    const childGuard = recoveryGuards(directory)
+      .find((target) => JSON.parse(readFileSync(target, "utf8")).recovery.pid === 99);
+    assert.ok(childGuard);
     assert.deepEqual(JSON.parse(readFileSync(childGuard, "utf8")), {
       observed: { pid: 999, token: "token-muerto" },
       recovery: { pid: 99, token: "token-sucesor-99999999" },
     });
+  });
+});
+
+test("el mismo proceso reintenta recovery tras una excepción operacional", () => {
+  withRoot((root) => {
+    const directory = join(root, "incidents", "api");
+    const mutex = join(directory, "owner.mutex.json");
+    const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
+    original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    original.claimOwner("api", "cowork-viejo");
+    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999 }));
+    const tokens = ["token-primer-intento-7777", "token-segundo-intento-777"];
+    let failOnce = true;
+    const manager = createIncidentManager({
+      root,
+      now: () => 70_000,
+      pid: () => 77,
+      leaseMin: 1,
+      pidAlive: (ownerPid) => ownerPid === 77,
+      mutexToken: () => tokens.shift()!,
+      fs: {
+        unlink(target) {
+          if (failOnce && target === mutex) {
+            failOnce = false;
+            throw new Error("fallo operacional después del guard");
+          }
+          return rmSync(target);
+        },
+      },
+    });
+
+    assert.throws(() => manager.claimOwner("api", "cowork-retry"), /fallo operacional/);
+    const result = manager.claimOwner("api", "cowork-retry");
+
+    assert.equal(result.acquired, true);
+    assert.equal(result.owner?.session, "cowork-retry");
+    assert.equal(recoveryGuards(directory).length, 2);
+  });
+});
+
+test("recovery progresa por una cadena mayor a ocho generaciones muertas", () => {
+  withRoot((root) => {
+    const directory = join(root, "incidents", "api");
+    const mutex = join(directory, "owner.mutex.json");
+    const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
+    original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    original.claimOwner("api", "cowork-viejo");
+    writeFileSync(mutex, JSON.stringify({ token: "token-muerto", pid: 999 }));
+
+    for (let index = 0; index < 10; index += 1) {
+      const dying = createIncidentManager({
+        root,
+        now: () => 70_000,
+        pid: () => 100 + index,
+        leaseMin: 1,
+        pidAlive: () => false,
+        mutexToken: () => `token-generacion-${String(index).padStart(8, "0")}`,
+        fs: {
+          unlink(target) {
+            if (target === mutex) throw new Error(`muere generación ${index}`);
+            return rmSync(target);
+          },
+        },
+      });
+      assert.throws(() => dying.claimOwner("api", `cowork-dying-${index}`), new RegExp(`muere generación ${index}`));
+    }
+
+    const successor = createIncidentManager({
+      root,
+      now: () => 70_000,
+      pid: () => 500,
+      leaseMin: 1,
+      pidAlive: () => false,
+      mutexToken: () => "token-final-50000000",
+    });
+    const result = successor.claimOwner("api", "cowork-final");
+
+    assert.equal(result.acquired, true);
+    assert.equal(result.owner?.session, "cowork-final");
+    assert.equal(recoveryGuards(directory).length, 11);
   });
 });
 
