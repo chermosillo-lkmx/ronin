@@ -90,6 +90,8 @@ function fixture(t, options = {}) {
       `set -u\n` +
       `wt="$1"\n` +
       `n=0; [ ! -f "$FAKE_MARKER" ] || n="$(cat "$FAKE_MARKER")"; printf '%s\\n' "$((n+1))" > "$FAKE_MARKER"\n` +
+      `[ -z "\${FAKE_SUITE_LOG:-}" ] || printf 'suite\\n' >> "$FAKE_SUITE_LOG"\n` +
+      `[ -z "\${FAKE_GATE_DELAY:-}" ] || sleep "$FAKE_GATE_DELAY"\n` +
       `mkdir -p "$wt/reports"\n` +
       `[ "\${FAKE_NO_JUNIT:-0}" = 1 ] || cp "$FAKE_JUNIT" "$wt/reports/junit-gate.xml"\n` +
       `[ -f "$FAKE_COVERAGE" ] && cp "$FAKE_COVERAGE" "$wt/reports/coverage-gate.xml"\n` +
@@ -189,7 +191,7 @@ test("main-health imprime una caché roja, sale 1 y no corre la suite", (t) => {
 test("main-health espera un lock vivo hasta que aparece su JSON", async (t) => {
   const fx = fixture(t);
   mkdirSync(fx.lockPath, { recursive: true });
-  writeFileSync(join(fx.lockPath, "pid"), `${process.pid}\n`);
+  writeFileSync(join(fx.lockPath, "owner"), `${process.pid} dueño-vivo\n`);
   const child = fx.spawnRun();
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk; });
@@ -203,7 +205,7 @@ test("main-health espera un lock vivo hasta que aparece su JSON", async (t) => {
   assert.equal(existsSync(fx.marker), false, output);
 });
 
-test("main-health no roba un lock mientras su dueño todavía publica el PID", async (t) => {
+test("main-health no roba un lock mientras su dueño todavía publica el token", async (t) => {
   const fx = fixture(t);
   mkdirSync(fx.lockPath, { recursive: true });
   const fakeBin = join(fx.root, "fake-bin");
@@ -216,7 +218,7 @@ test("main-health no roba un lock mientras su dueño todavía publica el PID", a
   chmodSync(join(fakeBin, "cat"), 0o755);
   const child = fx.spawnRun({
     PATH: `${fakeBin}:${process.env.PATH}`,
-    FAKE_LOCK_PID: join(fx.lockPath, "pid"),
+    FAKE_LOCK_PID: join(fx.lockPath, "owner"),
     FAKE_CAT_SIGNAL: signal,
   });
   let output = "";
@@ -229,7 +231,7 @@ test("main-health no roba un lock mientras su dueño todavía publica el PID", a
   await new Promise((resolve) => setTimeout(resolve, 15));
   const survived = existsSync(fx.lockPath);
   if (survived) {
-    writeFileSync(join(fx.lockPath, "pid"), `${process.pid}\n`);
+    writeFileSync(join(fx.lockPath, "owner"), `${process.pid} dueño-publicado\n`);
     writeFileSync(fx.jsonPath, JSON.stringify({ sha: fx.sha, status: "green" }) + "\n");
   }
   await closed;
@@ -237,11 +239,52 @@ test("main-health no roba un lock mientras su dueño todavía publica el PID", a
   assert.equal(existsSync(fx.marker), false, output);
 });
 
+test("dos productores concurrentes del mismo SHA ejecutan una sola suite", async (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  const fakeBin = join(fx.root, "fake-bin");
+  const publicationSignal = join(fx.root, "publicacion-demorada");
+  const suiteLog = join(fx.root, "suite.log");
+  const realMkdir = sh("bash", ["-c", "command -v mkdir"]);
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(fakeBin, "mkdir"),
+    `#!/bin/bash\n` +
+    `"${realMkdir}" "$@"; rc=$?\n` +
+    `last="\${!#}"\n` +
+    `if [ "$rc" -eq 0 ] && [[ "$last" == *.lock ]] && "${realMkdir}" "$FAKE_PUBLICATION_SIGNAL" 2>/dev/null; then sleep 0.2; fi\n` +
+    `exit "$rc"\n`);
+  chmodSync(join(fakeBin, "mkdir"), 0o755);
+  const env = {
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    MAIN_HEALTH_LOCK_GRACE: "0.01",
+    FAKE_PUBLICATION_SIGNAL: publicationSignal,
+    FAKE_SUITE_LOG: suiteLog,
+    FAKE_GATE_DELAY: "0.1",
+  };
+  const collect = (child) => new Promise((resolve) => {
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    child.once("close", (code) => resolve({ code, output }));
+  });
+  const first = collect(fx.spawnRun(env));
+  const deadline = Date.now() + 2000;
+  while (!existsSync(publicationSignal) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(existsSync(publicationSignal), true);
+  const second = collect(fx.spawnRun(env));
+  const results = await Promise.all([first, second]);
+  assert.deepEqual(results.map(({ code }) => code), [0, 0], results.map(({ output }) => output).join("\n"));
+  assert.equal(readFileSync(suiteLog, "utf8").trim().split("\n").length, 1);
+  assert.equal(results[0].output.trim(), results[1].output.trim());
+});
+
 test("main-health roba un lock cuyo PID murió", (t) => {
   const fx = fixture(t);
   fx.setJunit(passingCases);
   mkdirSync(fx.lockPath, { recursive: true });
-  writeFileSync(join(fx.lockPath, "pid"), "99999999\n");
+  writeFileSync(join(fx.lockPath, "owner"), "99999999 dueño-muerto\n");
   const result = fx.run();
   assert.equal(result.code, 0, result.out);
   assert.equal(readFileSync(fx.marker, "utf8").trim(), "1");
@@ -255,7 +298,7 @@ test("main-health recupera y limpia un worktree residual al robar un lock muerto
   mkdirSync(dirname(residual), { recursive: true });
   sh("git", ["worktree", "add", "-q", "--detach", residual, fx.sha], { cwd: fx.repo });
   mkdirSync(fx.lockPath, { recursive: true });
-  writeFileSync(join(fx.lockPath, "pid"), "99999999\n");
+  writeFileSync(join(fx.lockPath, "owner"), "99999999 dueño-muerto\n");
   const result = fx.run();
   assert.equal(result.code, 0, result.out);
   assert.equal(existsSync(residual), false, result.out);

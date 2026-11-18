@@ -50,24 +50,36 @@ if [ -f "$json" ]; then
 fi
 
 owns_lock=0
-while ! mkdir "$lock" 2>/dev/null; do
+lock_token="$$-$RANDOM-$RANDOM"
+lock_owner="$$ $lock_token"
+while [ "$owns_lock" -eq 0 ]; do
+  if mkdir "$lock" 2>/dev/null; then
+    # El directorio puede haber sido movido y recreado antes de publicar. La creación
+    # exclusiva del owner decide quién posee realmente la ruta que sigue visible.
+    if (set -o noclobber; printf '%s\n' "$lock_owner" > "$lock/owner") 2>/dev/null \
+      && [ "$(cat "$lock/owner" 2>/dev/null || true)" = "$lock_owner" ]; then
+      owns_lock=1
+      break
+    fi
+  fi
   if [ -f "$json" ]; then
     print_cached
     exit $?
   fi
-  owner="$(cat "$lock/pid" 2>/dev/null || true)"
-  if [[ "$owner" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner" 2>/dev/null; then
+  owner="$(cat "$lock/owner" 2>/dev/null || true)"
+  owner_pid="${owner%% *}"
+  if [[ "$owner" == *" "* ]] && [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
     sleep "$poll"
     continue
   fi
-  # mkdir es atómico, pero el dueño necesita un instante para publicar pid. Un lock todavía
-  # vacío sólo se considera abandonado si sigue idéntico después de la gracia de inicialización.
-  if ! [[ "$owner" =~ ^[1-9][0-9]*$ ]]; then
+  # Un creador puede seguir entre mkdir y la publicación exclusiva del token.
+  if [ -z "$owner" ]; then
     sleep "$lock_grace"
     [ -f "$json" ] && { print_cached; exit $?; }
   fi
-  current="$(cat "$lock/pid" 2>/dev/null || true)"
-  if [[ "$current" =~ ^[1-9][0-9]*$ ]] && kill -0 "$current" 2>/dev/null; then
+  current="$(cat "$lock/owner" 2>/dev/null || true)"
+  current_pid="${current%% *}"
+  if [[ "$current" == *" "* ]] && [[ "$current_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$current_pid" 2>/dev/null; then
     continue
   fi
   if [ "$current" = "$owner" ]; then
@@ -77,9 +89,6 @@ while ! mkdir "$lock" 2>/dev/null; do
     fi
   fi
 done
-printf '%s\n' "$$" > "$lock/.pid.$$"
-mv "$lock/.pid.$$" "$lock/pid"
-owns_lock=1
 
 cleanup() {
   if [ -n "${wt:-}" ] && [ -e "$wt" ]; then
@@ -87,8 +96,8 @@ cleanup() {
   fi
   git -C "$source_repo" worktree prune >/dev/null 2>&1 || true
   rmdir "$wt_parent" 2>/dev/null || true
-  if [ "$owns_lock" -eq 1 ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$$" ]; then
-    rm -f "$lock/pid"
+  if [ "$owns_lock" -eq 1 ] && [ "$(cat "$lock/owner" 2>/dev/null || true)" = "$lock_owner" ]; then
+    rm -f "$lock/owner"
     rmdir "$lock" 2>/dev/null || true
   fi
 }
