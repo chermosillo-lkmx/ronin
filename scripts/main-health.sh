@@ -29,9 +29,12 @@ repo_health="$health_root/$repo"
 json="$repo_health/$sha.json"
 error_json="$repo_health/$sha.error.json"
 lock="$repo_health/$sha.lock"
-short="${sha:0:7}"
+prefix_length="${MAIN_HEALTH_WORKTREE_PREFIX_LENGTH:-7}"
+[[ "$prefix_length" =~ ^[1-9][0-9]*$ ]] || prefix_length=7
+short="${sha:0:$prefix_length}"
 wt_parent="$repo_health/wt-$short"
 wt="$wt_parent/$repo"
+path_lock="$wt_parent.lock"
 mkdir -p "$repo_health"
 
 print_cached() {
@@ -90,12 +93,49 @@ while [ "$owns_lock" -eq 0 ]; do
   fi
 done
 
+owns_path_lock=0
+path_lock_token="$$-$RANDOM-$RANDOM"
+path_lock_owner="$$ $path_lock_token"
+
+acquire_path_lock() {
+  local owner owner_pid current current_pid stale
+  while [ "$owns_path_lock" -eq 0 ]; do
+    if mkdir "$path_lock" 2>/dev/null; then
+      if (set -o noclobber; printf '%s\n' "$path_lock_owner" > "$path_lock/owner") 2>/dev/null \
+        && [ "$(cat "$path_lock/owner" 2>/dev/null || true)" = "$path_lock_owner" ]; then
+        owns_path_lock=1
+        return
+      fi
+    fi
+    owner="$(cat "$path_lock/owner" 2>/dev/null || true)"
+    owner_pid="${owner%% *}"
+    if [[ "$owner" == *" "* ]] && [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+      sleep "$poll"
+      continue
+    fi
+    [ -n "$owner" ] || sleep "$lock_grace"
+    current="$(cat "$path_lock/owner" 2>/dev/null || true)"
+    current_pid="${current%% *}"
+    if [[ "$current" == *" "* ]] && [[ "$current_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$current_pid" 2>/dev/null; then
+      continue
+    fi
+    if [ "$current" = "$owner" ]; then
+      stale="$path_lock.stale.$$.$RANDOM"
+      if mv "$path_lock" "$stale" 2>/dev/null; then rm -rf "$stale"; fi
+    fi
+  done
+}
+
 cleanup() {
   if [ -n "${wt:-}" ] && [ -e "$wt" ]; then
     git -C "$source_repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
   fi
   git -C "$source_repo" worktree prune >/dev/null 2>&1 || true
   rmdir "$wt_parent" 2>/dev/null || true
+  if [ "$owns_path_lock" -eq 1 ] && [ "$(cat "$path_lock/owner" 2>/dev/null || true)" = "$path_lock_owner" ]; then
+    rm -f "$path_lock/owner"
+    rmdir "$path_lock" 2>/dev/null || true
+  fi
   if [ "$owns_lock" -eq 1 ] && [ "$(cat "$lock/owner" 2>/dev/null || true)" = "$lock_owner" ]; then
     rm -f "$lock/owner"
     rmdir "$lock" 2>/dev/null || true
@@ -109,6 +149,10 @@ if [ -f "$json" ]; then
   print_cached
   exit $?
 fi
+
+# Dos SHA completos pueden compartir los siete primeros caracteres y, por contrato, la
+# misma ruta wt-<sha7>. Sólo un proceso puede usar esa ruta hasta retirarla por completo.
+acquire_path_lock
 
 # Un dueño muerto puede dejar tanto la ruta como el registro administrativo del worktree.
 # La recuperación se hace siempre desde el repo fuente y sólo sobre la ruta exacta de este SHA.

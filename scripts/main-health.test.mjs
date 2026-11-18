@@ -91,6 +91,7 @@ function fixture(t, options = {}) {
       `wt="$1"\n` +
       `n=0; [ ! -f "$FAKE_MARKER" ] || n="$(cat "$FAKE_MARKER")"; printf '%s\\n' "$((n+1))" > "$FAKE_MARKER"\n` +
       `[ -z "\${FAKE_SUITE_LOG:-}" ] || printf 'suite\\n' >> "$FAKE_SUITE_LOG"\n` +
+      `[ -z "\${FAKE_WT_LOG:-}" ] || printf '%s\\n' "$wt" >> "$FAKE_WT_LOG"\n` +
       `[ -z "\${FAKE_GATE_DELAY:-}" ] || sleep "$FAKE_GATE_DELAY"\n` +
       `mkdir -p "$wt/reports"\n` +
       `[ "\${FAKE_NO_JUNIT:-0}" = 1 ] || cp "$FAKE_JUNIT" "$wt/reports/junit-gate.xml"\n` +
@@ -118,7 +119,7 @@ function fixture(t, options = {}) {
     });
     return { code: result.status, out: result.stdout + result.stderr };
   };
-  const spawnRun = (env = {}) => spawn("bash", [SCRIPT, REPO, "--sha", sha], {
+  const spawnRun = (env = {}, targetSha = sha) => spawn("bash", [SCRIPT, REPO, "--sha", targetSha], {
     env: { ...baseEnv, ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -126,7 +127,7 @@ function fixture(t, options = {}) {
   const errorPath = join(healthDir, REPO, `${sha}.error.json`);
   const lockPath = join(healthDir, REPO, `${sha}.lock`);
   return {
-    root, repo, healthDir, sha, marker, sourceJunit, jsonPath, errorPath, lockPath,
+    root, repo, healthDir, sha, marker, sourceJunit, jsonPath, errorPath, lockPath, gitEnv,
     run, spawnRun,
     setJunit: (cases) => writeFileSync(sourceJunit, junit(cases)),
   };
@@ -278,6 +279,41 @@ test("dos productores concurrentes del mismo SHA ejecutan una sola suite", async
   assert.deepEqual(results.map(({ code }) => code), [0, 0], results.map(({ output }) => output).join("\n"));
   assert.equal(readFileSync(suiteLog, "utf8").trim().split("\n").length, 1);
   assert.equal(results[0].output.trim(), results[1].output.trim());
+});
+
+test("dos SHA con el mismo prefijo serializan la ruta compartida del worktree", async (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  let otherSha = "";
+  for (let attempt = 1; attempt <= 64; attempt += 1) {
+    writeFileSync(join(fx.repo, "src/app.py"), `def f():\n    return ${attempt + 1}\n`);
+    sh("git", ["add", "src/app.py"], { cwd: fx.repo, env: fx.gitEnv });
+    sh("git", ["commit", "-q", "-m", `candidato ${attempt}`], { cwd: fx.repo, env: fx.gitEnv });
+    const candidate = sh("git", ["rev-parse", "HEAD"], { cwd: fx.repo, env: fx.gitEnv });
+    if (candidate[0] === fx.sha[0]) { otherSha = candidate; break; }
+  }
+  assert.notEqual(otherSha, "", "no se encontró una colisión del primer dígito");
+  const worktreeLog = join(fx.root, "worktrees.log");
+  const env = {
+    MAIN_HEALTH_WORKTREE_PREFIX_LENGTH: "1",
+    FAKE_WT_LOG: worktreeLog,
+    FAKE_GATE_DELAY: "0.15",
+  };
+  const collect = (child) => new Promise((resolve) => {
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    child.once("close", (code) => resolve({ code, output }));
+  });
+  const results = await Promise.all([
+    collect(fx.spawnRun(env, fx.sha)),
+    collect(fx.spawnRun(env, otherSha)),
+  ]);
+  assert.deepEqual(results.map(({ code }) => code), [0, 0], results.map(({ output }) => output).join("\n"));
+  const paths = readFileSync(worktreeLog, "utf8").trim().split("\n");
+  assert.equal(paths.length, 2);
+  assert.equal(paths[0], paths[1]);
+  assert.match(paths[0], new RegExp(`/wt-${fx.sha[0]}/${REPO}$`));
 });
 
 test("main-health roba un lock cuyo PID murió", (t) => {
