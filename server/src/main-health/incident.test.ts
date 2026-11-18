@@ -684,6 +684,40 @@ test("claim propio vuelve a publicar el mismo SHA si la rama remota desaparece",
   });
 });
 
+test("persiste la intención antes del push y reutiliza el claim tras una caída con efecto remoto", async () => {
+  await withRootAsync(async (root) => {
+    const claimSha = "c".repeat(40);
+    let remoteSha: string | null = null;
+    let commits = 0;
+    let pushes = 0;
+    const manager = createIncidentManager({
+      root,
+      git: {
+        async run(args) {
+          if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+          if (args[0] === "commit-tree") { commits += 1; return `${claimSha}\n`; }
+          if (args[0] === "push") {
+            pushes += 1;
+            remoteSha = claimSha;
+            throw new Error("conexión perdida después del push");
+          }
+          if (args[0] === "ls-remote") return remoteSha ? `${remoteSha}\trefs/heads/fix/main-health-api\n` : "";
+          throw new Error(`Git inesperado: ${args.join(" ")}`);
+        },
+      },
+    });
+    manager.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+
+    await assert.rejects(() => manager.claimRemote("api", "/repo"), /conexión perdida/);
+    assert.equal(manager.readIncident("api")?.claimSha, claimSha);
+    const retried = await manager.claimRemote("api", "/repo");
+
+    assert.deepEqual(retried, { accepted: true, branch: "fix/main-health-api", claimSha });
+    assert.equal(commits, 1);
+    assert.equal(pushes, 1);
+  });
+});
+
 test("close retira sólo claim propio y un incidente posterior puede reclamar", async () => {
   await withRootAsync(async (root) => {
     const repoDir = join(root, "repo-close");

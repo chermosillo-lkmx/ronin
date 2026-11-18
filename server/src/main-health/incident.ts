@@ -603,7 +603,10 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   function persistRemoteOwner(incident: Incident, remoteOwner: string): void {
     const current = readIncident(incident.repo);
     if (!current || current.id !== incident.id) throw new Error(`el incidente cambió durante el claim: ${incident.repo}`);
-    storeIncident({ ...current, remoteOwner });
+    const stored: Incident = { ...current, remoteOwner };
+    delete stored.claimSha;
+    delete stored.claimBranch;
+    storeIncident(stored);
   }
 
   function rewriteOwnedOwner(repo: string, expected: IncidentOwner, session: string): boolean {
@@ -703,10 +706,10 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
       { input: message, env: claimEnv },
     )).trim();
     assertSha(claimSha);
+    // La intención durable permite reconciliar un push cuyo resultado no llegó al proceso.
+    persistOwnClaim(incident, claimSha, branch);
     try {
       await git.run(["push", "origin", `${claimSha}:refs/heads/${branch}`], repoDir, { env: gitEnv });
-      // El claim durable debe existir antes de que ensureFixer intente lanzar la sesión.
-      persistOwnClaim(incident, claimSha, branch);
       return { accepted: true, branch, claimSha };
     } catch (error) {
       if (!isRemoteClaimConflict(error)) throw error;
