@@ -44,7 +44,7 @@ function fakeMainHealthWatcher(overrides: Partial<MainHealthWatcher> = {}): Main
     evaluate: async () => {},
     idle: async () => {},
     start: () => {},
-    stop: () => {},
+    stop: async () => {},
     ...overrides,
   };
 }
@@ -227,16 +227,37 @@ test("startMainHealthBackground arranca y detiene el watcher una sola vez", asyn
   const events: string[] = [];
   const watcher = fakeMainHealthWatcher({
     start: () => { events.push("start"); },
-    stop: () => { events.push("stop"); },
+    stop: async () => { events.push("stop"); },
   });
   const start = (indexModule as any).startMainHealthBackground;
   assert.equal(typeof start, "function");
-  const cleanup = start({ locals: { mainHealthWatcher: watcher } });
+  const cleanup = await start({ locals: { mainHealthWatcher: watcher } });
 
   assert.deepEqual(events, ["start"]);
   await cleanup();
   await cleanup();
   assert.deepEqual(events, ["start", "stop"]);
+});
+
+test("startMainHealthBackground espera el stop si start falla parcialmente", async () => {
+  const events: string[] = [];
+  const stopped = deferred<void>();
+  const watcher = fakeMainHealthWatcher({
+    start: () => { events.push("start"); throw new Error("start parcial"); },
+    stop: async () => { events.push("stop"); await stopped.promise; },
+  });
+  const start = (indexModule as any).startMainHealthBackground;
+
+  const starting = start({ locals: { mainHealthWatcher: watcher } });
+  await Promise.resolve();
+  assert.deepEqual(events, ["start", "stop"]);
+  let settled = false;
+  void Promise.resolve(starting).catch(() => {}).finally(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  stopped.resolve();
+  await assert.rejects(starting, /start parcial/);
 });
 
 test("withMainHealthVerifyDeps conecta ensureMainMeasured del watcher", async () => {
@@ -257,9 +278,9 @@ test("withMainHealthVerifyDeps conecta ensureMainMeasured del watcher", async ()
   assert.deepEqual(calls, [["ant-liebre-api", "a".repeat(40)]]);
 });
 
-test("startServer entrega el mismo app al background antes de listen", async () => {
-  const app = offlineApp({ mainHealth: fakeMainHealth() } as Parameters<typeof createApp>[0]);
+test("startServer arranca Telegram y entrega el mismo app al background antes de listen", async () => {
   const events: string[] = [];
+  const app = createApp({ telegram: fakeTelegram(events), mainHealth: fakeMainHealth() });
   const server = {
     address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43214 }),
     close: (callback: (error?: Error) => void) => callback(),
@@ -280,7 +301,7 @@ test("startServer entrega el mismo app al background antes de listen", async () 
       },
     },
   });
-  assert.deepEqual(events, ["background", "listen"]);
+  assert.deepEqual(events, ["telegram:start", "background", "listen"]);
   await handle.close();
 });
 
@@ -408,24 +429,58 @@ test("createApp guarda el runtime de Telegram sin arrancarlo", () => {
   assert.deepEqual(events, []);
 });
 
-test("startServer arranca Telegram después de listen y lo detiene en close", async () => {
+test("startServer arranca Telegram antes del background y cierra socket, background y Telegram en orden", async () => {
   const events: string[] = [];
   const server = {
     address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43212 }),
-    close: (callback: (error?: Error) => void) => callback(),
+    close: (callback: (error?: Error) => void) => { events.push("socket:close"); callback(); },
   };
   const handle = await startServer({
     port: 43212,
     deps: {
       createApp: (options) => createApp({ ...options, telegram: fakeTelegram(events) }),
-      startBackground: async () => () => {},
+      startBackground: async () => {
+        events.push("background:start");
+        return () => { events.push("background:stop"); };
+      },
       listen: async () => { events.push("listen"); return server as any; },
     },
   });
-  assert.deepEqual(events, ["listen", "telegram:start"]);
+  assert.deepEqual(events, ["telegram:start", "background:start", "listen"]);
   await handle.close();
   await handle.close();
-  assert.deepEqual(events, ["listen", "telegram:start", "telegram:stop"]);
+  assert.deepEqual(events, [
+    "telegram:start",
+    "background:start",
+    "listen",
+    "socket:close",
+    "background:stop",
+    "telegram:stop",
+  ]);
+});
+
+test("startServer limpia background antes de Telegram si listen falla", async () => {
+  const events: string[] = [];
+  await assert.rejects(
+    startServer({
+      deps: {
+        createApp: (options) => createApp({ ...options, telegram: fakeTelegram(events) }),
+        startBackground: async () => {
+          events.push("background:start");
+          return async () => { events.push("background:stop"); };
+        },
+        listen: async () => { events.push("listen"); throw new Error("listen falló"); },
+      },
+    }),
+    /listen falló/,
+  );
+  assert.deepEqual(events, [
+    "telegram:start",
+    "background:start",
+    "listen",
+    "background:stop",
+    "telegram:stop",
+  ]);
 });
 
 test("un start de Telegram que falla no tumba el server", async () => {
@@ -445,6 +500,87 @@ test("un start de Telegram que falla no tumba el server", async () => {
   await handle.close();
   assert.equal(warn.mock.callCount(), 1);
   warn.mock.restore();
+});
+
+test("startServer detiene Telegram si el background falla", async () => {
+  const events: string[] = [];
+  await assert.rejects(
+    startServer({
+      deps: {
+        createApp: (options) => createApp({ ...options, telegram: fakeTelegram(events) }),
+        startBackground: async () => { events.push("background:start"); throw new Error("background falló"); },
+        listen: async () => { throw new Error("no debe escuchar"); },
+      },
+    }),
+    /background falló/,
+  );
+  assert.deepEqual(events, ["telegram:start", "background:start", "telegram:stop"]);
+});
+
+function commenterInput(signal?: AbortSignal) {
+  const shaA = "a".repeat(40);
+  const shaB = "b".repeat(40);
+  return {
+    repo: "ant-liebre-api",
+    repoDir: "/tmp/ant-liebre-api",
+    incident: {} as never,
+    signal,
+    attribution: {
+      status: "attributed" as const,
+      reason: null,
+      redSha: "c".repeat(40),
+      greenSha: "d".repeat(40),
+      culpritShas: [shaA, shaB],
+      newRed: [],
+      unattributedRed: [],
+      commits: [
+        { sha: shaA, author: { name: "A", email: "a@example.test" }, pr: 41, message: "a", files: [], addedLinesByFile: {}, uncoveredAddedByFile: {}, newRed: [] },
+        { sha: shaA, author: { name: "A", email: "a@example.test" }, pr: 41, message: "duplicado", files: [], addedLinesByFile: {}, uncoveredAddedByFile: {}, newRed: [] },
+        { sha: shaB, author: { name: "B", email: "b@example.test" }, pr: 42, message: "b", files: [], addedLinesByFile: {}, uncoveredAddedByFile: {}, newRed: [] },
+      ],
+    },
+  };
+}
+
+test("commenter usa args separados, cwd, timeout y signal; continúa tras un fallo", async () => {
+  const calls: Array<{ command: string; args: string[]; options: Record<string, unknown> }> = [];
+  const controller = new AbortController();
+  const createCommenter = (indexModule as any).createMainHealthPullRequestCommenter;
+  assert.equal(typeof createCommenter, "function");
+  const commenter = createCommenter({
+    exec: async (command: string, args: string[], options: Record<string, unknown>) => {
+      calls.push({ command, args, options });
+      if (calls.length === 1) throw new Error("gh falló con detalle privado");
+    },
+  });
+
+  await assert.rejects(commenter(commenterInput(controller.signal)), (error: unknown) => {
+    assert.equal((error as Error).message, "no pude comentar uno o más PRs de main-health");
+    return true;
+  });
+  assert.deepEqual(calls.map(({ command, args }) => ({ command, args })), [
+    { command: "gh", args: ["pr", "comment", "41", "--body", "Ronin detectó una regresión en main y abrió un incidente para corregirla."] },
+    { command: "gh", args: ["pr", "comment", "42", "--body", "Ronin detectó una regresión en main y abrió un incidente para corregirla."] },
+  ]);
+  assert.equal(calls[0].options.cwd, "/tmp/ant-liebre-api");
+  assert.equal(calls[0].options.timeout, 30_000);
+  assert.equal(calls[0].options.signal, controller.signal);
+});
+
+test("commenter detiene PRs restantes al abortar", async () => {
+  const calls: number[] = [];
+  const controller = new AbortController();
+  const createCommenter = (indexModule as any).createMainHealthPullRequestCommenter;
+  const commenter = createCommenter({
+    exec: async (_command: string, args: string[]) => {
+      calls.push(Number(args[2]));
+      controller.abort();
+      throw Object.assign(new Error("abortado"), { name: "AbortError" });
+    },
+  });
+
+  await commenter(commenterInput(controller.signal));
+  assert.deepEqual(calls, [41]);
 });
 
 test("el lanzamiento de Telegram usa el launch recibido en options (el de startServer, con mcp config)", async () => {

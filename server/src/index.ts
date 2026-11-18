@@ -209,22 +209,63 @@ export interface CreateAppOptions {
 
 const MAIN_HEALTH_PR_COMMENT = "Ronin detectó una regresión en main y abrió un incidente para corregirla.";
 
-function execGhComment(cwd: string, pr: number): Promise<void> {
+export interface MainHealthCommentExecOptions {
+  cwd: string;
+  timeout: number;
+  signal?: AbortSignal;
+}
+
+export type MainHealthCommentExec = (
+  command: string,
+  args: string[],
+  options: MainHealthCommentExecOptions,
+) => Promise<void>;
+
+function execGhComment(
+  command: string,
+  args: string[],
+  options: MainHealthCommentExecOptions,
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile("gh", ["pr", "comment", String(pr), "--body", MAIN_HEALTH_PR_COMMENT], { cwd }, (error) => {
+    execFile(command, args, options, (error) => {
       if (error) reject(error);
       else resolve();
     });
   });
 }
 
-async function commentMainHealthPullRequests(input: PullRequestCommentInput): Promise<void> {
-  const culprits = new Set(input.attribution.culpritShas.map((sha) => sha.toLowerCase()));
-  const prs = new Set<number>();
-  for (const commit of input.attribution.commits) {
-    if (culprits.has(commit.sha.toLowerCase()) && Number.isInteger(commit.pr) && (commit.pr ?? 0) > 0) prs.add(commit.pr!);
-  }
-  for (const pr of prs) await execGhComment(input.repoDir, pr);
+function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
+}
+
+/** Construye el commenter real sin exponer errores de `gh` ni bloquear PRs posteriores. */
+export function createMainHealthPullRequestCommenter(
+  deps: { exec?: MainHealthCommentExec } = {},
+): (input: PullRequestCommentInput) => Promise<void> {
+  const run = deps.exec ?? execGhComment;
+  return async (input) => {
+    const culprits = new Set(input.attribution.culpritShas.map((sha) => sha.toLowerCase()));
+    const prs = new Set<number>();
+    for (const commit of input.attribution.commits) {
+      if (culprits.has(commit.sha.toLowerCase()) && Number.isInteger(commit.pr) && (commit.pr ?? 0) > 0) prs.add(commit.pr!);
+    }
+
+    let failed = false;
+    for (const pr of prs) {
+      if (input.signal?.aborted) return;
+      try {
+        await run(
+          "gh",
+          ["pr", "comment", String(pr), "--body", MAIN_HEALTH_PR_COMMENT],
+          { cwd: input.repoDir, timeout: 30_000, signal: input.signal },
+        );
+      } catch (error) {
+        if (input.signal?.aborted || isAbortError(error)) return;
+        failed = true;
+      }
+    }
+    if (failed) throw new Error("no pude comentar uno o más PRs de main-health");
+  };
 }
 
 function defaultMainHealthRuntime(app: express.Express): { watcher: MainHealthWatcher; router: express.Router } {
@@ -243,7 +284,7 @@ function defaultMainHealthRuntime(app: express.Express): { watcher: MainHealthWa
     attribute: attributeMainHealth,
     incidents,
     notifier: createMainHealthNotifier({ store: telegram.store, runtime: telegram }),
-    commentPullRequest: commentMainHealthPullRequests,
+    commentPullRequest: createMainHealthPullRequestCommenter(),
   });
   return {
     watcher,
@@ -1324,13 +1365,13 @@ function once(cleanup: Cleanup): Cleanup {
 }
 
 /** Arranca sólo el watcher asociado a este app; el cleanup tolera llamadas repetidas. */
-export function startMainHealthBackground(app: Pick<express.Express, "locals">): Cleanup {
+export async function startMainHealthBackground(app: Pick<express.Express, "locals">): Promise<Cleanup> {
   const watcher = app.locals.mainHealthWatcher as MainHealthWatcher | undefined;
   if (!watcher) return once(() => {});
   try {
     watcher.start();
   } catch (error) {
-    try { watcher.stop(); } catch { /* best-effort ante un start parcial */ }
+    try { await watcher.stop(); } catch { /* conserva el fallo de start tras limpiar lo parcial */ }
     throw error;
   }
   return once(() => watcher.stop());
@@ -1366,7 +1407,7 @@ function listenOnLoopback(app: express.Express, port: number): Promise<Server> {
 async function startDefaultBackground(app: express.Express): Promise<Cleanup> {
   const cleanups: Cleanup[] = [];
   try {
-    cleanups.push(startMainHealthBackground(app));
+    cleanups.push(await startMainHealthBackground(app));
     if (REPORT_SCHEDULE) cleanups.push(startReportSchedule());
     if (PERF) cleanups.push(startPerfRecorder());
     if (VERIFY_GATE) {
@@ -1415,37 +1456,49 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
   const requestedPort = options.port ?? PORT;
   let background: Cleanup | undefined;
   let server: Server | undefined;
+  const telegram = app.locals.telegram as TelegramRuntime | undefined;
+  let stopTelegram: (() => Promise<void>) | undefined;
 
   try {
     const capabilityToken = deps.ensureCapability();
+    try {
+      stopTelegram = telegram?.start();
+    } catch (error) {
+      // Telegram es opcional: sin red o sin token el resto del runtime sí debe arrancar.
+      console.warn(`[telegram] no pude arrancar (${error instanceof Error ? error.name : "error"})`);
+    }
     background = await deps.startBackground(app);
     server = await deps.listen(app, requestedPort);
     const address = server.address();
     const port = typeof address === "object" && address ? (address as AddressInfo).port : requestedPort;
     mcpConfigPath = writeAgentMcpConfig(DATA_DIR, port, capabilityToken) ?? "";
   } catch (error) {
-    if (background) await background();
+    try { await background?.(); } catch { /* conserva el error de arranque */ }
+    try { await stopTelegram?.(); } catch { /* Telegram sigue siendo opcional */ }
     throw error;
   }
 
   const address = server.address();
   const port = typeof address === "object" && address ? (address as AddressInfo).port : requestedPort;
-  const telegram = app.locals.telegram as TelegramRuntime | undefined;
-  let stopTelegram: (() => Promise<void>) | undefined;
-  try {
-    stopTelegram = telegram?.start();
-  } catch (error) {
-    // Telegram es opcional: sin red o sin token el server sigue sirviendo la app.
-    console.warn(`[telegram] no pude arrancar (${error instanceof Error ? error.name : "error"})`);
-  }
   const close = once(async () => {
+    let failed = false;
+    let failure: unknown;
     try {
-      await stopTelegram?.();
-    } catch {
-      // Un fallo al detener Telegram no debe impedir cerrar el server.
+      await closeServer(server!);
+    } catch (error) {
+      failed = true;
+      failure = error;
     }
-    await closeServer(server!);
-    await background!();
+    try {
+      await background!();
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        failure = error;
+      }
+    }
+    try { await stopTelegram?.(); } catch { /* no desplaza un fallo del server/watcher */ }
+    if (failed) throw failure;
   });
 
   console.log(
