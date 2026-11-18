@@ -215,9 +215,71 @@ test("evaluate veta entradas deshabilitadas, inseguras, app, repo cruzado y SHA 
   await watcher.evaluate("repo", measurement("otro", SHA_A, "red"));
   await watcher.evaluate("repo", measurement("repo", SHA_A.slice(0, 7), "red"));
   await watcher.evaluate("repo", measurement("repo", SHA_A.toUpperCase(), "red"));
+  await watcher.evaluate("repo", measurement("repo", SHA_B, "red"));
 
-  assert.equal(paths, 0);
+  assert.equal(paths, 1, "sólo el SHA canónico consulta origin/main antes de descartarse");
   assert.equal(attributions, 0);
+});
+
+test("cola expone una barrera inyectable justo antes de retirar el dedupe", async () => {
+  const store = memoryStore();
+  store.measurements.set(`repo@${SHA_A}`, measurement("repo", SHA_A, "green"));
+  const deps = baseDeps(["repo"], store);
+  let finalizations = 0;
+  Object.assign(deps, {
+    beforeJobFinalize: async (repo: string, sha: string) => {
+      assert.equal(repo, "repo");
+      assert.equal(sha, SHA_A);
+      finalizations += 1;
+    },
+  });
+  const watcher = createMainHealthWatcher(deps);
+
+  await watcher.ensureMeasured("repo", SHA_A);
+  await watcher.idle();
+
+  assert.equal(finalizations, 1);
+});
+
+test("promoción terminal reencola main antes de retirar el dedupe baseline", async () => {
+  const store = memoryStore();
+  store.measurements.set(`repo@${SHA_A}`, measurement("repo", SHA_A, "red"));
+  const deps = baseDeps(["repo"], store);
+  let reportTerminal!: () => void;
+  let releaseTerminal!: () => void;
+  const terminal = new Promise<void>((resolve) => { reportTerminal = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseTerminal = resolve; });
+  let finalizations = 0;
+  let opens = 0;
+  Object.assign(deps, {
+    beforeJobFinalize: async () => {
+      finalizations += 1;
+      if (finalizations !== 1) return;
+      reportTerminal();
+      await gate;
+    },
+  });
+  deps.incidents = {
+    ...noopIncidents(),
+    openIncident: (input) => {
+      opens += 1;
+      return { id: `repo@${input.firstRedSha.slice(0, 7)}`, openedAt: 1, ...input };
+    },
+  };
+  const watcher = createMainHealthWatcher(deps);
+
+  assert.equal((await watcher.ensureMeasured("repo", SHA_A)).status, "cached");
+  await terminal;
+  assert.deepEqual(await watcher.ensureMeasured("repo"), {
+    status: "cached",
+    measurement: measurement("repo", SHA_A, "red"),
+  });
+  releaseTerminal();
+  await watcher.idle();
+
+  assert.equal(finalizations, 2, "la promoción terminal crea reconciliación operacional nueva");
+  assert.equal(store.operational.get("repo"), SHA_A);
+  assert.equal(opens, 1);
 });
 
 test("cola global es serie, deduplica repo+sha y continúa tras error de medición", async () => {
@@ -514,6 +576,7 @@ test("stop espera close en vuelo y no encola su notificación después de la bar
     },
   };
   deps.notifier.closed = async () => { notifications += 1; };
+  deps.git.lsRemoteMain = async () => SHA_B;
   const watcher = createMainHealthWatcher(deps);
 
   const evaluating = watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
@@ -745,12 +808,16 @@ test("evaluate abre una vez, delega fixer, respeta commentOnPr=false y luego cie
     closed: async (value) => { notifications.push(`close:${value.id}`); },
   };
   deps.commentPullRequest = async () => { comments += 1; };
+  let remoteMain = SHA_A;
+  deps.git.lsRemoteMain = async () => remoteMain;
   const watcher = createMainHealthWatcher(deps);
   const red = measurement("repo", SHA_A, "red");
 
   await watcher.evaluate("repo", red);
   await watcher.evaluate("repo", red);
+  remoteMain = SHA_B;
   await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
+  remoteMain = SHA_C;
   await watcher.evaluate("repo", measurement("repo", SHA_C, "green"));
 
   assert.equal(opens, 1);
@@ -911,6 +978,7 @@ test("timer heartbeat autorizado no se solapa y auxiliares fallidos se reintenta
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(heartbeats, ["alpha", "beta", "beta"], "alpha pendiente no solapa; beta fallido reintenta");
 
+  deps.git.lsRemoteMain = async () => SHA_A;
   await watcher.evaluate("alpha", measurement("alpha", SHA_A, "red"));
   await new Promise<void>((resolve) => setImmediate(resolve));
   await watcher.evaluate("alpha", measurement("alpha", SHA_A, "red"));
@@ -950,6 +1018,7 @@ test("evaluate serializa dos cierres concurrentes y sólo uno ejecuta close", as
       return value;
     },
   };
+  deps.git.lsRemoteMain = async () => SHA_B;
   const watcher = createMainHealthWatcher(deps);
   const green = measurement("repo", SHA_B, "green");
 
@@ -987,9 +1056,12 @@ test("notify close espera a que notify open del mismo repo termine sin bloquear 
     opened: async () => { events.push("open:start"); await openGate; events.push("open:end"); },
     closed: async () => { events.push("close"); },
   };
+  let remoteMain = SHA_A;
+  deps.git.lsRemoteMain = async () => remoteMain;
   const watcher = createMainHealthWatcher(deps);
 
   await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  remoteMain = SHA_B;
   await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
   assert.deepEqual(events, ["open:start"], "close core terminó, pero su aviso conserva orden causal");
   releaseOpen();
@@ -1040,9 +1112,12 @@ test("deadline aborta notify open antes de iniciar notify close y evita entrega 
     }),
     closed: async () => { events.push("close:start"); },
   };
+  let remoteMain = SHA_A;
+  deps.git.lsRemoteMain = async () => remoteMain;
   const watcher = createMainHealthWatcher(deps);
 
   await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  remoteMain = SHA_B;
   await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
   assert.deepEqual(events, ["open:start"]);
   deadlines[0]!.callback();
@@ -1217,9 +1292,12 @@ test("close invalida fixer y comentario encolados antes de que inicien", async (
     },
   };
   deps.commentPullRequest = async () => { comments += 1; };
+  let remoteMain = SHA_A;
+  deps.git.lsRemoteMain = async () => remoteMain;
   const watcher = createMainHealthWatcher(deps);
 
   await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  remoteMain = SHA_B;
   await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
   for (const start of starts) start();
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1235,7 +1313,8 @@ test("stop aborta y espera notify activo antes de crear la lane reiniciada", asy
     setInterval: (callback: () => void) => { timers.push(callback); return callback; },
     clearInterval: () => undefined,
   };
-  deps.git.lsRemoteMain = async () => null;
+  let remoteMain: string | null = null;
+  deps.git.lsRemoteMain = async () => remoteMain;
   let current: Incident | null = null;
   let rejectFirst!: (error: Error) => void;
   let firstSignal: AbortSignal | undefined;
@@ -1268,7 +1347,9 @@ test("stop aborta y espera notify activo antes de crear la lane reiniciada", asy
   const watcher = createMainHealthWatcher(deps);
 
   watcher.start();
+  remoteMain = SHA_A;
   await watcher.evaluate("repo", measurement("repo", SHA_A, "red"));
+  remoteMain = SHA_B;
   await watcher.evaluate("repo", measurement("repo", SHA_B, "green"));
   const stopping = watcher.stop();
   assert.equal(firstSignal?.aborted, true);
@@ -1283,6 +1364,7 @@ test("stop aborta y espera notify activo antes de crear la lane reiniciada", asy
   rejectFirst(new DOMException("cancelado", "AbortError"));
   await stopping;
   watcher.start();
+  remoteMain = SHA_C;
   await watcher.evaluate("repo", measurement("repo", SHA_C, "red"));
   assert.deepEqual(events, [
     `open:repo@${SHA_A.slice(0, 7)}:start`,

@@ -94,6 +94,7 @@ export interface MainHealthWatcherDeps {
   auxiliaryLeaseMs?: number;
   scheduleAuxiliaryDeadline?: (callback: () => void, ms: number) => () => void;
   scheduleAuxiliaryStart?: (callback: () => void) => void;
+  beforeJobFinalize?: (repo: string, sha: string) => Promise<void>;
   now?: () => number;
   logError?: (error: unknown) => void;
 }
@@ -234,6 +235,9 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     sha: string;
     measure: boolean;
     operational: boolean;
+    terminalBaseline: boolean;
+    rerunOperational: boolean;
+    rerunMeasure: boolean;
     generation: number;
   }
   const pending = new Map<string, MeasurementJob>();
@@ -518,12 +522,24 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     }
   }
 
-  function evaluate(repo: string, measurement: MainHealthMeasurement): Promise<void> {
+  function scheduleEvaluation(repo: string, measurement: MainHealthMeasurement): Promise<void> {
     if (stopping) return Promise.resolve();
     const generation = lifecycleGeneration;
     const run = evaluationTail.then(() => evaluateCore(repo, measurement, generation));
     evaluationTail = run.catch(() => undefined);
     return run;
+  }
+
+  async function evaluate(repo: string, measurement: MainHealthMeasurement): Promise<void> {
+    if (stopping) return;
+    const generation = lifecycleGeneration;
+    const settings = deps.readSettings();
+    if (repoRejection(settings, repo)
+      || measurement.repo !== repo
+      || !CANONICAL_SHA.test(measurement.sha)) return;
+    const currentMain = await resolveMain(repo);
+    if (stopping || generation !== lifecycleGeneration || currentMain !== measurement.sha) return;
+    await scheduleEvaluation(repo, measurement);
   }
 
   async function runJob(job: MeasurementJob): Promise<void> {
@@ -549,13 +565,19 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     }
     if (stopping || job.generation !== lifecycleGeneration) return;
     const result = deps.store.readMeasurement(job.repo, job.sha);
-    if (!result || !isMainHealthMeasurement(result) || result.repo !== job.repo || result.sha !== job.sha) return;
+    if (!result || !isMainHealthMeasurement(result) || result.repo !== job.repo || result.sha !== job.sha) {
+      job.terminalBaseline = true;
+      return;
+    }
     if (stopping || job.generation !== lifecycleGeneration) return;
-    if (!job.operational) return;
+    if (!job.operational) {
+      job.terminalBaseline = true;
+      return;
+    }
     const currentMain = await resolveMain(job.repo);
     if (stopping || job.generation !== lifecycleGeneration || currentMain !== job.sha) return;
     deps.store.confirmOperationalMeasurement(job.repo, job.sha);
-    await evaluate(job.repo, result);
+    await scheduleEvaluation(job.repo, result);
   }
 
   async function pump(): Promise<void> {
@@ -572,7 +594,15 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
         } catch (error) {
           log(error);
         } finally {
+          try {
+            await deps.beforeJobFinalize?.(job.repo, job.sha);
+          } catch (error) {
+            log(error);
+          }
           pending.delete(key);
+          if (job.rerunOperational && !stopping && job.generation === lifecycleGeneration) {
+            enqueue(job.repo, job.sha, job.rerunMeasure, true);
+          }
         }
       }
     } finally {
@@ -588,10 +618,24 @@ export function createMainHealthWatcher(deps: MainHealthWatcherDeps): MainHealth
     const key = `${repo}@${sha}`;
     const existing = pending.get(key);
     if (existing) {
-      if (operational) existing.operational = true;
+      if (operational && existing.terminalBaseline) {
+        existing.rerunOperational = true;
+        existing.rerunMeasure ||= measure;
+      } else if (operational) {
+        existing.operational = true;
+      }
       return false;
     }
-    const job = { repo, sha, measure, operational, generation: lifecycleGeneration };
+    const job = {
+      repo,
+      sha,
+      measure,
+      operational,
+      terminalBaseline: false,
+      rerunOperational: false,
+      rerunMeasure: false,
+      generation: lifecycleGeneration,
+    };
     pending.set(key, job);
     queue.push(job);
     void pump();
