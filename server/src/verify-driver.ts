@@ -273,6 +273,10 @@ export interface DriverDeps {
   heads(worktree: string): Promise<RepoHead[] | null>;
   /** `cacheHit` de gate-cache con el git real ya inyectado. */
   cacheHit(cached: VerifyState | null, heads: RepoHead[], worktree: string, e2eDirs: string[]): Promise<boolean>;
+  /** Merge-base del HEAD de un sub-repo contra main; el puerto decide cwd/rutas. */
+  mainMergeBase?(worktree: string, head: RepoHead): Promise<string | null>;
+  /** Encola la medición de main; puede devolver una promesa, pero el gate nunca la espera. */
+  ensureMainMeasured?(repo: string, sha: string): unknown;
   /** Timeout y entorno del gate para un repo (override del repo o global), leídos en cada llamada. */
   gateConfig(repo: string): { timeoutMs: number; env: Record<string, string> };
   /** Cupo global de corridas simultáneas (`gate.maxConcurrent` de settings), leído en cada tick. */
@@ -388,6 +392,44 @@ function guardarLog(deps: DriverDeps, cycle: string, stageKey: string, output: s
       deps.logError?.(error);
     } catch {
       /* el propio log falló */
+    }
+  }
+}
+
+const MAIN_HEALTH_SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+
+function logBestEffort(deps: DriverDeps, error: unknown): void {
+  try {
+    deps.logError?.(error);
+  } catch {
+    /* el observador no puede afectar la corrida */
+  }
+}
+
+/** Resuelve bases antes del gate e inicia su medición sin esperar el trabajo encolado. */
+async function ensureMergeBasesMeasured(deps: DriverDeps, worktree: string, heads: RepoHead[]): Promise<void> {
+  if (!deps.mainMergeBase || !deps.ensureMainMeasured) return;
+  const seen = new Set<string>();
+  for (const head of heads) {
+    if (typeof head.repo !== "string" || !MAIN_HEALTH_SHA.test(head.sha)) continue;
+    let base: string | null;
+    try {
+      base = await deps.mainMergeBase(worktree, head);
+    } catch (error) {
+      logBestEffort(deps, error);
+      continue;
+    }
+    if (!base || !MAIN_HEALTH_SHA.test(base)) continue;
+    const key = `${head.repo}@${base}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const pending = deps.ensureMainMeasured(head.repo, base);
+      if (pending && typeof (pending as PromiseLike<unknown>).then === "function") {
+        void Promise.resolve(pending).catch((error) => logBestEffort(deps, error));
+      }
+    } catch (error) {
+      logBestEffort(deps, error);
     }
   }
 }
@@ -776,6 +818,7 @@ async function planMergeGate(
 
   // `heads` y `gate.attempts` son la foto del lanzamiento: el desenlace se calcula contra ellos.
   return async () => {
+    await ensureMergeBasesMeasured(deps, worktree, heads);
     const inicio = Date.now();
     const resultado = await deps.run(gate.cmd, worktree, runOpts(deps, sesion.name, repo));
     const fin = Date.now();

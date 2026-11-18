@@ -25,6 +25,8 @@ function sinAt<T extends { at?: number } | undefined>(state: T): Omit<NonNullabl
 }
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
+const SHA_C = "c".repeat(40);
+const SHA_D = "d".repeat(40);
 
 test("selectGate: sin etapa alcanzada no hay nada que ejecutar", () => {
   assert.equal(selectGate(STAGES, null, sinEstado), null);
@@ -459,6 +461,132 @@ test("tickOnce: mergeGate con cacheHit: passed sin llamar a run", async () => {
     assert.equal(typeof at, "number");
     assert.deepEqual(resto, { attempts: 0, status: "passed", shas: { api: SHA_B }, durationMs: 0, reason: "caché" });
     assert.deepEqual(informes.map((i) => i.status), ["passed"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("main-health: inicia medición de cada merge-base canónica deduplicada antes de run sin esperarla", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    const eventos: string[] = [];
+    const nunca = new Promise<never>(() => undefined);
+    const heads = [
+      { repo: "api", sha: SHA_A, dirty: false },
+      { repo: "data", sha: SHA_B, dirty: false },
+      { repo: "api", sha: SHA_C, dirty: false },
+    ];
+    const { d } = mergeDeps({
+      cycle: dir,
+      heads: async () => heads,
+      mainMergeBase: async (worktree, head) => {
+        eventos.push(`base:${worktree}:${head.repo}:${head.sha}`);
+        return head.repo === "data" ? SHA_D : SHA_C;
+      },
+      ensureMainMeasured: (repo, sha) => {
+        eventos.push(`ensure:${repo}:${sha}`);
+        return nunca;
+      },
+      run: async () => {
+        eventos.push("run");
+        return { ok: true, code: 0, output: "verde" };
+      },
+    });
+
+    await tick(d, new Map());
+
+    assert.deepEqual(eventos, [
+      `base:/wt:api:${SHA_A}`,
+      `ensure:api:${SHA_C}`,
+      `base:/wt:data:${SHA_B}`,
+      `ensure:data:${SHA_D}`,
+      `base:/wt:api:${SHA_C}`,
+      "run",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("main-health: fallos, null, base no canónica y rechazo tardío no impiden el merge gate", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let rejectLate!: (error: Error) => void;
+    const late = new Promise<void>((_resolve, reject) => { rejectLate = reject; });
+    const errores: unknown[] = [];
+    const ensures: string[] = [];
+    let runs = 0;
+    const heads = [
+      { repo: "throw-base", sha: SHA_A, dirty: false },
+      { repo: "null-base", sha: SHA_B, dirty: false },
+      { repo: "invalid-base", sha: SHA_C, dirty: false },
+      { repo: "throw-ensure", sha: SHA_D, dirty: false },
+      { repo: "late-ensure", sha: "e".repeat(40), dirty: false },
+    ];
+    const { d } = mergeDeps({
+      cycle: dir,
+      heads: async () => heads,
+      mainMergeBase: async (_worktree, head) => {
+        if (head.repo === "throw-base") throw new Error("merge-base roto");
+        if (head.repo === "null-base") return null;
+        if (head.repo === "invalid-base") return "ABCDEF";
+        return "f".repeat(40);
+      },
+      ensureMainMeasured: (repo, sha) => {
+        ensures.push(`${repo}:${sha}`);
+        if (repo === "throw-ensure") throw new Error("ensure roto");
+        return late;
+      },
+      logError: (error) => { errores.push(error); },
+      run: async () => { runs += 1; return { ok: true, code: 0, output: "verde" }; },
+    });
+
+    await tick(d, new Map());
+    assert.equal(runs, 1);
+    assert.deepEqual(ensures, [
+      `throw-ensure:${"f".repeat(40)}`,
+      `late-ensure:${"f".repeat(40)}`,
+    ]);
+    assert.equal(errores.length, 2, "merge-base y ensure síncrono se registran best-effort");
+
+    rejectLate(new Error("ensure tardío"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(errores.length, 3, "el rechazo tardío tiene catch terminal");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("main-health: no consulta merge-base en gate normal, busy, dirty, cache hit ni HEADs vacíos/inválidos", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ronin-gate-"));
+  try {
+    let bases = 0;
+    let ensures = 0;
+    const hooks = {
+      mainMergeBase: async () => { bases += 1; return SHA_C; },
+      ensureMainMeasured: () => { ensures += 1; },
+    };
+    await tick(deps({ cycle: dir, ...hooks }), new Map());
+    await tick(mergeDeps({
+      cycle: dir,
+      ...hooks,
+      listSessions: async () => [{ name: "cowork-x", busy: true }],
+    }).d, new Map());
+    await tick(mergeDeps({
+      cycle: dir,
+      ...hooks,
+      heads: async () => [{ repo: "api", sha: SHA_A, dirty: true }],
+    }).d, new Map());
+    await tick(mergeDeps({ cycle: dir, ...hooks, cacheHit: async () => true }).d, new Map());
+    await tick(mergeDeps({ cycle: dir, ...hooks, heads: async () => [] }).d, new Map());
+    await tick(mergeDeps({
+      cycle: dir,
+      ...hooks,
+      heads: async () => [{ repo: "api", sha: "ABC123", dirty: false }],
+    }).d, new Map());
+
+    assert.equal(bases, 0);
+    assert.equal(ensures, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
