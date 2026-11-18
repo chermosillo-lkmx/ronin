@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -186,6 +186,79 @@ test("takeover relee sin sobrescribir cuando pierde la carrera de rename", () =>
       owner: winner,
     });
     assert.deepEqual(JSON.parse(readFileSync(join(incidentDir, "owner.json"), "utf8")), winner);
+  });
+});
+
+test("mutex impide que un segundo contender adquiera owner durante la ventana de takeover", () => {
+  withRoot((root) => {
+    const directory = join(root, "incidents", "api");
+    const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
+    original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    original.claimOwner("api", "cowork-viejo");
+
+    let resultB: ReturnType<typeof original.claimOwner> | undefined;
+    const contenderB = createIncidentManager({
+      root,
+      now: () => 70_000,
+      pid: () => 22,
+      leaseMin: 1,
+      pidAlive: (ownerPid) => ownerPid === 11,
+      mutexToken: () => "token-b-22222222",
+    });
+    let interleaved = false;
+    const contenderA = createIncidentManager({
+      root,
+      now: () => 70_000,
+      pid: () => 11,
+      leaseMin: 1,
+      pidAlive: (ownerPid) => ownerPid === 11,
+      mutexToken: () => "token-a-11111111",
+      fs: {
+        rename(source, target) {
+          if (!interleaved && source === join(directory, "owner.json")) {
+            interleaved = true;
+            const renamed = renameSync(source, target);
+            resultB = contenderB.claimOwner("api", "cowork-b");
+            return renamed;
+          }
+          return renameSync(source, target);
+        },
+      },
+    });
+
+    const resultA = contenderA.claimOwner("api", "cowork-a");
+
+    assert.equal(resultA.acquired, true);
+    assert.equal(resultB?.acquired, false);
+    assert.equal(resultB?.owner, null);
+    assert.deepEqual(contenderA.readOwner("api"), resultA.owner);
+    assert.equal(contenderA.readOwner("api")?.session, "cowork-a");
+    assert.equal(existsSync(join(directory, "owner.mutex.json")), false);
+  });
+});
+
+test("recupera mutex de owner cuando su PID ya no vive", () => {
+  withRoot((root) => {
+    const directory = join(root, "incidents", "api");
+    const original = createIncidentManager({ root, now: () => 1_000, pid: () => 1, leaseMin: 1 });
+    original.openIncident({ repo: "api", firstRedSha: SHA, summary: "rojo", attribution: ATTRIBUTION });
+    original.claimOwner("api", "cowork-viejo");
+    writeFileSync(join(directory, "owner.mutex.json"), JSON.stringify({ token: "token-muerto", pid: 999 }));
+    const contender = createIncidentManager({
+      root,
+      now: () => 70_000,
+      pid: () => 33,
+      leaseMin: 1,
+      pidAlive: () => false,
+      mutexToken: () => "token-vivo-33333333",
+    });
+
+    const result = contender.claimOwner("api", "cowork-nuevo");
+
+    assert.equal(result.acquired, true);
+    assert.equal(result.owner?.session, "cowork-nuevo");
+    assert.equal(existsSync(join(directory, "owner.mutex.json")), false);
+    assert.equal(existsSync(join(directory, "owner.mutex.stale-999-token-muerto")), true);
   });
 });
 

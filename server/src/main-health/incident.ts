@@ -1,7 +1,6 @@
 import {
   closeSync,
   fsyncSync,
-  ftruncateSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -11,6 +10,7 @@ import {
   writeSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { writeJsonAtomic } from "../atomic.js";
@@ -44,11 +44,9 @@ export interface IncidentOwner {
   heartbeat: number;
 }
 
-export interface ClaimOwnerResult {
-  acquired: boolean;
-  takeover: boolean;
-  owner: IncidentOwner;
-}
+export type ClaimOwnerResult =
+  | { acquired: true; takeover: boolean; owner: IncidentOwner }
+  | { acquired: false; takeover: false; owner: IncidentOwner | null };
 
 export interface TmuxPort {
   hasSession(session: string): Promise<boolean>;
@@ -83,14 +81,13 @@ export interface IncidentLaunchPort {
 }
 
 export type EnsureFixerResult =
-  | { status: "no-incident" | "disabled"; session: null }
+  | { status: "no-incident" | "disabled" | "busy"; session: null }
   | { status: "active" | "adopted" | "launched"; session: string }
   | { status: "remote-owned"; session: null; remoteOwner: string };
 
 export interface IncidentFs {
   close: typeof closeSync;
   fsync: typeof fsyncSync;
-  ftruncate: typeof ftruncateSync;
   mkdir: typeof mkdirSync;
   open: typeof openSync;
   readdir: typeof readdirSync;
@@ -106,6 +103,8 @@ export interface IncidentManagerDeps {
   home?: () => string;
   now?: () => number;
   pid?: () => number;
+  pidAlive?: (pid: number) => boolean;
+  mutexToken?: () => string;
   leaseMin?: number;
   tmux?: TmuxPort;
   host?: () => string;
@@ -121,6 +120,7 @@ const SAFE_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_SHA = /^[A-Fa-f0-9]{7,64}$/;
 const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_ALIAS = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const SAFE_MUTEX_TOKEN = /^[A-Za-z0-9-]{8,128}$/;
 
 function safeRepo(repo: string): boolean {
   return repo !== "." && repo !== ".." && SAFE_REPO.test(repo);
@@ -163,6 +163,28 @@ function isOwner(value: unknown): value is IncidentOwner {
     && Number.isFinite(value.started)
     && typeof value.heartbeat === "number"
     && Number.isFinite(value.heartbeat);
+}
+
+interface OwnerMutex {
+  token: string;
+  pid: number;
+}
+
+function isOwnerMutex(value: unknown): value is OwnerMutex {
+  return isRecord(value)
+    && typeof value.token === "string"
+    && SAFE_MUTEX_TOKEN.test(value.token)
+    && Number.isInteger(value.pid)
+    && (value.pid as number) > 0;
+}
+
+function processPidAlive(candidatePid: number): boolean {
+  try {
+    process.kill(candidatePid, 0);
+    return true;
+  } catch (error) {
+    return errorCode(error) !== "ESRCH";
+  }
 }
 
 function clone<T>(value: T): T {
@@ -229,6 +251,8 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   const incidentsRoot = join(root, "incidents");
   const now = deps.now ?? Date.now;
   const pid = deps.pid ?? (() => process.pid);
+  const pidAlive = deps.pidAlive ?? processPidAlive;
+  const mutexToken = deps.mutexToken ?? randomUUID;
   const host = deps.host ?? hostname;
   const leaseMs = (deps.leaseMin ?? deps.settings?.leaseMin ?? DEFAULT_MAIN_HEALTH_SETTINGS.leaseMin) * 60_000;
   const tmux = deps.tmux ?? { hasSession };
@@ -243,7 +267,6 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
   const fs: IncidentFs = {
     close: deps.fs?.close ?? closeSync,
     fsync: deps.fs?.fsync ?? fsyncSync,
-    ftruncate: deps.fs?.ftruncate ?? ftruncateSync,
     mkdir: deps.fs?.mkdir ?? mkdirSync,
     open: deps.fs?.open ?? openSync,
     readdir: deps.fs?.readdir ?? readdirSync,
@@ -271,6 +294,10 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     return join(incidentDir(repo), "owner.json");
   }
 
+  function mutexFile(repo: string): string {
+    return join(incidentDir(repo), "owner.mutex.json");
+  }
+
   function parseOwner(text: string): IncidentOwner | null {
     try {
       const value: unknown = JSON.parse(text);
@@ -289,6 +316,64 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     }
   }
 
+  function readOwnerMutex(repo: string): OwnerMutex | null {
+    try {
+      const value: unknown = JSON.parse(fs.readFile(mutexFile(repo), "utf8") as string);
+      return isOwnerMutex(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeMutexExclusive(repo: string, mutex: OwnerMutex): void {
+    let fd: number | undefined;
+    try {
+      fd = fs.open(mutexFile(repo), "wx");
+      fs.write(fd, `${JSON.stringify(mutex)}\n`);
+      fs.fsync(fd);
+    } finally {
+      if (fd !== undefined) fs.close(fd);
+    }
+  }
+
+  function releaseOwnerMutex(repo: string, mutex: OwnerMutex): void {
+    const current = readOwnerMutex(repo);
+    if (!current || current.token !== mutex.token || current.pid !== mutex.pid) return;
+    try {
+      fs.unlink(mutexFile(repo));
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+  }
+
+  function acquireOwnerMutex(repo: string, ownerPid: number): OwnerMutex | null {
+    const token = mutexToken();
+    if (!SAFE_MUTEX_TOKEN.test(token)) throw new Error("token de mutex inválido");
+    const candidate: OwnerMutex = { token, pid: ownerPid };
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        writeMutexExclusive(repo, candidate);
+        const verified = readOwnerMutex(repo);
+        if (verified?.token === candidate.token && verified.pid === candidate.pid) return candidate;
+        releaseOwnerMutex(repo, candidate);
+        return null;
+      } catch (error) {
+        if (errorCode(error) !== "EEXIST") throw error;
+      }
+      const occupied = readOwnerMutex(repo);
+      // Un archivo aún incompleto puede pertenecer a un proceso vivo que acaba de hacer open(wx).
+      if (!occupied || pidAlive(occupied.pid)) return null;
+      const stale = join(incidentDir(repo), `owner.mutex.stale-${occupied.pid}-${occupied.token}`);
+      try {
+        fs.rename(mutexFile(repo), stale);
+      } catch (error) {
+        if (errorCode(error) === "ENOENT" || errorCode(error) === "EEXIST") continue;
+        throw error;
+      }
+    }
+    return null;
+  }
+
   function writeOwnerExclusive(repo: string, owner: IncidentOwner): void {
     const target = ownerFile(repo);
     let fd: number | undefined;
@@ -305,60 +390,66 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     assertRepo(repo);
     if (!SAFE_SESSION.test(session)) throw new Error(`sesión inválida: ${session}`);
     if (!readIncident(repo)) throw new Error(`no hay incidente abierto: ${repo}`);
-    let wonTakeover = false;
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      const timestamp = now();
-      const candidate: IncidentOwner = { session, pid: pid(), started: timestamp, heartbeat: timestamp };
-      try {
-        writeOwnerExclusive(repo, candidate);
-        return { acquired: true, takeover: wonTakeover, owner: clone(candidate) };
-      } catch (error) {
-        if (errorCode(error) !== "EEXIST") throw error;
+    const timestamp = now();
+    const candidate: IncidentOwner = { session, pid: pid(), started: timestamp, heartbeat: timestamp };
+    const mutex = acquireOwnerMutex(repo, candidate.pid);
+    if (!mutex) return { acquired: false, takeover: false, owner: readOwner(repo) };
+    try {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const current = readOwner(repo);
+        if (current?.pid === candidate.pid && current.session === session) {
+          return { acquired: true, takeover: false, owner: current };
+        }
+        const age = current ? timestamp - current.heartbeat : Number.POSITIVE_INFINITY;
+        if (current && age < leaseMs) return { acquired: false, takeover: false, owner: current };
+        if (current) {
+          const stale = join(incidentDir(repo), `owner.stale-${candidate.pid}-${timestamp}`);
+          try {
+            fs.rename(ownerFile(repo), stale);
+          } catch (error) {
+            if (errorCode(error) === "ENOENT" || errorCode(error) === "EEXIST") continue;
+            throw error;
+          }
+          try {
+            writeOwnerExclusive(repo, candidate);
+            return { acquired: true, takeover: true, owner: clone(candidate) };
+          } catch (error) {
+            if (errorCode(error) === "EEXIST") continue;
+            throw error;
+          }
+        }
+        try {
+          writeOwnerExclusive(repo, candidate);
+          return { acquired: true, takeover: false, owner: clone(candidate) };
+        } catch (error) {
+          if (errorCode(error) !== "EEXIST") throw error;
+        }
       }
-
-      const current = readOwner(repo);
-      if (current?.pid === candidate.pid && current.session === session) {
-        return { acquired: true, takeover: false, owner: current };
-      }
-      const age = current ? timestamp - current.heartbeat : Number.POSITIVE_INFINITY;
-      if (current && age < leaseMs) return { acquired: false, takeover: false, owner: current };
-
-      const stale = join(incidentDir(repo), `owner.stale-${candidate.pid}-${timestamp}`);
-      try {
-        fs.rename(ownerFile(repo), stale);
-        wonTakeover = true;
-      } catch (error) {
-        if (errorCode(error) === "ENOENT" || errorCode(error) === "EEXIST") continue;
-        throw error;
-      }
+      return { acquired: false, takeover: false, owner: readOwner(repo) };
+    } finally {
+      releaseOwnerMutex(repo, mutex);
     }
-    const winner = readOwner(repo);
-    if (winner) return { acquired: false, takeover: false, owner: winner };
-    throw new Error(`no se pudo adquirir owner para ${repo}`);
   }
 
   async function heartbeatOwner(repo: string): Promise<boolean> {
     if (!safeRepo(repo)) return false;
     const expected = readOwner(repo);
     if (!expected || expected.pid !== pid() || !await tmux.hasSession(expected.session)) return false;
-    let fd: number | undefined;
+    const mutex = acquireOwnerMutex(repo, expected.pid);
+    if (!mutex) return false;
     try {
-      fd = fs.open(ownerFile(repo), "r+");
-      const current = parseOwner(fs.readFile(fd, "utf8") as string);
+      const current = readOwner(repo);
       if (!current
         || current.pid !== expected.pid
         || current.session !== expected.session
         || current.started !== expected.started) return false;
       const renewed: IncidentOwner = { ...current, heartbeat: now() };
-      const text = `${JSON.stringify(renewed, null, 2)}\n`;
-      fs.ftruncate(fd, 0);
-      fs.write(fd, text, 0, "utf8");
-      fs.fsync(fd);
+      atomicWrite(ownerFile(repo), renewed);
       return true;
     } catch {
       return false;
     } finally {
-      if (fd !== undefined) fs.close(fd);
+      releaseOwnerMutex(repo, mutex);
     }
   }
 
@@ -368,35 +459,38 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
 
   function rewriteOwnedOwner(repo: string, expected: IncidentOwner, session: string): boolean {
     if (!SAFE_SESSION.test(session)) throw new Error(`sesión inválida devuelta por launch: ${session}`);
-    let fd: number | undefined;
+    const mutex = acquireOwnerMutex(repo, expected.pid);
+    if (!mutex) return false;
     try {
-      fd = fs.open(ownerFile(repo), "r+");
-      const current = parseOwner(fs.readFile(fd, "utf8") as string);
+      const current = readOwner(repo);
       if (!current
         || current.pid !== expected.pid
         || current.session !== expected.session
         || current.started !== expected.started) return false;
       const updated: IncidentOwner = { ...current, session, heartbeat: now() };
-      const text = `${JSON.stringify(updated, null, 2)}\n`;
-      fs.ftruncate(fd, 0);
-      fs.write(fd, text, 0, "utf8");
-      fs.fsync(fd);
+      atomicWrite(ownerFile(repo), updated);
       return true;
     } finally {
-      if (fd !== undefined) fs.close(fd);
+      releaseOwnerMutex(repo, mutex);
     }
   }
 
   function releaseOwnedOwner(repo: string, expected: IncidentOwner): void {
-    const current = readOwner(repo);
-    if (!current
-      || current.pid !== expected.pid
-      || current.session !== expected.session
-      || current.started !== expected.started) return;
+    const mutex = acquireOwnerMutex(repo, expected.pid);
+    if (!mutex) return;
     try {
-      fs.unlink(ownerFile(repo));
-    } catch (error) {
-      if (errorCode(error) !== "ENOENT") throw error;
+      const current = readOwner(repo);
+      if (!current
+        || current.pid !== expected.pid
+        || current.session !== expected.session
+        || current.started !== expected.started) return;
+      try {
+        fs.unlink(ownerFile(repo));
+      } catch (error) {
+        if (errorCode(error) !== "ENOENT") throw error;
+      }
+    } finally {
+      releaseOwnerMutex(repo, mutex);
     }
   }
 
@@ -480,16 +574,21 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
     for (const session of candidates) {
       if (!await tmux.hasSession(session)) continue;
       const claimed = claimOwner(repo, session);
-      return claimed.acquired
-        ? { status: "adopted", session }
-        : { status: "active", session: claimed.owner.session };
+      if (claimed.acquired) return { status: "adopted", session };
+      return claimed.owner
+        ? { status: "active", session: claimed.owner.session }
+        : { status: "busy", session: null };
     }
     if (!autoFix) return { status: "disabled", session: null };
 
     const logicalName = `main-health-${alias}`;
     const expectedSession = `cowork-${logicalName}`;
     const ownership = claimOwner(repo, expectedSession);
-    if (!ownership.acquired) return { status: "active", session: ownership.owner.session };
+    if (!ownership.acquired) {
+      return ownership.owner
+        ? { status: "active", session: ownership.owner.session }
+        : { status: "busy", session: null };
+    }
     const branch = `fix/main-health-${repo}`;
     try {
       if (remoteClaim) {
