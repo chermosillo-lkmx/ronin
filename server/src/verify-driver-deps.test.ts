@@ -312,15 +312,67 @@ test("resolveMainMergeBase usa root/hijo, deriva repo canónico de HTTPS, scp y 
       },
     };
 
-    assert.deepEqual(await resolveMainMergeBase(value.worktree, value.head, git), {
+    assert.deepEqual(await resolveMainMergeBase(value.worktree, value.head, git, (path) => path), {
       repo: value.repo,
       sha: SHA_B,
     });
     assert.deepEqual(calls, [
+      { args: ["fetch", "-q", "origin", "main"], cwd: value.cwd },
       { args: ["remote", "get-url", "origin"], cwd: value.cwd },
       { args: ["merge-base", SHA_A, "origin/main"], cwd: value.cwd },
     ]);
   }
+});
+
+test("resolveMainMergeBase falla cerrado si no puede refrescar origin/main", async () => {
+  const calls: Array<{ args: string[]; cwd: string }> = [];
+  const git = {
+    run: async (args: string[], cwd: string) => {
+      calls.push({ args, cwd });
+      return { ok: false, out: "" };
+    },
+  };
+
+  assert.equal(
+    await resolveMainMergeBase("/wt/cycle", { repo: "api", sha: SHA_A, dirty: false }, git, (path) => path),
+    null,
+  );
+  assert.deepEqual(calls, [
+    { args: ["fetch", "-q", "origin", "main"], cwd: "/wt/cycle/api" },
+  ]);
+});
+
+test("resolveMainMergeBase rechaza un subrepo cuyo realpath escapa del worktree", async () => {
+  let gitCalls = 0;
+  const git = { run: async () => { gitCalls += 1; return { ok: true, out: "" }; } };
+  const paths = new Map([
+    ["/wt/cycle", "/real/cycle"],
+    ["/wt/cycle/api", "/outside/api"],
+  ]);
+
+  assert.equal(
+    await resolveMainMergeBase(
+      "/wt/cycle",
+      { repo: "api", sha: SHA_A, dirty: false },
+      git,
+      (path) => paths.get(path) ?? path,
+    ),
+    null,
+  );
+  assert.equal(gitCalls, 0);
+});
+
+test("createVerifyDriverDeps propaga el resolver realPath inyectado", async () => {
+  const seen: string[] = [];
+  const deps = createVerifyDriverDeps(sources({
+    realPath: (path) => {
+      seen.push(path);
+      throw new Error("path ausente");
+    },
+  }));
+
+  assert.equal(await deps.mainMergeBase!("/wt/cycle", { repo: "api", sha: SHA_A, dirty: false }), null);
+  assert.deepEqual(seen, ["/wt/cycle"]);
 });
 
 test("resolveMainMergeBase falla cerrado ante path, remoto, repo o SHA inseguros", async () => {
@@ -331,15 +383,15 @@ test("resolveMainMergeBase falla cerrado ante path, remoto, repo o SHA inseguros
   assert.equal(calls, 0);
 
   const scenarios = [
-    [{ ok: false, out: "" }, { ok: true, out: SHA_B }],
-    [{ ok: true, out: "git@host:org/a..b.git" }, { ok: true, out: SHA_B }],
-    [{ ok: true, out: "git@host:org/repo.git" }, { ok: false, out: "" }],
-    [{ ok: true, out: "git@host:org/repo.git" }, { ok: true, out: SHA_B.toUpperCase() }],
+    [{ ok: true, out: "" }, { ok: false, out: "" }, { ok: true, out: SHA_B }],
+    [{ ok: true, out: "" }, { ok: true, out: "git@host:org/a..b.git" }, { ok: true, out: SHA_B }],
+    [{ ok: true, out: "" }, { ok: true, out: "git@host:org/repo.git" }, { ok: false, out: "" }],
+    [{ ok: true, out: "" }, { ok: true, out: "git@host:org/repo.git" }, { ok: true, out: SHA_B.toUpperCase() }],
   ];
   for (const replies of scenarios) {
     let index = 0;
     const git = { run: async () => replies[index++]! };
-    assert.equal(await resolveMainMergeBase("/wt", { repo: "api", sha: SHA_A, dirty: false }, git), null);
+    assert.equal(await resolveMainMergeBase("/wt", { repo: "api", sha: SHA_A, dirty: false }, git, (path) => path), null);
   }
 });
 

@@ -6,6 +6,7 @@ import { readGateSettings, type GateSettings } from "./settings.js";
 import { cycleDirForSession, detectStage, readFlow } from "./stages.js";
 import { realGateDeps, type DriverDeps, type GateStage, type LaunchInfo } from "./verify-driver.js";
 import { resolveFlow } from "./workflow.js";
+import { realpathSync } from "node:fs";
 import { basename, resolve, sep } from "node:path";
 
 type InventorySession = {
@@ -42,6 +43,8 @@ export interface VerifyDriverDepSources {
   deliverPrompt(target: string, text: string): Promise<boolean>;
   /** Integración opcional: sólo se cablea cuando el watcher de main-health ya existe. */
   ensureMainMeasured?(repo: string, sha: string): unknown;
+  /** Frontera de filesystem para verificar que ningún symlink saque el subrepo del worktree. */
+  realPath?(path: string): string;
 }
 
 /** Carpeta propia de reportes del gate de Ronin, relativa al worktree (la lee unit-gate.sh). */
@@ -92,12 +95,17 @@ export async function resolveMainMergeBase(
   worktree: string,
   head: RepoHead,
   git: GitPort = realGitPort,
+  realPath: (path: string) => string = realpathSync,
 ): Promise<{ repo: string; sha: string } | null> {
   if (!safeRepo(head.repo) || !CANONICAL_SHA.test(head.sha)) return null;
-  const root = resolve(worktree);
-  const cwd = basename(root) === head.repo ? root : resolve(root, head.repo);
-  if (cwd !== root && !cwd.startsWith(`${root}${sep}`)) return null;
   try {
+    const lexicalRoot = resolve(worktree);
+    const lexicalCwd = basename(lexicalRoot) === head.repo ? lexicalRoot : resolve(lexicalRoot, head.repo);
+    const root = resolve(realPath(lexicalRoot));
+    const cwd = resolve(realPath(lexicalCwd));
+    if (cwd !== root && !cwd.startsWith(`${root}${sep}`)) return null;
+    const fetched = await git.run(["fetch", "-q", "origin", "main"], cwd);
+    if (!fetched.ok) return null;
     const remote = await git.run(["remote", "get-url", "origin"], cwd);
     if (!remote.ok) return null;
     const repo = canonicalRepoFromRemote(remote.out);
@@ -132,7 +140,7 @@ export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverD
     cycleFor: sources.cycleDirForSession,
     detect: sources.detectStage,
     ...realGateDeps,
-    mainMergeBase: (worktree, head) => resolveMainMergeBase(worktree, head, realGitPort),
+    mainMergeBase: (worktree, head) => resolveMainMergeBase(worktree, head, realGitPort, sources.realPath ?? realpathSync),
     ...(sources.ensureMainMeasured ? { ensureMainMeasured: sources.ensureMainMeasured } : {}),
     // Se lee en cada llamada: un cambio en settings.json o repo-config.json aplica sin reiniciar.
     gateConfig: (repo) => gateConfigFrom(sources.gateSettings(), sources.repoGate(repo)),
