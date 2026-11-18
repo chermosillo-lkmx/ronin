@@ -166,6 +166,9 @@ current = set()
 for case in ET.parse(junit).getroot().iter("testcase"):
     if case.find("failure") is not None or case.find("error") is not None:
         current.add(f'{case.get("classname") or ""}::{case.get("name") or ""}')
+if not current:
+    print("UNIDENTIFIED")
+    raise SystemExit
 new = sorted(current - base_red)
 if new:
     print("NEW", len(new), base_total, "-", "-", json.dumps(new, ensure_ascii=False), sep="\t")
@@ -825,6 +828,10 @@ for repo in "${candidates[@]}"; do
         ;;
       NEW)
         bad "$name: suite en ROJO con rojas nuevas respecto a main ${base:0:7}: $new_reds"
+        continue
+        ;;
+      UNIDENTIFIED)
+        bad "$name: suite en ROJO — sin IDs rojos identificables en $junit"
         continue
         ;;
       *)

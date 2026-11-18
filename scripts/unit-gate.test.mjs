@@ -114,6 +114,7 @@ function fixture(t) {
     git: (...args) => git(repo, ...args),
     write,
     setSuite: (cases) => writeFileSync(suiteJunit, junit(cases)),
+    setRawSuite: (body) => writeFileSync(suiteJunit, body),
     setCoverage: (options = {}) => writeFileSync(suiteCoverage, cobertura({ source: repo, ...options })),
     removeCoverage: () => rmSync(suiteCoverage, { force: true }),
     writeJunit: (path, cases) => {
@@ -1160,6 +1161,21 @@ test("58. una roja nueva respecto de main falla y lista su ID", (t) => {
   assert.match(r.out, /rojas nuevas/);
   assert.match(r.out, /tests\.test_new::test_regression/);
   assert.match(r.out, /UNIT-GATE: FAIL/);
+});
+
+test("58b. suite agregada roja sin IDs identificables falla cerrado", (t) => {
+  const fx = fixture(t);
+  fx.setRawSuite(
+    `<?xml version="1.0"?><testsuites><testsuite tests="2" failures="1" errors="0" skipped="0">` +
+    `<testcase classname="tests.test_other" name="test_other"/>` +
+    `<testcase classname="tests.test_app" name="test_app_db"/>` +
+    `</testsuite></testsuites>\n`,
+  );
+  const { healthDir } = seedMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /sin IDs rojos identificables/);
+  assert.doesNotMatch(r.out, /heredado de main .*: 0 rojas/);
 });
 
 test("59. rojas heredadas pero cobertura menor que main fallan", (t) => {
