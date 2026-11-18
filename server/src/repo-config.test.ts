@@ -174,13 +174,6 @@ test("sanitizeEntry descarta gate.xdist 0 y gate.timeoutMin 999", () => {
   assert.deepEqual(sanitizeEntry({ gate: { timeoutMin: 30, xdist: 1.5 } }).gate, { timeoutMin: 30 });
 });
 
-test("sanitizeEntry conserva gate.realPg sólo cuando es true", () => {
-  assert.deepEqual(sanitizeEntry({ gate: { realPg: true } }).gate, { realPg: true });
-  assert.equal(sanitizeEntry({ gate: { realPg: false } }).gate, undefined);
-  assert.equal(sanitizeEntry({ gate: { realPg: 1 } }).gate, undefined);
-  assert.equal(sanitizeEntry({ gate: { realPg: "true" } }).gate, undefined);
-});
-
 test("getRepoGate devuelve {} para un repo desconocido sin lanzar", () => {
   assert.deepEqual(getRepoGate("repo-que-no-existe-gate"), {});
 });
@@ -188,18 +181,18 @@ test("getRepoGate devuelve {} para un repo desconocido sin lanzar", () => {
 test("saveRepoOverrides no pierde un gate ya cargado y readRepoConfigFull/getRepoGate lo exponen", () => {
   const repo = "zz-gate-scratch";
   try {
-    saveRepoOverrides(repo, { vars: { A: "1" }, gate: { timeoutMin: 60, xdist: 4, realPg: true } });
-    assert.deepEqual(getRepoGate(repo), { timeoutMin: 60, xdist: 4, realPg: true });
-    assert.deepEqual(readRepoConfigFull(repo).gate, { timeoutMin: 60, xdist: 4, realPg: true });
+    saveRepoOverrides(repo, { vars: { A: "1" }, gate: { timeoutMin: 60, xdist: 4 } });
+    assert.deepEqual(getRepoGate(repo), { timeoutMin: 60, xdist: 4 });
+    assert.deepEqual(readRepoConfigFull(repo).gate, { timeoutMin: 60, xdist: 4 });
     // un guardado que no manda gate (Settings/workflow) lo conserva
     const guardado = saveRepoOverrides(repo, { vars: { A: "2" } });
-    assert.deepEqual(guardado.gate, { timeoutMin: 60, xdist: 4, realPg: true });
-    assert.deepEqual(getRepoGate(repo), { timeoutMin: 60, xdist: 4, realPg: true });
+    assert.deepEqual(guardado.gate, { timeoutMin: 60, xdist: 4 });
+    assert.deepEqual(getRepoGate(repo), { timeoutMin: 60, xdist: 4 });
     // un repo con sólo gate no se descarta como entrada vacía
-    saveRepoOverrides(repo, { vars: {}, gate: { realPg: true } });
-    assert.deepEqual(getRepoGate(repo), { realPg: true });
-    // false no activa PostgreSQL real y un gate inválido explícito se limpia
-    saveRepoOverrides(repo, { gate: { xdist: 0, realPg: false } });
+    saveRepoOverrides(repo, { vars: {}, gate: { xdist: 2 } });
+    assert.deepEqual(getRepoGate(repo), { xdist: 2 });
+    // un gate inválido explícito se limpia
+    saveRepoOverrides(repo, { gate: { xdist: 0 } });
     assert.deepEqual(getRepoGate(repo), {});
   } finally {
     saveRepoOverrides(repo, { gate: {} });

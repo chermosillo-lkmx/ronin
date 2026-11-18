@@ -153,17 +153,10 @@ test("A4: flowFor cae al override por repo cuando flow.json está corrupto", () 
 
 test("gateConfig incluye UNIT_GATE_XDIST sólo si el repo lo declara", () => {
   const sin = createVerifyDriverDeps(sources({ repoGate: () => ({}) }));
-  assert.deepEqual(sin.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_MAX_SUITES: "2", UNIT_GATE_REAL_PG: "0" });
+  assert.deepEqual(sin.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_MAX_SUITES: "2" });
   const con = createVerifyDriverDeps(sources({ repoGate: (repo) => (repo === "api" ? { xdist: 4 } : {}) }));
-  assert.deepEqual(con.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_MAX_SUITES: "2", UNIT_GATE_XDIST: "4", UNIT_GATE_REAL_PG: "0" });
-  assert.deepEqual(con.gateConfig("otro").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_MAX_SUITES: "2", UNIT_GATE_REAL_PG: "0" });
-});
-
-test("gateConfigFrom fija UNIT_GATE_REAL_PG efectivo sin heredar el entorno", () => {
-  const global = { timeoutMin: 45, maxConcurrent: 2, maxConcurrentLight: 4 };
-  assert.equal(gateConfigFrom(global, { realPg: true }).env.UNIT_GATE_REAL_PG, "1");
-  assert.equal(gateConfigFrom(global, { realPg: false }).env.UNIT_GATE_REAL_PG, "0");
-  assert.equal(gateConfigFrom(global, {}).env.UNIT_GATE_REAL_PG, "0");
+  assert.deepEqual(con.gateConfig("api").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_MAX_SUITES: "2", UNIT_GATE_XDIST: "4" });
+  assert.deepEqual(con.gateConfig("otro").env, { UNIT_GATE_REPORTS_DIR: "reports/ronin-gate", UNIT_GATE_MAX_SUITES: "2" });
 });
 
 test("gateConfig comparte gate.maxConcurrent con unit-gate.sh", () => {

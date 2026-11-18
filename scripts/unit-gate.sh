@@ -793,11 +793,6 @@ for repo in "${candidates[@]}"; do
     acquire_suite_slot
     # -p pytest_ronin_sigterm (scripts/): el SIGTERM de Ronin al cortar por timeout se vuelve
     # KeyboardInterrupt y pytest corre el teardown de sus fixtures antes del SIGKILL.
-    if [ "${UNIT_GATE_REAL_PG:-0}" = "1" ]; then
-      export RUN_REAL_PG=1
-    else
-      unset RUN_REAL_PG
-    fi
     COVERAGE_FILE="$(cd "$REPORTS" && pwd)/.coverage" PYTHONPATH="$GATE_SCRIPTS_DIR${PYTHONPATH:+:$PYTHONPATH}" \
     "$PY" -m pytest tests -q -o addopts="" ${extra[@]+"${extra[@]}"} ${par[@]+"${par[@]}"} --continue-on-collection-errors --color=no -p no:cacheprovider -p pytest_ronin_sigterm "${cov[@]}" --cov-report="xml:$coverage_xml" --junitxml="$junit" > "$REPORTS/unit-gate.log" 2>&1 &
     suite_pid=$!

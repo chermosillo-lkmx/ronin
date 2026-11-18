@@ -97,7 +97,6 @@ function fixture(t) {
     `if [ "$1" = "-c" ] && [ "$2" = "import xdist" ]; then [ "\${FAKE_XDIST:-}" = "1" ]; exit $?; fi\n` +
     `[ -n "\${FAKE_MARKER:-}" ] && : > "$FAKE_MARKER"\n` +
     `[ -n "\${FAKE_ARGV:-}" ] && printf '%s\\n' "$@" > "$FAKE_ARGV"\n` +
-    `[ -n "\${FAKE_REAL_PG:-}" ] && printf '%s' "\${RUN_REAL_PG:-}" > "$FAKE_REAL_PG"\n` +
     `[ -n "\${FAKE_COVFILE:-}" ] && printf '%s' "\${COVERAGE_FILE:-}" > "$FAKE_COVFILE"\n` +
     `for a in "$@"; do case "$a" in\n` +
     `  --junitxml=*) cp "$FAKE_SUITE_JUNIT" "\${a#--junitxml=}";;\n` +
@@ -1350,26 +1349,4 @@ test("64. Node con pnpm-lock ejecuta pnpm exec vitest", (t) => {
   assert.equal(r.code, 0, r.out);
   assert.deepEqual(readFileSync(argv, "utf8").split("\n").slice(0, 3), ["exec", "vitest", "run"]);
   assert.match(r.out, /pnpm exec vitest run/);
-});
-
-test("65. UNIT_GATE_REAL_PG=1 exporta RUN_REAL_PG=1 a pytest", (t) => {
-  const fx = fixture(t);
-  fx.setSuite([OTHER_PASS, APP("passed")]);
-  const seen = join(fx.tmp, "real-pg");
-  const r = fx.run({ ...withoutExtra, UNIT_GATE_REAL_PG: "1", FAKE_REAL_PG: seen });
-  assert.equal(r.code, 0, r.out);
-  assert.equal(readFileSync(seen, "utf8"), "1");
-});
-
-test("66. RUN_REAL_PG heredado se limpia si UNIT_GATE_REAL_PG no es 1", (t) => {
-  const fx = fixture(t);
-  fx.setSuite([OTHER_PASS, APP("passed")]);
-  for (const value of [undefined, "0"]) {
-    const seen = join(fx.tmp, `real-pg-${value ?? "ausente"}`);
-    const env = { ...withoutExtra, RUN_REAL_PG: "1", FAKE_REAL_PG: seen };
-    if (value !== undefined) env.UNIT_GATE_REAL_PG = value;
-    const r = fx.run(env);
-    assert.equal(r.code, 0, r.out);
-    assert.equal(readFileSync(seen, "utf8"), "", `UNIT_GATE_REAL_PG=${value ?? "ausente"}`);
-  }
 });
