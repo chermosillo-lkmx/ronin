@@ -1264,6 +1264,9 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         : { status: "busy", session: null };
     }
     if (!autoFix) return { status: "disabled", session: null };
+    const resolvedWorkflowId = deps.workflowId?.();
+    const workflowId = typeof resolvedWorkflowId === "string" ? resolvedWorkflowId.trim() : "";
+    if (!workflowId) throw new Error("workflow de main-health no disponible");
 
     const logicalName = `main-health-${alias}`;
     const expectedSession = `cowork-${logicalName}`;
@@ -1292,9 +1295,6 @@ export function createIncidentManager(deps: IncidentManagerDeps = {}) {
         return { status: "busy", session: null };
       }
       const launched = await runWithIncidentOperation(repo, launchOperation, async () => {
-        const resolvedWorkflowId = deps.workflowId?.();
-        const workflowId = typeof resolvedWorkflowId === "string" ? resolvedWorkflowId.trim() : "";
-        if (!workflowId) throw new Error("workflow de main-health no disponible");
         const result = await launch.launchManagedSession({
           repo,
           workflowId,

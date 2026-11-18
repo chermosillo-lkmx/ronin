@@ -1581,12 +1581,23 @@ test("ensureFixer falla cerrado sin workflow y libera owner para reintento", asy
   await withRootAsync(async (root) => {
     let resolved: string | null = null;
     let launches = 0;
+    const gitCalls: string[][] = [];
     const manager = createIncidentManager({
       root,
       pid: () => 602,
       workflowId: () => resolved,
-      settings: { aliases: {}, autoFix: true, remoteClaim: false },
+      settings: { aliases: {}, autoFix: true, remoteClaim: true },
       tmux: { hasSession: async () => false },
+      git: {
+        async run(args) {
+          gitCalls.push(args);
+          if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+          if (args[0] === "commit-tree") return `${"c".repeat(40)}\n`;
+          if (args[0] === "ls-remote") return "";
+          if (args[0] === "push") return "";
+          throw new Error(`Git inesperado: ${args.join(" ")}`);
+        },
+      },
       launch: {
         launchManagedSession: async (input) => {
           launches += 1;
@@ -1598,6 +1609,7 @@ test("ensureFixer falla cerrado sin workflow y libera owner para reintento", asy
 
     await assert.rejects(() => manager.ensureFixer("api", "/repo"), /workflow.*no disponible/i);
     assert.equal(launches, 0);
+    assert.deepEqual(gitCalls, [], "catálogo ausente falla antes de crear o publicar claim remoto");
     assert.equal(manager.readOwner("api"), null, "un resolver fallido no deja ownership bloqueado");
 
     resolved = "wf-recuperado";
@@ -1605,6 +1617,7 @@ test("ensureFixer falla cerrado sin workflow y libera owner para reintento", asy
       status: "launched", session: "cowork-main-health-api",
     });
     assert.equal(launches, 1);
+    assert.ok(gitCalls.some(([command]) => command === "push"));
   });
 });
 
