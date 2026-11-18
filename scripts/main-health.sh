@@ -5,6 +5,10 @@ set -u
 usage() { printf 'uso: %s <repo> [--sha <sha>]\n' "$(basename "$0")" >&2; exit 2; }
 [ "$#" -ge 1 ] || usage
 repo="$1"; shift
+if [ "$repo" = "." ] || [ "$repo" = ".." ] || ! [[ "$repo" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  printf 'main-health: nombre de repo inválido: %s\n' "$repo" >&2
+  exit 2
+fi
 requested_sha=""
 if [ "$#" -gt 0 ]; then
   [ "$#" -eq 2 ] && [ "$1" = "--sha" ] || usage

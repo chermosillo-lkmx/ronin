@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -132,7 +133,7 @@ function fixture(t, options = {}) {
   const errorPath = join(healthDir, REPO, `${sha}.error.json`);
   const lockPath = join(healthDir, REPO, `${sha}.lock`);
   return {
-    root, repo, healthDir, sha, marker, sourceJunit, jsonPath, errorPath, lockPath, gitEnv,
+    root, repo, healthDir, sha, marker, sourceJunit, jsonPath, errorPath, lockPath, gitEnv, baseEnv,
     run, spawnRun,
     setJunit: (cases) => writeFileSync(sourceJunit, junit(cases)),
     setRawJunit: (xml) => writeFileSync(sourceJunit, xml),
@@ -194,6 +195,21 @@ test("main-health imprime una caché roja, sale 1 y no corre la suite", (t) => {
   assert.equal(result.code, 1, result.out);
   assert.equal(result.out, cached);
   assert.equal(existsSync(fx.marker), false, result.out);
+});
+
+test("main-health rechaza nombres de repo con traversal antes de escribir rutas", (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  const escapeRepo = join(fx.root, "escape");
+  symlinkSync(fx.repo, escapeRepo);
+  const result = spawnSync("bash", [SCRIPT, "../escape", "--sha", fx.sha], {
+    encoding: "utf8",
+    env: fx.baseEnv,
+  });
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stdout + result.stderr, /repo.*inválido|nombre.*repo/i);
+  assert.equal(existsSync(join(escapeRepo, `${fx.sha}.json`)), false);
+  assert.equal(existsSync(fx.marker), false);
 });
 
 test("main-health espera un lock vivo hasta que aparece su JSON", async (t) => {
