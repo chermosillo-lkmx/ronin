@@ -171,6 +171,7 @@ import os
 import re
 import sys
 import time
+import tomllib
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation
@@ -225,10 +226,16 @@ def ini_floor(path, section):
         return None
 
 floor = None
-for filename, section in ((".coveragerc", "report"), ("pyproject.toml", "tool.coverage.report"), ("setup.cfg", "coverage:report")):
+for filename, section in ((".coveragerc", "report"), ("setup.cfg", "coverage:report")):
     floor = ini_floor(worktree / filename, section)
     if floor is not None:
         break
+if floor is None:
+    try:
+        report = tomllib.loads((worktree / "pyproject.toml").read_text())["tool"]["coverage"]["report"]
+        floor = float(Decimal(str(report["fail_under"])))
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError, ValueError, InvalidOperation):
+        pass
 if floor is None:
     try:
         text = (worktree / "vitest.config.ts").read_text()

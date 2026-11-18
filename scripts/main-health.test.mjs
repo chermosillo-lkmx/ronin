@@ -41,7 +41,7 @@ const coverage = `<?xml version="1.0"?><coverage line-rate="0.90"><packages><pac
   `<class filename="src/app.py"><lines><line number="1" hits="1"/><line number="2" hits="0"/></lines></class>` +
   `</classes></package></packages></coverage>\n`;
 
-function fixture(t) {
+function fixture(t, options = {}) {
   const root = mkdtempSync(join(tmpdir(), "main-health-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repoRoot = join(root, "repos");
@@ -66,7 +66,13 @@ function fixture(t) {
   sh("git", ["clone", "-q", origin, repo], { cwd: root, env: gitEnv });
   mkdirSync(join(repo, "src"), { recursive: true });
   mkdirSync(join(repo, "tests"), { recursive: true });
-  writeFileSync(join(repo, ".coveragerc"), "[run]\nsource = src\n[report]\nfail_under = 80\n");
+  if (options.pyprojectFloor) {
+    writeFileSync(join(repo, "pyproject.toml"),
+      `[tool.coverage.run]\nsource = ["src"]\n\n` +
+      `[tool.coverage.report]\nfail_under = ${options.pyprojectFloor}\nexclude_lines = [\n  "pragma: no cover",\n  "if TYPE_CHECKING:",\n]\n`);
+  } else {
+    writeFileSync(join(repo, ".coveragerc"), "[run]\nsource = src\n[report]\nfail_under = 80\n");
+  }
   writeFileSync(join(repo, "pytest.ini"), "[pytest]\n");
   writeFileSync(join(repo, "src/app.py"), "def f():\n    return 1\n");
   writeFileSync(join(repo, "tests/test_app.py"), "def test_f():\n    assert True\n");
@@ -254,4 +260,15 @@ test("main-health conserva una suite roja como medición roja y sale 1", (t) => 
   assert.deepEqual(data.failed, ["tests.test_app::test_f"]);
   assert.deepEqual(data.errors, ["tests.test_app::test_setup"]);
   assert.equal(data.gate_rc, 1);
+});
+
+test("main-health lee fail_under de un pyproject TOML multilineal válido", (t) => {
+  const fx = fixture(t, { pyprojectFloor: 95 });
+  fx.setJunit(passingCases);
+  const result = fx.run();
+  assert.equal(result.code, 1, result.out);
+  const data = JSON.parse(readFileSync(fx.jsonPath, "utf8"));
+  assert.equal(data.floor, 95);
+  assert.equal(data.total, 90);
+  assert.equal(data.status, "red");
 });
