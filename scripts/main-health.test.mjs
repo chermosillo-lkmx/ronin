@@ -77,6 +77,11 @@ function fixture(t, options = {}) {
     writeFileSync(join(repo, "setup.cfg"), `[coverage:report]\nfail_under = ${options.setupFloor}\n`);
   }
   writeFileSync(join(repo, "pytest.ini"), "[pytest]\n");
+  if (options.packageManager) {
+    writeFileSync(join(repo, "package.json"), '{"name":"fixture","version":"1.0.0"}\n');
+    if (options.packageManager === "pnpm") writeFileSync(join(repo, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    else writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}\n');
+  }
   writeFileSync(join(repo, "src/app.py"), "def f():\n    return 1\n");
   writeFileSync(join(repo, "tests/test_app.py"), "def test_f():\n    assert True\n");
   sh("git", ["add", "-A"], { cwd: repo, env: gitEnv });
@@ -130,6 +135,8 @@ function fixture(t, options = {}) {
     root, repo, healthDir, sha, marker, sourceJunit, jsonPath, errorPath, lockPath, gitEnv,
     run, spawnRun,
     setJunit: (cases) => writeFileSync(sourceJunit, junit(cases)),
+    setRawJunit: (xml) => writeFileSync(sourceJunit, xml),
+    setRawCoverage: (xml) => writeFileSync(sourceCoverage, xml),
   };
 }
 
@@ -352,6 +359,44 @@ test("main-health escribe error JSON y sale 2 cuando no hay junit", (t) => {
   assert.match(error.reason, /junit/i);
   assert.equal(typeof error.at, "number");
   assert.match(error.log_tail, /salida simulada/);
+});
+
+test("main-health publica error JSON cuando falla la instalación", (t) => {
+  const fx = fixture(t, { packageManager: "pnpm" });
+  fx.setJunit(passingCases);
+  const fakeBin = join(fx.root, "fake-bin");
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(fakeBin, "pnpm"), "#!/bin/bash\necho 'falló install simulado' >&2\nexit 42\n");
+  chmodSync(join(fakeBin, "pnpm"), 0o755);
+  const result = fx.run({ PATH: `${fakeBin}:${process.env.PATH}` });
+  assert.equal(result.code, 2, result.out);
+  assert.equal(existsSync(fx.jsonPath), false);
+  const error = JSON.parse(readFileSync(fx.errorPath, "utf8"));
+  assert.match(error.reason, /instalación.*pnpm/i);
+  assert.match(error.log_tail, /falló install simulado/);
+});
+
+test("main-health publica error JSON cuando el JUnit está malformado", (t) => {
+  const fx = fixture(t);
+  fx.setRawJunit("<testsuites><testsuite>");
+  const result = fx.run();
+  assert.equal(result.code, 2, result.out);
+  assert.equal(existsSync(fx.jsonPath), false);
+  const error = JSON.parse(readFileSync(fx.errorPath, "utf8"));
+  assert.match(error.reason, /JUnit.*malformado/i);
+  assert.equal(typeof error.log_tail, "string");
+});
+
+test("main-health publica error JSON cuando Cobertura está malformada", (t) => {
+  const fx = fixture(t);
+  fx.setJunit(passingCases);
+  fx.setRawCoverage("<coverage><packages>");
+  const result = fx.run();
+  assert.equal(result.code, 2, result.out);
+  assert.equal(existsSync(fx.jsonPath), false);
+  const error = JSON.parse(readFileSync(fx.errorPath, "utf8"));
+  assert.match(error.reason, /Cobertura.*malformado/i);
+  assert.equal(typeof error.log_tail, "string");
 });
 
 test("main-health conserva una suite roja como medición roja y sale 1", (t) => {

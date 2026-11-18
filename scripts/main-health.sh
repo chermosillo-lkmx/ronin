@@ -36,6 +36,31 @@ wt_parent="$repo_health/wt-$short"
 wt="$wt_parent/$repo"
 path_lock="$wt_parent.lock"
 mkdir -p "$repo_health"
+diagnostic_log="$repo_health/.$sha.diagnostic.$$"
+
+atomic_error() {
+  local reason="$1" log_path="${2:-}"
+  python3 - "$error_json" "$sha" "$reason" "$log_path" <<'PY'
+import json, os, sys, time
+from pathlib import Path
+target, sha, reason, log = sys.argv[1:]
+try:
+    tail = "\n".join(Path(log).read_text(errors="replace").splitlines()[-30:]) if log else ""
+except OSError:
+    tail = ""
+data = {"sha": sha, "reason": reason, "at": int(time.time() * 1000), "log_tail": tail}
+target = Path(target)
+temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+temporary.write_text(json.dumps(data, separators=(",", ":")) + "\n")
+os.replace(temporary, target)
+PY
+}
+
+publish_error() {
+  atomic_error "$1" "${2:-}"
+  cat "$error_json"
+  exit 2
+}
 
 print_cached() {
   [ -f "$json" ] || return 1
@@ -127,6 +152,7 @@ acquire_path_lock() {
 }
 
 cleanup() {
+  rm -f "$diagnostic_log"
   if [ -n "${wt:-}" ] && [ -e "$wt" ]; then
     git -C "$source_repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
   fi
@@ -166,10 +192,15 @@ git -C "$source_repo" worktree add -q --detach "$wt" "$sha" || {
 
 if [ -f "$wt/package.json" ]; then
   if [ -f "$wt/pnpm-lock.yaml" ]; then
-    (cd "$wt" && pnpm install --frozen-lockfile) || exit 2
+    if ! (cd "$wt" && pnpm install --frozen-lockfile) >"$diagnostic_log" 2>&1; then
+      publish_error "falló la instalación con pnpm" "$diagnostic_log"
+    fi
   else
-    (cd "$wt" && npm ci) || exit 2
+    if ! (cd "$wt" && npm ci) >"$diagnostic_log" 2>&1; then
+      publish_error "falló la instalación con npm" "$diagnostic_log"
+    fi
   fi
+  rm -f "$diagnostic_log"
 fi
 
 now_ms() { python3 - <<'PY'
@@ -189,37 +220,34 @@ reports_rel="${UNIT_GATE_REPORTS_DIR:-reports}"
 reports="$wt/$reports_rel"
 junit="$reports/junit-gate.xml"
 
-atomic_error() {
-  python3 - "$error_json" "$sha" "$junit" "$reports/unit-gate.log" <<'PY'
-import json, os, sys, time
-from pathlib import Path
-target, sha, junit, log = map(Path, sys.argv[1:])
-try:
-    tail = "\n".join(log.read_text(errors="replace").splitlines()[-30:])
-except OSError:
-    tail = ""
-data = {
-    "sha": str(sha),
-    "reason": f"la suite no produjo junit ({junit})",
-    "at": int(time.time() * 1000),
-    "log_tail": tail,
-}
-temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-temporary.write_text(json.dumps(data, separators=(",", ":")) + "\n")
-os.replace(temporary, target)
-PY
-}
-
 if [ ! -f "$junit" ]; then
-  atomic_error
-  cat "$error_json"
-  exit 2
+  publish_error "la suite no produjo junit ($junit)" "$reports/unit-gate.log"
 fi
 
 coverage=""
 for candidate in "$reports/coverage-gate.xml" "$reports/coverage-gate/cobertura-coverage.xml"; do
   [ -f "$candidate" ] && { coverage="$candidate"; break; }
 done
+
+validate_xml() {
+  python3 - "$1" <<'PY' 2>"$diagnostic_log"
+import sys
+import xml.etree.ElementTree as ET
+try:
+    ET.parse(sys.argv[1])
+except (OSError, ET.ParseError) as exc:
+    print(exc, file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+if ! validate_xml "$junit"; then
+  publish_error "JUnit malformado ($junit)" "$diagnostic_log"
+fi
+if [ -n "$coverage" ] && ! validate_xml "$coverage"; then
+  publish_error "Cobertura malformado ($coverage)" "$diagnostic_log"
+fi
+rm -f "$diagnostic_log"
 
 python3 - "$json" "$sha" "$repo" "$junit" "$coverage" "$wt" "$duration" "$gate_rc" <<'PY'
 import configparser
