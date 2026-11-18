@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
-import type { MainHealthRow } from "../../api.js";
+import { getMainHealth, type MainHealthRow } from "../../api.js";
 import * as stripModule from "./MainHealthStrip.js";
 
 const green: MainHealthRow = {
@@ -93,6 +93,106 @@ test("polling actualiza, conserva datos ante error y limpia su timer", async () 
   assert.deepEqual(updates, [[green]], "un error no borra el último snapshot");
   stop();
   assert.equal(cleared, true);
+});
+
+test("polling con la API real conserva el snapshot ante un fallo HTTP", async () => {
+  const originalFetch = globalThis.fetch;
+  const updates: MainHealthRow[][] = [];
+  let interval!: () => void;
+  let calls = 0;
+  try {
+    globalThis.fetch = async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(JSON.stringify([green]))
+        : new Response("temporal", { status: 503 });
+    };
+    const stop = stripModule.startMainHealthPolling({
+      load: getMainHealth,
+      onRows: (rows) => { updates.push(rows); },
+      refreshMs: 5_000,
+      timers: {
+        setInterval: (callback) => { interval = callback; return 8; },
+        clearInterval: () => undefined,
+      },
+    });
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    interval();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(updates, [[green]], "el error de API no publica un snapshot vacío");
+    stop();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("polling mantiene una sola carga y coalesce un único retry", async () => {
+  const updates: MainHealthRow[][] = [];
+  const pending: Array<{
+    promise: Promise<MainHealthRow[]>;
+    resolve(rows: MainHealthRow[]): void;
+  }> = [];
+  let interval!: () => void;
+  let calls = 0;
+  const nextLoad = () => {
+    let resolve!: (rows: MainHealthRow[]) => void;
+    const promise = new Promise<MainHealthRow[]>((done) => { resolve = done; });
+    pending.push({ promise, resolve });
+    return promise;
+  };
+  const stop = stripModule.startMainHealthPolling({
+    load: () => { calls += 1; return nextLoad(); },
+    onRows: (rows) => { updates.push(rows); },
+    refreshMs: 5_000,
+    timers: {
+      setInterval: (callback) => { interval = callback; return 9; },
+      clearInterval: () => undefined,
+    },
+  });
+
+  await Promise.resolve();
+  interval();
+  interval();
+  assert.equal(calls, 1, "los ticks no solapan la carga activa");
+
+  pending[0]!.resolve([green]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2, "varios ticks pendientes producen un solo retry");
+  assert.deepEqual(updates, [[green]]);
+
+  pending[1]!.resolve([redOwned]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(updates, [[green], [redOwned]]);
+  stop();
+});
+
+test("cleanup descarta respuesta tardía y retry coalescido", async () => {
+  const updates: MainHealthRow[][] = [];
+  let interval!: () => void;
+  let resolve!: (rows: MainHealthRow[]) => void;
+  let calls = 0;
+  const load = () => {
+    calls += 1;
+    return new Promise<MainHealthRow[]>((done) => { resolve = done; });
+  };
+  const stop = stripModule.startMainHealthPolling({
+    load,
+    onRows: (rows) => { updates.push(rows); },
+    refreshMs: 5_000,
+    timers: {
+      setInterval: (callback) => { interval = callback; return 10; },
+      clearInterval: () => undefined,
+    },
+  });
+
+  await Promise.resolve();
+  interval();
+  stop();
+  resolve([green]);
+  await new Promise<void>((done) => setImmediate(done));
+  assert.equal(calls, 1, "el cleanup elimina el retry aún no iniciado");
+  assert.deepEqual(updates, [], "una respuesta de generación cerrada no actualiza la vista");
 });
 
 test("SSR usa initialRows y no inicia polling", () => {

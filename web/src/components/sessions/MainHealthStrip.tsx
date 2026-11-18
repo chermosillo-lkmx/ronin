@@ -28,16 +28,38 @@ const browserTimers: MainHealthPollingTimers = {
 /** Polling aislado: un fallo conserva el último snapshot y el cleanup cerca respuestas tardías. */
 export function startMainHealthPolling(input: MainHealthPollingInput): () => void {
   let active = true;
+  let generation = 0;
+  let inFlight = false;
+  let retryQueued = false;
   const refresh = () => {
+    if (!active) return;
+    if (inFlight) {
+      retryQueued = true;
+      return;
+    }
+    inFlight = true;
+    const runGeneration = generation;
     void Promise.resolve()
       .then(input.load)
-      .then((rows) => { if (active) input.onRows(rows); })
-      .catch(() => undefined);
+      .then((rows) => {
+        if (active && generation === runGeneration) input.onRows(rows);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (generation !== runGeneration) return;
+        inFlight = false;
+        if (active && retryQueued) {
+          retryQueued = false;
+          refresh();
+        }
+      });
   };
   refresh();
   const handle = input.timers.setInterval(refresh, input.refreshMs);
   return () => {
     active = false;
+    generation += 1;
+    retryQueued = false;
     input.timers.clearInterval(handle);
   };
 }
