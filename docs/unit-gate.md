@@ -140,6 +140,23 @@ ejemplo, en pruebas herméticas— se usa `UNIT_GATE_MAIN_HEALTH_AUTO=0`; en ese
 la medición falla cerrado. `MAIN_HEALTH_DIR` permite aislar tanto la lectura como la escritura de
 esta caché.
 
+### Monitor de salud de main (server)
+
+El server vigila `origin/main` de los repos de `mainHealth.repos` (settings.json; por defecto
+`ant-liebre-api`, `ant-ms-cfdis`, `ant-liebre-data-extraction-contpaqi`, `ant-ms-permissions`,
+`ant-ms-i18n` — `ant-liebre-app` queda fuera: no somos owners) cada `mainHealth.intervalMin` (10) y
+mide cada SHA nuevo una sola vez. Con main rojo abre un incidente por repo en
+`~/.cowork/main-health/incidents/<repo>/` con un único dueño (lease de `leaseMin` = 30 min) y lo
+cierra cuando una medición posterior queda verde. Defaults (decisión del humano, 2026-11-18):
+
+| Clave | Default | Efecto |
+|---|---|---|
+| `remoteClaim` | **true** | Empuja (sin `--force`) un commit de claim a `refs/heads/fix/main-health-<repo>` del repo real; si lo rechazan, otra máquina ya tiene el incidente. |
+| `autoFix` | **true** | El dueño lanza (o adopta) la sesión `cowork-main-health-<repo|alias>` con `claude-plan-codex-impl`. |
+| `commentOnPr` | false | Comentar la atribución en el PR culpable. |
+
+Apagar todo: `mainHealth.enabled: false`.
+
 ### Dónde está el código de producto
 
 `scripts/gate-source-dirs.sh` (`source_dirs <repo>`), compartido con `i18n-gate.sh`, decide por repo:
