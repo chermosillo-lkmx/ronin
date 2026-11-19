@@ -123,6 +123,40 @@ UNIT_GATE_RECORD_BASE=1 scripts/unit-gate.sh <checkout-de-main>
 Ese modo corre la suite completa, registra `{sha, tree, total, at}` y sale con el veredicto de la
 regla 3, sin exigir cambios de rama ni aplicar el piso que precisamente se está heredando.
 
+### Tests rojos heredados de main
+
+Cuando una rama encuentra tests rojos, el gate consulta la medición de su `merge-base` en
+`MAIN_HEALTH_DIR/<repo-remoto>/<sha>.json` (por defecto
+`~/.cowork/main-health/<repo>/<sha>.json`). El nombre del repo sale de `origin`, no del nombre del
+worktree. Si todos los failures y errors de la rama ya estaban rojos en esa base, los reporta como
+`heredado de main`, muestra el incidente y su dueño cuando existen, y continúa con las reglas de
+tests tocados y cobertura. Esto no vuelve permisivo al gate: un test rojo nuevo falla, y una rama
+con rojas heredadas también falla si su cobertura total baja respecto a la medición de la base.
+El HEAD de una rama con rojas heredadas no se registra como nueva base.
+
+Sin medición, el gate intenta crearla con `scripts/main-health.sh <repo> --sha <merge-base>` y el
+lock de esa herramienta evita duplicar la suite. Para desactivar esa medición automática —por
+ejemplo, en pruebas herméticas— se usa `UNIT_GATE_MAIN_HEALTH_AUTO=0`; en ese modo la ausencia de
+la medición falla cerrado. `MAIN_HEALTH_DIR` permite aislar tanto la lectura como la escritura de
+esta caché.
+
+### Monitor de salud de main (server)
+
+El server vigila `origin/main` de los repos de `mainHealth.repos` (settings.json; por defecto
+`ant-liebre-api`, `ant-ms-cfdis`, `ant-liebre-data-extraction-contpaqi`, `ant-ms-permissions`,
+`ant-ms-i18n` — `ant-liebre-app` queda fuera: no somos owners) cada `mainHealth.intervalMin` (10) y
+mide cada SHA nuevo una sola vez. Con main rojo abre un incidente por repo en
+`~/.cowork/main-health/incidents/<repo>/` con un único dueño (lease de `leaseMin` = 30 min) y lo
+cierra cuando una medición posterior queda verde. Defaults (decisión del humano, 2026-11-18):
+
+| Clave | Default | Efecto |
+|---|---|---|
+| `remoteClaim` | **true** | Empuja (sin `--force`) un commit de claim a `refs/heads/fix/main-health-<repo>` del repo real; si lo rechazan, otra máquina ya tiene el incidente. |
+| `autoFix` | **true** | El dueño lanza (o adopta) la sesión `cowork-main-health-<repo|alias>` con `claude-plan-codex-impl`. |
+| `commentOnPr` | false | Comentar la atribución en el PR culpable. |
+
+Apagar todo: `mainHealth.enabled: false`.
+
 ### Dónde está el código de producto
 
 `scripts/gate-source-dirs.sh` (`source_dirs <repo>`), compartido con `i18n-gate.sh`, decide por repo:

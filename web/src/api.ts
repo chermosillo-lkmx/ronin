@@ -23,6 +23,96 @@ export async function getHealth(): Promise<{ verifyGate: boolean } | null> {
   return typeof body?.verifyGate === "boolean" ? { verifyGate: body.verifyGate } : null;
 }
 
+export interface MainHealthOwner {
+  session: string;
+  heartbeat: number;
+}
+
+export interface MainHealthIncident {
+  id: string;
+  openedAt: number;
+  owner?: MainHealthOwner;
+  remoteOwner?: string;
+}
+
+export interface MainHealthRow {
+  repo: string;
+  sha: string;
+  status: "green" | "red";
+  total: number | null;
+  floor: number | null;
+  failedCount: number;
+  measuredAt: number;
+  incident?: MainHealthIncident;
+}
+
+const MAIN_HEALTH_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MAIN_HEALTH_SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const MAIN_HEALTH_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+function mainHealthRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function validMainHealthRepo(value: unknown): value is string {
+  return typeof value === "string"
+    && value !== "ant-liebre-app"
+    && value.length <= 61
+    && MAIN_HEALTH_REPO.test(value)
+    && !value.includes("..")
+    && !value.endsWith(".")
+    && !value.toLowerCase().endsWith(".lock");
+}
+
+function validMainHealthIncident(value: unknown, repo: string): value is MainHealthIncident {
+  if (!mainHealthRecord(value)) return false;
+  const owner = value.owner;
+  return typeof value.id === "string"
+    && new RegExp(`^${repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}@[a-f0-9]{7}$`).test(value.id)
+    && finiteNumber(value.openedAt)
+    && (owner === undefined || (
+      mainHealthRecord(owner)
+      && typeof owner.session === "string"
+      && MAIN_HEALTH_SESSION.test(owner.session)
+      && finiteNumber(owner.heartbeat)
+    ))
+    && (value.remoteOwner === undefined || (
+      typeof value.remoteOwner === "string"
+      && value.remoteOwner.length > 0
+      && value.remoteOwner.length <= 256
+    ));
+}
+
+function validMainHealthRow(value: unknown): value is MainHealthRow {
+  if (!mainHealthRecord(value) || !validMainHealthRepo(value.repo)) return false;
+  return typeof value.sha === "string"
+    && MAIN_HEALTH_SHA.test(value.sha)
+    && (value.status === "green" || value.status === "red")
+    && (value.total === null || finiteNumber(value.total))
+    && (value.floor === null || finiteNumber(value.floor))
+    && Number.isInteger(value.failedCount)
+    && (value.failedCount as number) >= 0
+    && finiteNumber(value.measuredAt)
+    && (value.incident === undefined || validMainHealthIncident(value.incident, value.repo));
+}
+
+/** Lee el resumen público de main; una fila corrupta nunca llega a la superficie operativa. */
+export async function getMainHealth(): Promise<MainHealthRow[]> {
+  try {
+    const response = await fetch("/api/main-health");
+    if (!response.ok) throw new Error();
+    const body: unknown = await response.json();
+    if (!Array.isArray(body)) throw new Error();
+    return body.filter(validMainHealthRow);
+  } catch {
+    throw new Error("no se pudo leer salud de main");
+  }
+}
+
 export async function getWorkflow(): Promise<WorkflowConfig | null> {
   const r = await fetch("/api/workflow");
   return r.ok ? r.json() : null;

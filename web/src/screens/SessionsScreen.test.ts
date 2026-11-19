@@ -51,6 +51,19 @@ test("SessionsScreen muestra el inspector por defecto", () => {
   assert.match(output, /<aside class="ronin-inspector"/);
 });
 
+test("SessionsScreen monta Salud de main al inicio del workspace sin mover el inspector", () => {
+  const output = renderSessionsWithInspectorPreference(null);
+  const workspace = output.indexOf('<main class="ronin-workspace">');
+  const strip = output.indexOf('aria-label="Salud de main"', workspace);
+  const toggle = output.indexOf('class="ron-web-view-toggle"', workspace);
+  const inspector = output.indexOf('<aside class="ronin-inspector"');
+
+  assert.ok(workspace >= 0);
+  assert.ok(strip > workspace, "la tira vive dentro del workspace");
+  assert.ok(toggle > strip, "la tira precede al toggle y al workspace de sesión");
+  assert.ok(inspector > toggle, "el inspector conserva su posición lateral");
+});
+
 test("SessionsScreen oculta el inspector guardado y conserva el control", () => {
   const output = renderSessionsWithInspectorPreference("collapsed");
   assert.doesNotMatch(output, /<aside class="ronin-inspector"/);

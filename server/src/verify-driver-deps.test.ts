@@ -1,6 +1,16 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { createVerifyDriverDeps, type VerifyDriverDepSources } from "./verify-driver-deps.js";
+import {
+  createVerifyDriverDeps,
+  gateConfigFrom,
+  realVerifyDriverDeps,
+  resolveMainMergeBase,
+  type VerifyDriverDepSources,
+} from "./verify-driver-deps.js";
+import * as verifyDepsModule from "./verify-driver-deps.js";
+
+const SHA_A = "a".repeat(40);
+const SHA_B = "b".repeat(40);
 
 function sources(overrides: Partial<VerifyDriverDepSources> = {}): VerifyDriverDepSources {
   return {
@@ -259,4 +269,177 @@ test("el driver real lee el mtime de los sentinelas (vuelta a pre-merge desde pr
   const deps = createVerifyDriverDeps(sources({}));
   assert.equal(typeof deps.sentinelAt, "function");
   assert.equal(deps.sentinelAt!("/no/existe/ronin-ciclo", "pre-merge"), null);
+});
+
+test("puerto main-base impone timeout y Git/SSH no interactivos sin pisar un SSH configurado", async () => {
+  const factory = (verifyDepsModule as any).createMainMergeBaseGitPort;
+  assert.equal(typeof factory, "function");
+  const calls: Array<{ command: string; args: string[]; options: any }> = [];
+  const git = factory({
+    timeoutMs: 1_234,
+    env: { PATH: "/fixture/bin", GIT_TERMINAL_PROMPT: "1", GIT_SSH_COMMAND: "ssh-fixture --safe" },
+    execFile: (command: string, args: string[], options: any, callback: (error: Error | null, stdout: string) => void) => {
+      calls.push({ command, args, options });
+      callback(Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }), "parcial");
+    },
+  });
+
+  assert.deepEqual(await git.run(["fetch", "-q", "origin", "main"], "/repo"), { ok: false, out: "parcial" });
+  assert.deepEqual(calls.map(({ command, args }) => ({ command, args })), [
+    { command: "git", args: ["fetch", "-q", "origin", "main"] },
+  ]);
+  assert.equal(calls[0]!.options.cwd, "/repo");
+  assert.equal(calls[0]!.options.timeout, 1_234);
+  assert.equal(calls[0]!.options.encoding, "utf8");
+  assert.equal(calls[0]!.options.env.PATH, "/fixture/bin");
+  assert.equal(calls[0]!.options.env.GIT_TERMINAL_PROMPT, "0");
+  assert.equal(calls[0]!.options.env.GIT_SSH_COMMAND, "ssh-fixture --safe");
+});
+
+test("puerto main-base agrega SSH batch/timeout y el resolver falla cerrado ante error", async () => {
+  const factory = (verifyDepsModule as any).createMainMergeBaseGitPort;
+  assert.equal(typeof factory, "function");
+  let options: any;
+  const git = factory({
+    env: { PATH: "/fixture/bin" },
+    execFile: (_command: string, _args: string[], received: any, callback: (error: Error | null, stdout: string) => void) => {
+      options = received;
+      callback(new Error("sin red"), "");
+    },
+  });
+
+  assert.equal(
+    await resolveMainMergeBase("/wt/cycle", { repo: "api", sha: SHA_A, dirty: false }, git, (path) => path),
+    null,
+  );
+  assert.match(options.env.GIT_SSH_COMMAND, /BatchMode=yes/);
+  assert.match(options.env.GIT_SSH_COMMAND, /ConnectTimeout=10/);
+});
+
+test("resolveMainMergeBase usa root/hijo, deriva repo canónico de HTTPS, scp y path", async () => {
+  const cases = [
+    {
+      worktree: "/wt/api",
+      head: { repo: "api", sha: SHA_A, dirty: false },
+      cwd: "/wt/api",
+      remote: "https://github.com/lkmx/ant-liebre-api.git",
+      repo: "ant-liebre-api",
+    },
+    {
+      worktree: "/wt/cycle",
+      head: { repo: "cfdis", sha: SHA_A, dirty: false },
+      cwd: "/wt/cycle/cfdis",
+      remote: "git@github.com:lkmx/ant-ms-cfdis.git",
+      repo: "ant-ms-cfdis",
+    },
+    {
+      worktree: "/wt/cycle",
+      head: { repo: "i18n", sha: SHA_A, dirty: false },
+      cwd: "/wt/cycle/i18n",
+      remote: "/tmp/remotes/ant-ms-i18n.git",
+      repo: "ant-ms-i18n",
+    },
+  ];
+  for (const value of cases) {
+    const calls: Array<{ args: string[]; cwd: string }> = [];
+    const git = {
+      run: async (args: string[], cwd: string) => {
+        calls.push({ args, cwd });
+        return args[0] === "remote"
+          ? { ok: true, out: `${value.remote}\n` }
+          : { ok: true, out: `${SHA_B}\n` };
+      },
+    };
+
+    assert.deepEqual(await resolveMainMergeBase(value.worktree, value.head, git, (path) => path), {
+      repo: value.repo,
+      sha: SHA_B,
+    });
+    assert.deepEqual(calls, [
+      { args: ["fetch", "-q", "origin", "main"], cwd: value.cwd },
+      { args: ["remote", "get-url", "origin"], cwd: value.cwd },
+      { args: ["merge-base", SHA_A, "origin/main"], cwd: value.cwd },
+    ]);
+  }
+});
+
+test("resolveMainMergeBase falla cerrado si no puede refrescar origin/main", async () => {
+  const calls: Array<{ args: string[]; cwd: string }> = [];
+  const git = {
+    run: async (args: string[], cwd: string) => {
+      calls.push({ args, cwd });
+      return { ok: false, out: "" };
+    },
+  };
+
+  assert.equal(
+    await resolveMainMergeBase("/wt/cycle", { repo: "api", sha: SHA_A, dirty: false }, git, (path) => path),
+    null,
+  );
+  assert.deepEqual(calls, [
+    { args: ["fetch", "-q", "origin", "main"], cwd: "/wt/cycle/api" },
+  ]);
+});
+
+test("resolveMainMergeBase rechaza un subrepo cuyo realpath escapa del worktree", async () => {
+  let gitCalls = 0;
+  const git = { run: async () => { gitCalls += 1; return { ok: true, out: "" }; } };
+  const paths = new Map([
+    ["/wt/cycle", "/real/cycle"],
+    ["/wt/cycle/api", "/outside/api"],
+  ]);
+
+  assert.equal(
+    await resolveMainMergeBase(
+      "/wt/cycle",
+      { repo: "api", sha: SHA_A, dirty: false },
+      git,
+      (path) => paths.get(path) ?? path,
+    ),
+    null,
+  );
+  assert.equal(gitCalls, 0);
+});
+
+test("createVerifyDriverDeps propaga el resolver realPath inyectado", async () => {
+  const seen: string[] = [];
+  const deps = createVerifyDriverDeps(sources({
+    realPath: (path) => {
+      seen.push(path);
+      throw new Error("path ausente");
+    },
+  }));
+
+  assert.equal(await deps.mainMergeBase!("/wt/cycle", { repo: "api", sha: SHA_A, dirty: false }), null);
+  assert.deepEqual(seen, ["/wt/cycle"]);
+});
+
+test("resolveMainMergeBase falla cerrado ante path, remoto, repo o SHA inseguros", async () => {
+  let calls = 0;
+  const never = { run: async () => { calls += 1; return { ok: true, out: "x" }; } };
+  assert.equal(await resolveMainMergeBase("/wt", { repo: "../api", sha: SHA_A, dirty: false }, never), null);
+  assert.equal(await resolveMainMergeBase("/wt", { repo: "api", sha: "ABC123", dirty: false }, never), null);
+  assert.equal(calls, 0);
+
+  const scenarios = [
+    [{ ok: true, out: "" }, { ok: false, out: "" }, { ok: true, out: SHA_B }],
+    [{ ok: true, out: "" }, { ok: true, out: "git@host:org/a..b.git" }, { ok: true, out: SHA_B }],
+    [{ ok: true, out: "" }, { ok: true, out: "git@host:org/repo.git" }, { ok: false, out: "" }],
+    [{ ok: true, out: "" }, { ok: true, out: "git@host:org/repo.git" }, { ok: true, out: SHA_B.toUpperCase() }],
+  ];
+  for (const replies of scenarios) {
+    let index = 0;
+    const git = { run: async () => replies[index++]! };
+    assert.equal(await resolveMainMergeBase("/wt", { repo: "api", sha: SHA_A, dirty: false }, git, (path) => path), null);
+  }
+});
+
+test("createVerifyDriverDeps propaga ensureMainMeasured y el real conserva sólo el resolver Git", () => {
+  const ensureMainMeasured = (_repo: string, _sha: string) => ({ status: "queued" });
+  const deps = createVerifyDriverDeps(sources({ ensureMainMeasured }));
+
+  assert.equal(deps.ensureMainMeasured, ensureMainMeasured);
+  assert.equal(typeof deps.mainMergeBase, "function");
+  assert.equal(typeof realVerifyDriverDeps.mainMergeBase, "function");
+  assert.equal(realVerifyDriverDeps.ensureMainMeasured, undefined);
 });

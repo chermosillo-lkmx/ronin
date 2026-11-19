@@ -114,6 +114,7 @@ function fixture(t, repoName = REPO) {
     git: (...args) => git(repo, ...args),
     write,
     setSuite: (cases) => writeFileSync(suiteJunit, junit(cases)),
+    setRawSuite: (body) => writeFileSync(suiteJunit, body),
     setCoverage: (options = {}) => writeFileSync(suiteCoverage, cobertura({ source: repo, ...options })),
     removeCoverage: () => rmSync(suiteCoverage, { force: true }),
     writeJunit: (path, cases) => {
@@ -204,11 +205,11 @@ function nodeFixture(t) {
   );
   chmodSync(npx, 0o755);
   return {
-    repo,
+    repo, fakeBin, suiteJunit, suiteCoverage,
     write,
     config,
     setCoverage: (options = {}) => writeFileSync(suiteCoverage, cobertura({ source: repo, ...options })),
-    run: () => {
+    run: (env = {}) => {
       const r = spawnSync("bash", [GATE, session], {
         encoding: "utf8",
         env: {
@@ -217,6 +218,7 @@ function nodeFixture(t) {
           UNIT_GATE_BASE: "origin/main",
           FAKE_SUITE_JUNIT: suiteJunit,
           FAKE_SUITE_COVERAGE: suiteCoverage,
+          ...env,
         },
       });
       return { code: r.status, out: r.stdout + r.stderr };
@@ -1109,6 +1111,245 @@ test("56. con el plugin, un SIGTERM al grupo corre el teardown de los fixtures d
   process.kill(-child.pid, "SIGTERM");
   await closed;
   assert.equal(existsSync(marker), true, "el teardown del fixture no corrió tras SIGTERM");
+});
+
+function seedMainHealth(fx, data, remoteName = "origin") {
+  const base = fx.git("merge-base", "HEAD", "origin/main").trim();
+  const healthDir = join(fx.tmp, "main-health");
+  const directory = join(healthDir, remoteName);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, `${base}.json`), JSON.stringify({
+    sha: base,
+    repo: remoteName,
+    status: "red",
+    tests: 2,
+    total: 89,
+    floor: 80,
+    failed: ["tests.test_other::test_other"],
+    errors: [],
+    skipped: 0,
+    skipped_by_reason: {},
+    uncovered_by_file: {},
+    duration: 1,
+    at: Date.now(),
+    gate_rc: 1,
+    ...data,
+  }) + "\n");
+  return { healthDir, base };
+}
+
+test("57. rojas heredadas y cobertura >= base pasan con WARN, incidente y dueño", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir, base } = seedMainHealth(fx, { incident: "INC-42", owner: "cowork-main-fix" });
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, new RegExp(`heredado de main ${base.slice(0, 7)}: 1 rojas \\(incidente INC-42, dueño cowork-main-fix\\)`));
+  assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
+test("58. una roja nueva respecto de main falla y lista su ID", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([
+    { ...OTHER_PASS, outcome: "failure" },
+    { classname: "tests.test_new", name: "test_regression", outcome: "error" },
+    APP("passed"),
+  ]);
+  const { healthDir } = seedMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /rojas nuevas/);
+  assert.match(r.out, /tests\.test_new::test_regression/);
+  assert.match(r.out, /UNIT-GATE: FAIL/);
+});
+
+test("58b. suite agregada roja sin IDs identificables falla cerrado", (t) => {
+  const fx = fixture(t);
+  fx.setRawSuite(
+    `<?xml version="1.0"?><testsuites><testsuite tests="2" failures="1" errors="0" skipped="0">` +
+    `<testcase classname="tests.test_other" name="test_other"/>` +
+    `<testcase classname="tests.test_app" name="test_app_db"/>` +
+    `</testsuite></testsuites>\n`,
+  );
+  const { healthDir } = seedMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /sin IDs rojos identificables/);
+  assert.doesNotMatch(r.out, /heredado de main .*: 0 rojas/);
+});
+
+test("58c. agregado con dos rojas y sólo un testcase rojo falla cerrado", (t) => {
+  const fx = fixture(t);
+  fx.setRawSuite(
+    `<?xml version="1.0"?><testsuites><testsuite tests="2" failures="2" errors="0" skipped="0">` +
+    `<testcase classname="tests.test_other" name="test_other"><failure>rojo</failure></testcase>` +
+    `<testcase classname="tests.test_app" name="test_app_db"/>` +
+    `</testsuite></testsuites>\n`,
+  );
+  const { healthDir } = seedMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /JUnit rojo incoherente/);
+  assert.doesNotMatch(r.out, /heredado de main/);
+});
+
+test("58d. testcase rojo sin classname falla cerrado", (t) => {
+  const fx = fixture(t);
+  fx.setRawSuite(
+    `<?xml version="1.0"?><testsuites><testsuite tests="1" failures="1" errors="0" skipped="0">` +
+    `<testcase name="test_other"><failure>rojo</failure></testcase>` +
+    `</testsuite></testsuites>\n`,
+  );
+  const { healthDir } = seedMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /JUnit rojo incoherente/);
+  assert.doesNotMatch(r.out, /rojas nuevas/);
+});
+
+test("58e. IDs rojos duplicados no ocultan faltantes del agregado", (t) => {
+  const fx = fixture(t);
+  fx.setRawSuite(
+    `<?xml version="1.0"?><testsuites><testsuite tests="2" failures="2" errors="0" skipped="0">` +
+    `<testcase classname="tests.test_other" name="test_other"><failure>uno</failure></testcase>` +
+    `<testcase classname="tests.test_other" name="test_other"><failure>dos</failure></testcase>` +
+    `</testsuite></testsuites>\n`,
+  );
+  const { healthDir } = seedMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /JUnit rojo incoherente/);
+  assert.doesNotMatch(r.out, /heredado de main/);
+});
+
+test("59. rojas heredadas pero cobertura menor que main fallan", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  fx.setCoverage({ lineRate: 0.88 });
+  const { healthDir } = seedMainHealth(fx, { total: 89 });
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /cobertura 88(?:\.00)? %.*base.*89(?:\.00)? %/);
+  assert.match(r.out, /UNIT-GATE: FAIL/);
+});
+
+test("60. suite roja sin medición y AUTO=0 falla explícitamente «sin medición»", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const healthDir = join(fx.tmp, "main-health-vacio");
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /sin medición/);
+  assert.match(r.out, /UNIT-GATE: FAIL/);
+});
+
+test("60b. AUTO mide main sincrónicamente y relee la medición", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const base = fx.git("merge-base", "HEAD", "origin/main").trim();
+  const healthDir = join(fx.tmp, "main-health-auto");
+  const fake = join(fx.tmp, "fake-main-health.sh");
+  const marker = join(fx.tmp, "main-health-args");
+  const measurement = join(fx.tmp, "measurement.json");
+  writeFileSync(measurement, JSON.stringify({
+    sha: base, repo: "origin", status: "red", tests: 2, total: 89, floor: 80,
+    failed: ["tests.test_other::test_other"], errors: [], skipped: 0,
+    skipped_by_reason: {}, uncovered_by_file: {}, duration: 1, at: Date.now(), gate_rc: 1,
+  }) + "\n");
+  writeFileSync(fake,
+    `#!/bin/bash\nprintf '%s\\n' "$@" > "$FAKE_MAIN_HEALTH_ARGS"\n` +
+    `mkdir -p "$MAIN_HEALTH_DIR/$1"\ncp "$FAKE_MAIN_HEALTH_JSON" "$MAIN_HEALTH_DIR/$1/$3.json"\nexit 1\n`);
+  chmodSync(fake, 0o755);
+  const r = fx.run({
+    ...withoutExtra,
+    MAIN_HEALTH_DIR: healthDir,
+    UNIT_GATE_MAIN_HEALTH_AUTO: "1",
+    UNIT_GATE_MAIN_HEALTH_CMD: fake,
+    FAKE_MAIN_HEALTH_ARGS: marker,
+    FAKE_MAIN_HEALTH_JSON: measurement,
+  });
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(readFileSync(marker, "utf8").trim().split("\n"), ["origin", "--sha", base]);
+  assert.match(r.out, /heredado de main/);
+});
+
+test("61. la medición se busca por basename del remoto origin, no por nombre del directorio", (t) => {
+  const fx = fixture(t); // directorio ant-fake-api, remoto .../origin.git
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir } = seedMainHealth(fx, {}, "origin");
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /heredado de main/);
+});
+
+test("61b. sin nombre utilizable de origin cae al basename del directorio", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir, base } = seedMainHealth(fx, {}, REPO);
+  fx.git("remote", "remove", "origin");
+  const r = fx.run({
+    ...withoutExtra,
+    UNIT_GATE_BASE: base,
+    MAIN_HEALTH_DIR: healthDir,
+    UNIT_GATE_MAIN_HEALTH_AUTO: "0",
+  });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /heredado de main/);
+});
+
+test("62. base_measurement usa main-health para permitir el WARN de piso heredado", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  fx.write(".coveragerc", "[report]\nfail_under = 99.7\n");
+  const { healthDir, base } = seedMainHealth(fx, { status: "red", total: 89 });
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, new RegExp(`piso heredado de main: 90\\.00 % < piso 99\\.70 %, igual o mejor que la base ${base.slice(0, 7)} \\(89\\.00 %\\)`));
+  assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
+test("62b. rojas heredadas no escriben caché de cobertura del HEAD", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir } = seedMainHealth(fx, { total: 89 });
+  const stateDir = join(fx.tmp, "state-heredado");
+  const head = fx.git("rev-parse", "HEAD").trim();
+  const r = fx.run({
+    ...withoutExtra,
+    MAIN_HEALTH_DIR: healthDir,
+    UNIT_GATE_MAIN_HEALTH_AUTO: "0",
+    UNIT_GATE_STATE_DIR: stateDir,
+  });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(existsSync(join(stateDir, "coverage", REPO, `${head}.json`)), false, r.out);
+});
+
+test("63. Node con pnpm-lock y sin node_modules pide pnpm install --frozen-lockfile", (t) => {
+  const fx = nodeFixture(t);
+  fx.write("pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+  rmSync(join(fx.repo, "node_modules"), { recursive: true, force: true });
+  const r = fx.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /pnpm install --frozen-lockfile/);
+  assert.doesNotMatch(r.out, /corre npm ci antes/);
+});
+
+test("64. Node con pnpm-lock ejecuta pnpm exec vitest", (t) => {
+  const fx = nodeFixture(t);
+  fx.write("pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+  const argv = join(dirname(fx.fakeBin), "pnpm-argv");
+  const pnpm = join(fx.fakeBin, "pnpm");
+  writeFileSync(
+    pnpm,
+    `#!/bin/bash\nprintf '%s\\n' "$@" > "$FAKE_PNPM_ARGV"\n` +
+      `for a in "$@"; do case "$a" in --outputFile=*) cp "$FAKE_SUITE_JUNIT" "\${a#--outputFile=}";; esac; done\n` +
+      `mkdir -p reports/coverage-gate\ncp "$FAKE_SUITE_COVERAGE" reports/coverage-gate/cobertura-coverage.xml\nexit 0\n`,
+  );
+  chmodSync(pnpm, 0o755);
+  const r = fx.run({ FAKE_PNPM_ARGV: argv });
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(readFileSync(argv, "utf8").split("\n").slice(0, 3), ["exec", "vitest", "run"]);
+  assert.match(r.out, /pnpm exec vitest run/);
 });
 
 test("cfdis: la suite corre con RUN_REAL_PG=1 (se mide con Postgres real) y no se filtra a otro repo", (t) => {

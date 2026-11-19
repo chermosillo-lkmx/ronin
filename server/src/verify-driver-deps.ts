@@ -1,10 +1,14 @@
 import { deliverPromptWhenReady } from "./engine.js";
+import type { GitPort, RepoHead } from "./gate-cache.js";
 import { getRepoGate, type RepoGate } from "./repo-config.js";
 import { readLaunchRecord, readTmuxInventory } from "./sessions.js";
 import { readGateSettings, type GateSettings } from "./settings.js";
 import { cycleDirForSession, detectStage, readFlow } from "./stages.js";
 import { realGateDeps, type DriverDeps, type GateStage, type LaunchInfo } from "./verify-driver.js";
 import { resolveFlow } from "./workflow.js";
+import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { basename, resolve, sep } from "node:path";
 
 type InventorySession = {
   name: string;
@@ -38,6 +42,10 @@ export interface VerifyDriverDepSources {
   repoGate(repo: string): RepoGate;
   /** Escribe un prompt en ese pane (`%N`) cuando su CLI está lista; false/throw = no llegó. */
   deliverPrompt(target: string, text: string): Promise<boolean>;
+  /** Integración opcional: sólo se cablea cuando el watcher de main-health ya existe. */
+  ensureMainMeasured?(repo: string, sha: string): unknown;
+  /** Frontera de filesystem para verificar que ningún symlink saque el subrepo del worktree. */
+  realPath?(path: string): string;
 }
 
 /** Carpeta propia de reportes del gate de Ronin, relativa al worktree (la lee unit-gate.sh). */
@@ -62,6 +70,107 @@ function launchInfo(raw: unknown): LaunchInfo | null {
   return typeof worktree === "string" ? { mode, repo, worktree } : { mode, repo };
 }
 
+const CANONICAL_SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const SAFE_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function safeRepo(repo: string): boolean {
+  return repo.length <= 61
+    && SAFE_REPO.test(repo)
+    && !repo.includes("..")
+    && !repo.endsWith(".")
+    && !repo.toLowerCase().endsWith(".lock");
+}
+
+function canonicalRepoFromRemote(remote: string): string | null {
+  const value = remote.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!value || /[\r\n\0]/.test(value)) return null;
+  const separator = Math.max(value.lastIndexOf("/"), value.lastIndexOf(":"));
+  const tail = value.slice(separator + 1);
+  const repo = tail.replace(/\.git$/i, "");
+  return safeRepo(repo) ? repo : null;
+}
+
+interface MainMergeBaseExecOptions {
+  cwd: string;
+  encoding: "utf8";
+  env: NodeJS.ProcessEnv;
+  maxBuffer: number;
+  timeout: number;
+}
+
+type MainMergeBaseExecFile = (
+  command: string,
+  args: string[],
+  options: MainMergeBaseExecOptions,
+  callback: (error: Error | null, stdout: string) => void,
+) => unknown;
+
+export interface MainMergeBaseGitPortDeps {
+  execFile?: MainMergeBaseExecFile;
+  env?: Readonly<NodeJS.ProcessEnv>;
+  timeoutMs?: number;
+}
+
+/** Git acotado y no interactivo, aislado del puerto que usa el resto del gate. */
+export function createMainMergeBaseGitPort(deps: MainMergeBaseGitPortDeps = {}): GitPort {
+  const runExec: MainMergeBaseExecFile = deps.execFile ?? ((command, args, options, callback) => {
+    execFile(command, args, options, (error, stdout) => callback(error, String(stdout ?? "")));
+  });
+  const timeoutMs = deps.timeoutMs ?? 30_000;
+  return {
+    run(args, cwd) {
+      const inherited = deps.env ?? process.env;
+      const env: NodeJS.ProcessEnv = {
+        ...inherited,
+        GIT_TERMINAL_PROMPT: "0",
+        ...(inherited.GIT_SSH_COMMAND === undefined && inherited.GIT_SSH === undefined
+          ? { GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=10" }
+          : {}),
+      };
+      return new Promise((resolveResult) => {
+        try {
+          runExec("git", args, { cwd, encoding: "utf8", env, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs }, (error, stdout) => {
+            resolveResult({ ok: !error, out: String(stdout ?? "") });
+          });
+        } catch {
+          resolveResult({ ok: false, out: "" });
+        }
+      });
+    },
+  };
+}
+
+export const mainMergeBaseGitPort = createMainMergeBaseGitPort();
+
+/** Resuelve el main común usando sólo el puerto Git; todo dato dudoso falla cerrado. */
+export async function resolveMainMergeBase(
+  worktree: string,
+  head: RepoHead,
+  git: GitPort = mainMergeBaseGitPort,
+  realPath: (path: string) => string = realpathSync,
+): Promise<{ repo: string; sha: string } | null> {
+  if (!safeRepo(head.repo) || !CANONICAL_SHA.test(head.sha)) return null;
+  try {
+    const lexicalRoot = resolve(worktree);
+    const lexicalCwd = basename(lexicalRoot) === head.repo ? lexicalRoot : resolve(lexicalRoot, head.repo);
+    const root = resolve(realPath(lexicalRoot));
+    const cwd = resolve(realPath(lexicalCwd));
+    if (cwd !== root && !cwd.startsWith(`${root}${sep}`)) return null;
+    const fetched = await git.run(["fetch", "-q", "origin", "main"], cwd);
+    if (!fetched.ok) return null;
+    const remote = await git.run(["remote", "get-url", "origin"], cwd);
+    if (!remote.ok) return null;
+    const repo = canonicalRepoFromRemote(remote.out);
+    if (!repo) return null;
+    const base = await git.run(["merge-base", head.sha, "origin/main"], cwd);
+    const sha = base.out.trim();
+    if (!base.ok || !CANONICAL_SHA.test(sha)) return null;
+    return { repo, sha };
+  } catch {
+    return null;
+  }
+}
+
 /** Arma el driver real, dejando las fronteras de tmux y disco inyectables para pruebas. */
 export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverDeps {
   return {
@@ -83,6 +192,8 @@ export function createVerifyDriverDeps(sources: VerifyDriverDepSources): DriverD
     cycleFor: sources.cycleDirForSession,
     detect: sources.detectStage,
     ...realGateDeps,
+    mainMergeBase: (worktree, head) => resolveMainMergeBase(worktree, head, mainMergeBaseGitPort, sources.realPath ?? realpathSync),
+    ...(sources.ensureMainMeasured ? { ensureMainMeasured: sources.ensureMainMeasured } : {}),
     // Se lee en cada llamada: un cambio en settings.json o repo-config.json aplica sin reiniciar.
     gateConfig: (repo) => gateConfigFrom(sources.gateSettings(), sources.repoGate(repo)),
     maxConcurrent: () => sources.gateSettings().maxConcurrent,

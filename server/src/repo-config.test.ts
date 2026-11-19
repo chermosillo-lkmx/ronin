@@ -183,6 +183,7 @@ test("saveRepoOverrides no pierde un gate ya cargado y readRepoConfigFull/getRep
   try {
     saveRepoOverrides(repo, { vars: { A: "1" }, gate: { timeoutMin: 60, xdist: 4 } });
     assert.deepEqual(getRepoGate(repo), { timeoutMin: 60, xdist: 4 });
+    assert.deepEqual(readRepoConfigFull(repo).gate, { timeoutMin: 60, xdist: 4 });
     // un guardado que no manda gate (Settings/workflow) lo conserva
     const guardado = saveRepoOverrides(repo, { vars: { A: "2" } });
     assert.deepEqual(guardado.gate, { timeoutMin: 60, xdist: 4 });
@@ -190,7 +191,7 @@ test("saveRepoOverrides no pierde un gate ya cargado y readRepoConfigFull/getRep
     // un repo con sólo gate no se descarta como entrada vacía
     saveRepoOverrides(repo, { vars: {}, gate: { xdist: 2 } });
     assert.deepEqual(getRepoGate(repo), { xdist: 2 });
-    // un gate inválido explícito lo limpia
+    // un gate inválido explícito se limpia
     saveRepoOverrides(repo, { gate: { xdist: 0 } });
     assert.deepEqual(getRepoGate(repo), {});
   } finally {

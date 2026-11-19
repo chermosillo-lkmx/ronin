@@ -273,6 +273,10 @@ export interface DriverDeps {
   heads(worktree: string): Promise<RepoHead[] | null>;
   /** `cacheHit` de gate-cache con el git real ya inyectado. */
   cacheHit(cached: VerifyState | null, heads: RepoHead[], worktree: string, e2eDirs: string[]): Promise<boolean>;
+  /** Merge-base del HEAD de un sub-repo contra main; el puerto decide cwd/rutas. */
+  mainMergeBase?(worktree: string, head: RepoHead): Promise<{ repo: string; sha: string } | null>;
+  /** Encola la medición de main; puede devolver una promesa, pero el gate nunca la espera. */
+  ensureMainMeasured?(repo: string, sha: string): unknown;
   /** Timeout y entorno del gate para un repo (override del repo o global), leídos en cada llamada. */
   gateConfig(repo: string): { timeoutMs: number; env: Record<string, string> };
   /** Cupo global de corridas simultáneas (`gate.maxConcurrent` de settings), leído en cada tick. */
@@ -388,6 +392,53 @@ function guardarLog(deps: DriverDeps, cycle: string, stageKey: string, output: s
       deps.logError?.(error);
     } catch {
       /* el propio log falló */
+    }
+  }
+}
+
+const MAIN_HEALTH_SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const MAIN_HEALTH_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function safeMainHealthRepo(repo: string): boolean {
+  return repo.length <= 61
+    && MAIN_HEALTH_REPO.test(repo)
+    && !repo.includes("..")
+    && !repo.endsWith(".")
+    && !repo.toLowerCase().endsWith(".lock");
+}
+
+function logBestEffort(deps: DriverDeps, error: unknown): void {
+  try {
+    deps.logError?.(error);
+  } catch {
+    /* el observador no puede afectar la corrida */
+  }
+}
+
+/** Resuelve bases antes del gate e inicia su medición sin esperar el trabajo encolado. */
+async function ensureMergeBasesMeasured(deps: DriverDeps, worktree: string, heads: RepoHead[]): Promise<void> {
+  if (!deps.mainMergeBase || !deps.ensureMainMeasured) return;
+  const seen = new Set<string>();
+  for (const head of heads) {
+    if (typeof head.repo !== "string" || !MAIN_HEALTH_SHA.test(head.sha)) continue;
+    let base: { repo: string; sha: string } | null;
+    try {
+      base = await deps.mainMergeBase(worktree, head);
+    } catch (error) {
+      logBestEffort(deps, error);
+      continue;
+    }
+    if (!base || !safeMainHealthRepo(base.repo) || !MAIN_HEALTH_SHA.test(base.sha)) continue;
+    const key = `${base.repo}@${base.sha}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const pending = deps.ensureMainMeasured(base.repo, base.sha);
+      if (pending && typeof (pending as PromiseLike<unknown>).then === "function") {
+        void Promise.resolve(pending).catch((error) => logBestEffort(deps, error));
+      }
+    } catch (error) {
+      logBestEffort(deps, error);
     }
   }
 }
@@ -776,6 +827,7 @@ async function planMergeGate(
 
   // `heads` y `gate.attempts` son la foto del lanzamiento: el desenlace se calcula contra ellos.
   return async () => {
+    await ensureMergeBasesMeasured(deps, worktree, heads);
     const inicio = Date.now();
     const resultado = await deps.run(gate.cmd, worktree, runOpts(deps, sesion.name, repo));
     const fin = Date.now();
@@ -786,7 +838,7 @@ async function planMergeGate(
     // Un FAIL tampoco cuenta si el árbol se movió: lo probado ya no es el HEAD (p.ej. un paso
     // intermedio de un rebase) y gastar el intento ahí agotaba ciclos sin que nadie lo pidiera.
     if (!sameHeads(heads, await deps.heads(worktree))) {
-      return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts, at: Date.now() }, resultado.output, inicio);
+      return informe({ status: "failed", reason: CHANGED_REASON, attempts: gate.attempts, at: fin }, resultado.output, inicio);
     }
     // Un FAIL queda failed aunque sobren intentos: el mismo commit no se reintenta (ver selectGate).
     const timeout = porTimeout(resultado);

@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import { execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -38,15 +39,15 @@ import { cycleDirForSession, readCycleRepo } from "./stages.js";
 import { attachSessionMemory, attachSessionSkills, createSessionInfoReader, getDefaultDistiller, sessionRepo, startMemoryDistiller, type Distiller } from "./memory-distiller.js";
 import { decorateSkillSummaries, defaultLearnedSkillStore, LearnedSkillError, type LearnedSkillStore } from "./learned-skills.js";
 import { defaultMemoryStore, MemoryError, memoryView, type MemoryStore, type RepoMemory } from "./memory.js";
-import { realVerifyDriverDeps } from "./verify-driver-deps.js";
-import { startVerifyDriver } from "./verify-driver.js";
+import { gateConfigFrom, realVerifyDriverDeps } from "./verify-driver-deps.js";
+import { startVerifyDriver, type DriverDeps } from "./verify-driver.js";
 import { startTtyd } from "./ttyd.js";
 import { getWorkflow, saveWorkflow, validateStages, WorkflowValidationError, type WorkflowConfig } from "./workflow.js";
 import { createWorkflowCatalogItem, deleteWorkflowCatalogItem, importWorkflowCatalogItem, loadWorkflowCatalog, updateWorkflowCatalogItem } from "./workflow-catalog.js";
 import { readPromptConfig, resetPromptTemplate, savePromptTemplate } from "./prompts.js";
 import { listRepos, readRepoConfig, resolveCwd, saveRepoConfig } from "./repos.js";
-import { readRepoConfigFull, saveRepoOverrides } from "./repo-config.js";
-import { readEngine, saveAllowedRoots, saveEngine } from "./settings.js";
+import { getRepoGate, readRepoConfigFull, saveRepoOverrides } from "./repo-config.js";
+import { readEngine, readGateSettings, readMainHealthSettings, saveAllowedRoots, saveEngine } from "./settings.js";
 import { engineInvocation, type EngineChoice } from "./engine-config.js";
 import { trustedRoots } from "./repo-roots.js";
 import { ensureCapabilityToken, readCapabilityToken, requireCapability } from "./capability.js";
@@ -73,6 +74,19 @@ import { collectSignals, defaultSignalDeps } from "./workflow-insights/signals.j
 import { createProposalStore, type ProposalStore } from "./workflow-insights/store.js";
 import { generateKb, readKbGenerationState, scanKb, zipKb } from "./kb.js";
 import { cleanupSession, realCleanupDeps, type CleanupReport } from "./session-cleanup.js";
+import { attributeMainHealth } from "./main-health/attribution.js";
+import { createIncidentManager, type IncidentLaunchPort } from "./main-health/incident.js";
+import { createMainHealthNotifier } from "./main-health/notify.js";
+import { createMainHealthRouter } from "./main-health/routes.js";
+import { createMainHealthStore } from "./main-health/store.js";
+import {
+  createMainHealthGitPort,
+  createMainHealthWatcher,
+  defaultMainHealthRepoRoot,
+  runMainHealthMeasurement,
+  type MainHealthWatcher,
+  type PullRequestCommentInput,
+} from "./main-health/watcher.js";
 
 /** T11: an invalid workflow gets an actionable {path, code} alongside the message; any other
  *  thrown error keeps the plain {error} shape every other 400 in this file already uses. */
@@ -151,6 +165,8 @@ export interface CreateAppOptions {
   };
   /** Seams del lanzamiento gestionado y el inventario para pruebas HTTP sin tmux. */
   launchManagedSession?: typeof launchManagedSession;
+  /** Gate compartido por el auto-fixer para no reclamar antes de que el server esté listo. */
+  mainHealthLaunchReady?: () => Promise<void>;
   readTmuxInventory?: typeof readTmuxInventory;
   /** Puerto de sesiones para /mcp; en producción se construye con las dependencias reales. */
   mcpSessions?: McpSessionPort;
@@ -176,6 +192,13 @@ export interface CreateAppOptions {
   telegram?: TelegramRuntime;
   /** Sustituye partes del runtime de Telegram que construye `createApp` (store, API falsa…). */
   telegramDeps?: Partial<TelegramRuntimeDeps>;
+  /** Runtime main-health ya aislado; evita filesystem/Git/tmux reales en pruebas. */
+  mainHealth?: { watcher: MainHealthWatcher; router: express.Router };
+  /** Factory aislable que recibe exactamente el launch gestionado de este app. */
+  createMainHealthRuntime?: (
+    app: express.Express,
+    launch: IncidentLaunchPort,
+  ) => { watcher: MainHealthWatcher; router: express.Router };
   /** Costuras de las rutas KB para pruebas HTTP con un repositorio temporal. */
   kb?: {
     listRepos?: typeof listRepos;
@@ -189,6 +212,115 @@ export interface CreateAppOptions {
     temporaryDirectory?: () => string;
     now?: () => Date;
   };
+}
+
+const MAIN_HEALTH_PR_COMMENT = "Ronin detectó una regresión en main y abrió un incidente para corregirla.";
+
+export interface MainHealthCommentExecOptions {
+  cwd: string;
+  timeout: number;
+  signal?: AbortSignal;
+}
+
+export type MainHealthCommentExec = (
+  command: string,
+  args: string[],
+  options: MainHealthCommentExecOptions,
+) => Promise<void>;
+
+function execGhComment(
+  command: string,
+  args: string[],
+  options: MainHealthCommentExecOptions,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
+}
+
+/** Construye el commenter real sin exponer errores de `gh` ni bloquear PRs posteriores. */
+export function createMainHealthPullRequestCommenter(
+  deps: { exec?: MainHealthCommentExec } = {},
+): (input: PullRequestCommentInput) => Promise<void> {
+  const run = deps.exec ?? execGhComment;
+  return async (input) => {
+    const culprits = new Set(input.attribution.culpritShas.map((sha) => sha.toLowerCase()));
+    const prs = new Set<number>();
+    for (const commit of input.attribution.commits) {
+      if (culprits.has(commit.sha.toLowerCase()) && Number.isInteger(commit.pr) && (commit.pr ?? 0) > 0) prs.add(commit.pr!);
+    }
+
+    let failed = false;
+    for (const pr of prs) {
+      if (input.signal?.aborted) return;
+      try {
+        await run(
+          "gh",
+          ["pr", "comment", String(pr), "--body", MAIN_HEALTH_PR_COMMENT],
+          { cwd: input.repoDir, timeout: 30_000, signal: input.signal },
+        );
+      } catch (error) {
+        if (input.signal?.aborted || isAbortError(error)) return;
+        failed = true;
+      }
+    }
+    if (failed) throw new Error("no pude comentar uno o más PRs de main-health");
+  };
+}
+
+const MAIN_HEALTH_WORKFLOW_NAME = "claude-plan-codex-impl";
+
+export function resolveMainHealthWorkflowId(catalogDirectory?: string): string | null {
+  return loadWorkflowCatalog(catalogDirectory).items.find(
+    ({ name }) => name === MAIN_HEALTH_WORKFLOW_NAME,
+  )?.id ?? null;
+}
+
+function defaultMainHealthRuntime(
+  app: express.Express,
+  launch: IncidentLaunchPort,
+  catalogDirectory?: string,
+): { watcher: MainHealthWatcher; router: express.Router } {
+  const readSettings = () => readMainHealthSettings();
+  const settings = readSettings();
+  const store = createMainHealthStore();
+  const incidents = createIncidentManager({
+    settings,
+    workflowId: () => resolveMainHealthWorkflowId(catalogDirectory),
+    launch,
+  });
+  const telegram = app.locals.telegram as TelegramRuntime;
+  const watcher = createMainHealthWatcher({
+    readSettings,
+    store,
+    git: createMainHealthGitPort(),
+    measure: runMainHealthMeasurement,
+    repoRoot: defaultMainHealthRepoRoot(),
+    gateConfig: (repo) => gateConfigFrom(readGateSettings(), getRepoGate(repo)),
+    attribute: attributeMainHealth,
+    incidents,
+    notifier: createMainHealthNotifier({ store: telegram.store, runtime: telegram }),
+    commentPullRequest: createMainHealthPullRequestCommenter(),
+  });
+  return {
+    watcher,
+    router: createMainHealthRouter({ repos: () => readSettings().repos, store, incidents }),
+  };
+}
+
+function logMainHealthFailure(): void {
+  try {
+    console.warn("[main-health] no pude encolar la medición");
+  } catch {
+    // Un logger roto tampoco puede afectar el lanzamiento de la sesión.
+  }
 }
 
 /** Construye el ejecutor de análisis conservando sus límites y tomando el motor al invocarlo. */
@@ -323,6 +455,16 @@ app.use("/api/telegram", createTelegramRouter({
   createApi: options.telegramDeps?.createApi ?? ((token) => createTelegramApi(token)),
   now: options.telegramDeps?.now,
 }));
+const createMainHealth = options.createMainHealthRuntime
+  ?? ((runtimeApp: express.Express, launch: IncidentLaunchPort) => (
+    defaultMainHealthRuntime(runtimeApp, launch, catalogDirectory)
+  ));
+const mainHealth = options.mainHealth ?? createMainHealth(app, {
+  ready: options.mainHealthLaunchReady,
+  launchManagedSession: performLaunchManagedSession,
+});
+app.locals.mainHealthWatcher = mainHealth.watcher;
+app.use("/api/main-health", mainHealth.router);
 const mcpMemory = options.mcpMemory ?? createMemoryPort(memoryApi.store());
 const mcpSkills = options.mcpSkills ?? createSkillPort(skillsApi.store());
 app.post("/mcp", async (req, res) => {
@@ -802,6 +944,12 @@ app.post("/api/sessions", async (req, res) => {
       ...(inputs !== undefined ? { inputs } : {}),
       ...(req.body?.orchestrator !== undefined ? { orchestrator: req.body.orchestrator } : {}),
     });
+    try {
+      void Promise.resolve((app.locals.mainHealthWatcher as MainHealthWatcher | undefined)?.ensureMeasured(launched.repo))
+        .catch(logMainHealthFailure);
+    } catch {
+      logMainHealthFailure();
+    }
     const inventory = await readInventory();
     const session = inventory.sessions.find((item) => item.name === launched.name) ?? null;
     res.status(201).json({ ...launched, session, diagnostic: inventory.diagnostic });
@@ -1232,8 +1380,10 @@ export interface ServerHandle {
 export interface ServerDependencies {
   createApp: typeof createApp;
   ensureCapability: () => string;
-  startBackground: () => Promise<Cleanup>;
+  startBackground: (app: express.Express) => Promise<Cleanup>;
   listen: (app: express.Express, port: number) => Promise<Server>;
+  launchManagedSession: typeof launchManagedSession;
+  writeMcpConfig: typeof writeAgentMcpConfig;
 }
 
 export interface StartServerOptions {
@@ -1244,6 +1394,32 @@ export interface StartServerOptions {
 function once(cleanup: Cleanup): Cleanup {
   let closing: Promise<void> | undefined;
   return () => (closing ??= Promise.resolve(cleanup()).then(() => undefined));
+}
+
+/** Arranca sólo el watcher asociado a este app; el cleanup tolera llamadas repetidas. */
+export async function startMainHealthBackground(app: Pick<express.Express, "locals">): Promise<Cleanup> {
+  const watcher = app.locals.mainHealthWatcher as MainHealthWatcher | undefined;
+  if (!watcher) return once(() => {});
+  try {
+    watcher.start();
+  } catch (error) {
+    try { await watcher.stop(); } catch { /* conserva el fallo de start tras limpiar lo parcial */ }
+    throw error;
+  }
+  return once(() => watcher.stop());
+}
+
+/** Añade main-health a verify sin acoplar el driver al runtime HTTP. */
+export function withMainHealthVerifyDeps<T extends DriverDeps>(
+  deps: T,
+  app: Pick<express.Express, "locals">,
+): T | (T & Pick<DriverDeps, "ensureMainMeasured">) {
+  const watcher = app.locals.mainHealthWatcher as MainHealthWatcher | undefined;
+  if (!watcher) return deps;
+  return {
+    ...deps,
+    ensureMainMeasured: (repo, sha) => watcher.ensureMeasured(repo, sha),
+  };
 }
 
 function closeServer(server: Server): Promise<void> {
@@ -1260,17 +1436,19 @@ function listenOnLoopback(app: express.Express, port: number): Promise<Server> {
   });
 }
 
-async function startDefaultBackground(): Promise<Cleanup> {
+async function startDefaultBackground(app: express.Express): Promise<Cleanup> {
   const cleanups: Cleanup[] = [];
   try {
+    cleanups.push(await startMainHealthBackground(app));
     if (REPORT_SCHEDULE) cleanups.push(startReportSchedule());
     if (PERF) cleanups.push(startPerfRecorder());
     if (VERIFY_GATE) {
       const rec = PERF ? getPerfRecorder() : null;
+      const verifyDeps = withMainHealthVerifyDeps(realVerifyDriverDeps, app);
       const verifyDriver = startVerifyDriver(
         rec
-          ? { ...realVerifyDriverDeps, onGateOutcome: rec.onGateOutcome, onGateSpawn: rec.onGateSpawn, onGateExit: rec.onGateExit }
-          : realVerifyDriverDeps,
+          ? { ...verifyDeps, onGateOutcome: rec.onGateOutcome, onGateSpawn: rec.onGateSpawn, onGateExit: rec.onGateExit }
+          : verifyDeps,
       );
       cleanups.push(() => verifyDriver.stop());
     }
@@ -1293,6 +1471,8 @@ const defaultDependencies: ServerDependencies = {
   ensureCapability: ensureCapabilityToken,
   startBackground: startDefaultBackground,
   listen: listenOnLoopback,
+  launchManagedSession,
+  writeMcpConfig: writeAgentMcpConfig,
 };
 
 /**
@@ -1301,46 +1481,85 @@ const defaultDependencies: ServerDependencies = {
  */
 export async function startServer(options: StartServerOptions = {}): Promise<ServerHandle> {
   const deps = { ...defaultDependencies, ...options.deps };
-  let mcpConfigPath = "";
-  const app = deps.createApp({
-    launchManagedSession: (input) => launchManagedSession(input, {
-      startCommandFor: (startCommand) => withMcpConfig(startCommand, mcpConfigPath),
-    }),
+  let resolveReadiness!: (configPath: string) => void;
+  let rejectReadiness!: (error: Error) => void;
+  let readinessSettled = false;
+  const readiness = new Promise<string>((resolve, reject) => {
+    resolveReadiness = resolve;
+    rejectReadiness = reject;
   });
+  // El gate puede no tener consumidores; esta captura evita un rechazo global durante un fallo de boot.
+  void readiness.catch(() => undefined);
+  const failReadiness = () => {
+    if (readinessSettled) return;
+    readinessSettled = true;
+    rejectReadiness(new Error("servidor no disponible para lanzar la sesión"));
+  };
+  let app: express.Express;
+  try {
+    app = deps.createApp({
+      mainHealthLaunchReady: async () => { await readiness; },
+      launchManagedSession: async (input) => {
+        const configPath = await readiness;
+        return deps.launchManagedSession(input, {
+          startCommandFor: (startCommand) => withMcpConfig(startCommand, configPath),
+        });
+      },
+    });
+  } catch (error) {
+    failReadiness();
+    throw error;
+  }
   const requestedPort = options.port ?? PORT;
   let background: Cleanup | undefined;
   let server: Server | undefined;
+  const telegram = app.locals.telegram as TelegramRuntime | undefined;
+  let stopTelegram: (() => Promise<void>) | undefined;
 
   try {
     const capabilityToken = deps.ensureCapability();
-    background = await deps.startBackground();
+    try {
+      stopTelegram = telegram?.start();
+    } catch (error) {
+      // Telegram es opcional: sin red o sin token el resto del runtime sí debe arrancar.
+      console.warn(`[telegram] no pude arrancar (${error instanceof Error ? error.name : "error"})`);
+    }
+    background = await deps.startBackground(app);
     server = await deps.listen(app, requestedPort);
     const address = server.address();
     const port = typeof address === "object" && address ? (address as AddressInfo).port : requestedPort;
-    mcpConfigPath = writeAgentMcpConfig(DATA_DIR, port, capabilityToken) ?? "";
+    const mcpConfigPath = deps.writeMcpConfig(DATA_DIR, port, capabilityToken) ?? "";
+    readinessSettled = true;
+    resolveReadiness(mcpConfigPath);
   } catch (error) {
-    if (background) await background();
+    failReadiness();
+    try { if (server) await closeServer(server); } catch { /* conserva el error de arranque */ }
+    try { await background?.(); } catch { /* conserva el error de arranque */ }
+    try { await stopTelegram?.(); } catch { /* Telegram sigue siendo opcional */ }
     throw error;
   }
 
   const address = server.address();
   const port = typeof address === "object" && address ? (address as AddressInfo).port : requestedPort;
-  const telegram = app.locals.telegram as TelegramRuntime | undefined;
-  let stopTelegram: (() => Promise<void>) | undefined;
-  try {
-    stopTelegram = telegram?.start();
-  } catch (error) {
-    // Telegram es opcional: sin red o sin token el server sigue sirviendo la app.
-    console.warn(`[telegram] no pude arrancar (${error instanceof Error ? error.name : "error"})`);
-  }
   const close = once(async () => {
+    let failed = false;
+    let failure: unknown;
     try {
-      await stopTelegram?.();
-    } catch {
-      // Un fallo al detener Telegram no debe impedir cerrar el server.
+      await closeServer(server!);
+    } catch (error) {
+      failed = true;
+      failure = error;
     }
-    await closeServer(server!);
-    await background!();
+    try {
+      await background!();
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        failure = error;
+      }
+    }
+    try { await stopTelegram?.(); } catch { /* no desplaza un fallo del server/watcher */ }
+    if (failed) throw failure;
   });
 
   console.log(

@@ -7,9 +7,13 @@ import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { Router } from "express";
 import { CAPABILITY_FILE, ensureCapabilityToken, readCapabilityToken } from "./capability.js";
 import { VERIFY_GATE } from "./config.js";
 import { createApp, runConfiguredClaude, startServer } from "./index.js";
+import * as indexModule from "./index.js";
+import type { MainHealthWatcher } from "./main-health/watcher.js";
+import { createIncidentManager } from "./main-health/incident.js";
 import type { TelegramRuntime } from "./telegram/service.js";
 import type { Update } from "./telegram/api.js";
 import { createTelegramStore } from "./telegram/store.js";
@@ -33,6 +37,24 @@ function fakeTelegram(events: string[] = [], over: Partial<TelegramRuntime> = {}
   };
 }
 const offlineApp = (options?: Parameters<typeof createApp>[0]) => createApp({ ...options, telegram: fakeTelegram() });
+
+function fakeMainHealthWatcher(overrides: Partial<MainHealthWatcher> = {}): MainHealthWatcher {
+  return {
+    tick: async () => {},
+    ensureMeasured: async (repo) => ({ status: "ignored", reason: "disabled", repo }),
+    evaluate: async () => {},
+    idle: async () => {},
+    start: () => {},
+    stop: async () => {},
+    ...overrides,
+  };
+}
+
+function fakeMainHealth(watcher = fakeMainHealthWatcher()) {
+  const router = Router();
+  router.get("/", (_request, response) => response.json([{ repo: "fixture-main" }]));
+  return { watcher, router };
+}
 
 function envWithoutTmux(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -191,6 +213,99 @@ test("startServer does not listen until background setup is ready", async () => 
   assert.deepEqual(events, ["listen", "socket", "background"]);
 });
 
+test("createApp monta el router main-health y publica el mismo watcher", async () => {
+  const mainHealth = fakeMainHealth();
+  const app = offlineApp({ mainHealth } as Parameters<typeof createApp>[0]);
+
+  assert.equal(app.locals.mainHealthWatcher, mainHealth.watcher);
+  assert.deepEqual(await invokeGet(app, "/api/main-health"), {
+    status: 200,
+    body: [{ repo: "fixture-main" }],
+  });
+});
+
+test("startMainHealthBackground arranca y detiene el watcher una sola vez", async () => {
+  const events: string[] = [];
+  const watcher = fakeMainHealthWatcher({
+    start: () => { events.push("start"); },
+    stop: async () => { events.push("stop"); },
+  });
+  const start = (indexModule as any).startMainHealthBackground;
+  assert.equal(typeof start, "function");
+  const cleanup = await start({ locals: { mainHealthWatcher: watcher } });
+
+  assert.deepEqual(events, ["start"]);
+  await cleanup();
+  await cleanup();
+  assert.deepEqual(events, ["start", "stop"]);
+});
+
+test("startMainHealthBackground espera el stop si start falla parcialmente", async () => {
+  const events: string[] = [];
+  const stopped = deferred<void>();
+  const watcher = fakeMainHealthWatcher({
+    start: () => { events.push("start"); throw new Error("start parcial"); },
+    stop: async () => { events.push("stop"); await stopped.promise; },
+  });
+  const start = (indexModule as any).startMainHealthBackground;
+
+  const starting = start({ locals: { mainHealthWatcher: watcher } });
+  await Promise.resolve();
+  assert.deepEqual(events, ["start", "stop"]);
+  let settled = false;
+  void Promise.resolve(starting).catch(() => {}).finally(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  stopped.resolve();
+  await assert.rejects(starting, /start parcial/);
+});
+
+test("withMainHealthVerifyDeps conecta ensureMainMeasured del watcher", async () => {
+  const calls: Array<[string, string]> = [];
+  const watcher = fakeMainHealthWatcher({
+    ensureMeasured: async (repo, sha) => {
+      calls.push([repo, sha ?? ""]);
+      return { status: "queued", repo, sha: sha! };
+    },
+  });
+  const wire = (indexModule as any).withMainHealthVerifyDeps;
+  assert.equal(typeof wire, "function");
+  const base = { marker: true };
+  const deps = wire(base, { locals: { mainHealthWatcher: watcher } });
+
+  assert.equal(deps.marker, true);
+  await deps.ensureMainMeasured("ant-liebre-api", "a".repeat(40));
+  assert.deepEqual(calls, [["ant-liebre-api", "a".repeat(40)]]);
+});
+
+test("startServer arranca Telegram y entrega el mismo app al background antes de listen", async () => {
+  const events: string[] = [];
+  const app = createApp({ telegram: fakeTelegram(events), mainHealth: fakeMainHealth() });
+  const server = {
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43214 }),
+    close: (callback: (error?: Error) => void) => callback(),
+  };
+  const handle = await startServer({
+    port: 43214,
+    deps: {
+      createApp: () => app,
+      startBackground: async (received: unknown) => {
+        assert.equal(received, app);
+        events.push("background");
+        return () => {};
+      },
+      listen: async (received) => {
+        assert.equal(received, app);
+        events.push("listen");
+        return server as any;
+      },
+    },
+  });
+  assert.deepEqual(events, ["telegram:start", "background", "listen"]);
+  await handle.close();
+});
+
 test("/api/health never publishes the boot token, only whether the caller presented it", async () => {
   const previous = process.env.COWORK_DESKTOP_BOOT_TOKEN;
   process.env.COWORK_DESKTOP_BOOT_TOKEN = "token-value";
@@ -315,24 +430,58 @@ test("createApp guarda el runtime de Telegram sin arrancarlo", () => {
   assert.deepEqual(events, []);
 });
 
-test("startServer arranca Telegram después de listen y lo detiene en close", async () => {
+test("startServer arranca Telegram antes del background y cierra socket, background y Telegram en orden", async () => {
   const events: string[] = [];
   const server = {
     address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43212 }),
-    close: (callback: (error?: Error) => void) => callback(),
+    close: (callback: (error?: Error) => void) => { events.push("socket:close"); callback(); },
   };
   const handle = await startServer({
     port: 43212,
     deps: {
       createApp: (options) => createApp({ ...options, telegram: fakeTelegram(events) }),
-      startBackground: async () => () => {},
+      startBackground: async () => {
+        events.push("background:start");
+        return () => { events.push("background:stop"); };
+      },
       listen: async () => { events.push("listen"); return server as any; },
     },
   });
-  assert.deepEqual(events, ["listen", "telegram:start"]);
+  assert.deepEqual(events, ["telegram:start", "background:start", "listen"]);
   await handle.close();
   await handle.close();
-  assert.deepEqual(events, ["listen", "telegram:start", "telegram:stop"]);
+  assert.deepEqual(events, [
+    "telegram:start",
+    "background:start",
+    "listen",
+    "socket:close",
+    "background:stop",
+    "telegram:stop",
+  ]);
+});
+
+test("startServer limpia background antes de Telegram si listen falla", async () => {
+  const events: string[] = [];
+  await assert.rejects(
+    startServer({
+      deps: {
+        createApp: (options) => createApp({ ...options, telegram: fakeTelegram(events) }),
+        startBackground: async () => {
+          events.push("background:start");
+          return async () => { events.push("background:stop"); };
+        },
+        listen: async () => { events.push("listen"); throw new Error("listen falló"); },
+      },
+    }),
+    /listen falló/,
+  );
+  assert.deepEqual(events, [
+    "telegram:start",
+    "background:start",
+    "listen",
+    "background:stop",
+    "telegram:stop",
+  ]);
 });
 
 test("un start de Telegram que falla no tumba el server", async () => {
@@ -352,6 +501,419 @@ test("un start de Telegram que falla no tumba el server", async () => {
   await handle.close();
   assert.equal(warn.mock.callCount(), 1);
   warn.mock.restore();
+});
+
+test("startServer detiene Telegram si el background falla", async () => {
+  const events: string[] = [];
+  await assert.rejects(
+    startServer({
+      deps: {
+        createApp: (options) => createApp({ ...options, telegram: fakeTelegram(events) }),
+        startBackground: async () => { events.push("background:start"); throw new Error("background falló"); },
+        listen: async () => { throw new Error("no debe escuchar"); },
+      },
+    }),
+    /background falló/,
+  );
+  assert.deepEqual(events, ["telegram:start", "background:start", "telegram:stop"]);
+});
+
+test("launch temprano de Telegram espera listen y la configuración MCP lista", async () => {
+  const events: string[] = [];
+  const backgroundReady = deferred<() => void>();
+  const listenReady = deferred<any>();
+  let pendingLaunch!: Promise<unknown>;
+  let startedCommand = "";
+  const server = {
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43888 }),
+    close: (callback: (error?: Error) => void) => callback(),
+  };
+  const starting = startServer({
+    deps: {
+      createApp: (options) => createApp({
+        ...options,
+        telegram: fakeTelegram(events, {
+          start: () => {
+            events.push("telegram:start");
+            pendingLaunch = options.launchManagedSession!({ repo: "repo", name: "early", mode: "terminal" });
+            void pendingLaunch.catch(() => undefined);
+            return async () => { events.push("telegram:stop"); };
+          },
+        }),
+      }),
+      startBackground: () => backgroundReady.promise,
+      listen: async () => {
+        events.push("listen:start");
+        return listenReady.promise;
+      },
+      launchManagedSession: (async (_input: unknown, injected: any) => {
+        events.push("launch:real");
+        startedCommand = injected.startCommandFor("claude");
+        return { name: "early" };
+      }) as any,
+      writeMcpConfig: (_dir: string, port: number, token: string) => {
+        events.push(`mcp:${port}:${token}`);
+        return "/tmp/agent ready.json";
+      },
+      ensureCapability: () => "cap-fixture",
+    },
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(events, ["telegram:start"]);
+  backgroundReady.resolve(() => {});
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["telegram:start", "listen:start"]);
+  listenReady.resolve(server);
+
+  const handle = await starting;
+  await pendingLaunch;
+  assert.deepEqual(events.slice(0, 4), [
+    "telegram:start",
+    "listen:start",
+    "mcp:43888:cap-fixture",
+    "launch:real",
+  ]);
+  assert.equal(startedCommand, 'claude --mcp-config "/tmp/agent ready.json"');
+  await handle.close();
+});
+
+test("fixer temprano usa el launch preparado y espera readiness con workflow estable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ronin-main-health-launch-"));
+  const listenReady = deferred<any>();
+  const events: string[] = [];
+  let fixing!: Promise<unknown>;
+  let launchedInput: Record<string, unknown> | undefined;
+  let startedCommand = "";
+  const server = {
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 44001 }),
+    close: (callback: (error?: Error) => void) => callback(),
+  };
+  try {
+    const starting = startServer({
+      deps: {
+        createApp: (options) => createApp({
+          ...options,
+          telegram: fakeTelegram(events),
+          createMainHealthRuntime: (_app: unknown, launch: any) => {
+            const manager = createIncidentManager({
+              root,
+              workflowId: () => "wf-estable-fixture",
+              settings: { aliases: {}, autoFix: true, remoteClaim: false },
+              tmux: { hasSession: async () => false },
+              launch,
+            });
+            manager.openIncident({
+              repo: "api",
+              firstRedSha: "a".repeat(40),
+              summary: "main rojo",
+              attribution: {
+                status: "no_prior_green",
+                reason: "sin verde",
+                redSha: "a".repeat(40),
+                greenSha: null,
+                commits: [],
+                culpritShas: [],
+                newRed: [],
+                unattributedRed: [],
+              },
+            });
+            const router = Router();
+            return {
+              router,
+              watcher: fakeMainHealthWatcher({
+                start: () => { fixing = manager.ensureFixer("api", "/repo"); void fixing.catch(() => undefined); },
+              }),
+            };
+          },
+        } as any),
+        startBackground: async (app) => {
+          app.locals.mainHealthWatcher.start();
+          return async () => { await app.locals.mainHealthWatcher.stop(); };
+        },
+        listen: async () => listenReady.promise,
+        launchManagedSession: (async (input: Record<string, unknown>, injected: any) => {
+          events.push("launch:real");
+          launchedInput = input;
+          startedCommand = injected.startCommandFor("claude");
+          return { name: input.name };
+        }) as any,
+        writeMcpConfig: () => "/tmp/main health mcp.json",
+      },
+    });
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(launchedInput, undefined, "el fixer no cruza readiness antes de listen/MCP");
+    listenReady.resolve(server);
+    const handle = await starting;
+    await fixing;
+    assert.equal(launchedInput?.workflowId, "wf-estable-fixture");
+    assert.equal(launchedInput?.name, "cowork-main-health-api");
+    assert.equal(startedCommand, 'claude --mcp-config "/tmp/main health mcp.json"');
+    await handle.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolver main-health obtiene por nombre el ID estable del catálogo", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ronin-main-health-workflow-"));
+  try {
+    const { createWorkflowCatalogItem } = await import("./workflow-catalog.js");
+    const item = createWorkflowCatalogItem("claude-plan-codex-impl", {
+      stages: [{ key: "plan", label: "Plan", icon: "P" }],
+      verifyAfter: [],
+    }, directory);
+    const resolveWorkflowId = (indexModule as any).resolveMainHealthWorkflowId;
+    assert.equal(typeof resolveWorkflowId, "function");
+    assert.equal(resolveWorkflowId(directory), item.id);
+    assert.notEqual(resolveWorkflowId(directory), "claude-plan-codex-impl");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fallo de listen rechaza fixer temprano antes de owner o claim remoto", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ronin-main-health-launch-fail-"));
+  let fixing!: Promise<unknown>;
+  let launches = 0;
+  let pushes = 0;
+  let ownerObservedDuringPush = false;
+  let manager!: ReturnType<typeof createIncidentManager>;
+  try {
+    const starting = startServer({
+      deps: {
+        createApp: (options) => createApp({
+          ...options,
+          telegram: fakeTelegram(),
+          createMainHealthRuntime: (_app: unknown, launchPort: any) => {
+            manager = createIncidentManager({
+              root,
+              workflowId: () => "wf-estable-fixture",
+              settings: { aliases: {}, autoFix: true, remoteClaim: true },
+              tmux: { hasSession: async () => false },
+              git: {
+                run: async (args) => {
+                  if (args[0] === "rev-parse") return `${"b".repeat(40)}\n`;
+                  if (args[0] === "commit-tree") return `${"c".repeat(40)}\n`;
+                  if (args[0] === "ls-remote") return "";
+                  if (args[0] === "push") {
+                    pushes += 1;
+                    ownerObservedDuringPush = manager.readOwner("api") !== null;
+                    return "";
+                  }
+                  throw new Error(`git inesperado: ${args.join(" ")}`);
+                },
+              },
+              launch: launchPort,
+            });
+            manager.openIncident({
+              repo: "api",
+              firstRedSha: "a".repeat(40),
+              summary: "main rojo",
+              attribution: {
+                status: "no_prior_green", reason: "sin verde", redSha: "a".repeat(40), greenSha: null,
+                commits: [], culpritShas: [], newRed: [], unattributedRed: [],
+              },
+            });
+            return {
+              router: Router(),
+              watcher: fakeMainHealthWatcher({
+                start: () => { fixing = manager.ensureFixer("api", "/repo"); void fixing.catch(() => undefined); },
+              }),
+            };
+          },
+        } as any),
+        startBackground: async (app) => {
+          app.locals.mainHealthWatcher.start();
+          return async () => { await app.locals.mainHealthWatcher.stop(); };
+        },
+        listen: async () => {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          throw new Error("listen roto");
+        },
+        launchManagedSession: (async () => { launches += 1; return { name: "no" }; }) as any,
+      },
+    });
+
+    await assert.rejects(starting, /listen roto/);
+    await assert.rejects(fixing, /servidor no disponible/);
+    assert.equal(launches, 0);
+    assert.equal(pushes, 0);
+    assert.equal(ownerObservedDuringPush, false);
+    assert.equal(manager.readOwner("api"), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fallo de startup rechaza launch temprano y después detiene Telegram", async () => {
+  const events: string[] = [];
+  let launchOutcome!: Promise<unknown>;
+  const starting = startServer({
+    deps: {
+      createApp: (options) => createApp({
+        ...options,
+        telegram: fakeTelegram(events, {
+          start: () => {
+            events.push("telegram:start");
+            launchOutcome = options.launchManagedSession!(
+              { repo: "repo", name: "early-fail", mode: "terminal" },
+            ).then(
+              () => ({ ok: true }),
+              (error) => ({ ok: false, error }),
+            );
+            return async () => { events.push("telegram:stop"); };
+          },
+        }),
+      }),
+      startBackground: async () => { throw new Error("background privado"); },
+      listen: async () => { throw new Error("no debe escuchar"); },
+      launchManagedSession: (async () => {
+        events.push("launch:real");
+        return { name: "no-debe-lanzar" };
+      }) as any,
+      writeMcpConfig: () => { throw new Error("no debe escribir"); },
+    },
+  });
+
+  await assert.rejects(starting, /background privado/);
+  const outcome = await launchOutcome as { ok: boolean; error: Error };
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error.message, "servidor no disponible para lanzar la sesión");
+  assert.deepEqual(events, ["telegram:start", "telegram:stop"]);
+});
+
+test("fallo posterior a listen cierra socket, background y Telegram sin filtrar el error original", async () => {
+  const events: string[] = [];
+  const writeError = new Error("write MCP roto");
+  let closes = 0;
+  let launchOutcome!: Promise<unknown>;
+  const server = {
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 43999 }),
+    close: (callback: (error?: Error) => void) => {
+      closes += 1;
+      events.push("socket:close");
+      callback();
+    },
+  };
+
+  const starting = startServer({
+    deps: {
+      createApp: (options) => createApp({
+        ...options,
+        telegram: fakeTelegram(events, {
+          start: () => {
+            events.push("telegram:start");
+            launchOutcome = options.launchManagedSession!(
+              { repo: "repo", name: "early-write-fail", mode: "terminal" },
+            ).then(
+              () => ({ ok: true }),
+              (error) => ({ ok: false, error }),
+            );
+            return async () => { events.push("telegram:stop"); };
+          },
+        }),
+      }),
+      startBackground: async () => {
+        events.push("background:start");
+        return async () => { events.push("background:stop"); };
+      },
+      listen: async () => {
+        events.push("listen");
+        return server as any;
+      },
+      writeMcpConfig: () => {
+        events.push("mcp:write");
+        throw writeError;
+      },
+      launchManagedSession: (async () => {
+        events.push("launch:real");
+        return { name: "no-debe-lanzar" };
+      }) as any,
+    },
+  });
+
+  await assert.rejects(starting, (error) => error === writeError);
+  const outcome = await launchOutcome as { ok: boolean; error: Error };
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error.message, "servidor no disponible para lanzar la sesión");
+  assert.equal(closes, 1);
+  assert.deepEqual(events, [
+    "telegram:start",
+    "background:start",
+    "listen",
+    "mcp:write",
+    "socket:close",
+    "background:stop",
+    "telegram:stop",
+  ]);
+});
+
+function commenterInput(signal?: AbortSignal) {
+  const shaA = "a".repeat(40);
+  const shaB = "b".repeat(40);
+  return {
+    repo: "ant-liebre-api",
+    repoDir: "/tmp/ant-liebre-api",
+    incident: {} as never,
+    signal,
+    attribution: {
+      status: "attributed" as const,
+      reason: null,
+      redSha: "c".repeat(40),
+      greenSha: "d".repeat(40),
+      culpritShas: [shaA, shaB],
+      newRed: [],
+      unattributedRed: [],
+      commits: [
+        { sha: shaA, author: { name: "A", email: "a@example.test" }, pr: 41, message: "a", files: [], addedLinesByFile: {}, uncoveredAddedByFile: {}, newRed: [] },
+        { sha: shaA, author: { name: "A", email: "a@example.test" }, pr: 41, message: "duplicado", files: [], addedLinesByFile: {}, uncoveredAddedByFile: {}, newRed: [] },
+        { sha: shaB, author: { name: "B", email: "b@example.test" }, pr: 42, message: "b", files: [], addedLinesByFile: {}, uncoveredAddedByFile: {}, newRed: [] },
+      ],
+    },
+  };
+}
+
+test("commenter usa args separados, cwd, timeout y signal; continúa tras un fallo", async () => {
+  const calls: Array<{ command: string; args: string[]; options: Record<string, unknown> }> = [];
+  const controller = new AbortController();
+  const createCommenter = (indexModule as any).createMainHealthPullRequestCommenter;
+  assert.equal(typeof createCommenter, "function");
+  const commenter = createCommenter({
+    exec: async (command: string, args: string[], options: Record<string, unknown>) => {
+      calls.push({ command, args, options });
+      if (calls.length === 1) throw new Error("gh falló con detalle privado");
+    },
+  });
+
+  await assert.rejects(commenter(commenterInput(controller.signal)), (error: unknown) => {
+    assert.equal((error as Error).message, "no pude comentar uno o más PRs de main-health");
+    return true;
+  });
+  assert.deepEqual(calls.map(({ command, args }) => ({ command, args })), [
+    { command: "gh", args: ["pr", "comment", "41", "--body", "Ronin detectó una regresión en main y abrió un incidente para corregirla."] },
+    { command: "gh", args: ["pr", "comment", "42", "--body", "Ronin detectó una regresión en main y abrió un incidente para corregirla."] },
+  ]);
+  assert.equal(calls[0].options.cwd, "/tmp/ant-liebre-api");
+  assert.equal(calls[0].options.timeout, 30_000);
+  assert.equal(calls[0].options.signal, controller.signal);
+});
+
+test("commenter detiene PRs restantes al abortar", async () => {
+  const calls: number[] = [];
+  const controller = new AbortController();
+  const createCommenter = (indexModule as any).createMainHealthPullRequestCommenter;
+  const commenter = createCommenter({
+    exec: async (_command: string, args: string[]) => {
+      calls.push(Number(args[2]));
+      controller.abort();
+      throw Object.assign(new Error("abortado"), { name: "AbortError" });
+    },
+  });
+
+  await commenter(commenterInput(controller.signal));
+  assert.deepEqual(calls, [41]);
 });
 
 test("el lanzamiento de Telegram usa el launch recibido en options (el de startServer, con mcp config)", async () => {
@@ -1057,6 +1619,87 @@ test("POST /api/sessions limpia la petición y pasa body.orchestrator al lanzami
   });
   assert.equal(response.status, 201);
   assert.deepEqual(received, [{ repo: "monorepo", workflowId: "wf-test", name: "cowork-peticion", mode: undefined, agent: undefined, request: "arregla CU-86e2", channel: "ui", orchestrator: "claude-cowork" }]);
+});
+
+test("POST /api/sessions dispara main-health después del launch sin esperar la medición", async () => {
+  const token = ensureCapabilityToken();
+  const events: string[] = [];
+  const pending = deferred<never>();
+  const watcher = fakeMainHealthWatcher({
+    ensureMeasured: (repo) => {
+      events.push(`ensure:${repo}`);
+      return pending.promise;
+    },
+  });
+  const app = offlineApp({
+    mainHealth: fakeMainHealth(watcher),
+    launchManagedSession: async () => {
+      events.push("launch");
+      return { name: "cowork-main-health", repo: "ant-liebre-api", mode: "workflow", workflowId: "wf-test", cwd: "/repo" };
+    },
+    readTmuxInventory: async () => {
+      events.push("inventory");
+      return { sessions: [], diagnostic: null };
+    },
+  } as Parameters<typeof createApp>[0]);
+
+  let response: Awaited<ReturnType<typeof invokeRequest>> | undefined;
+  void invokeRequest(app, "POST", "/api/sessions", {
+    headers: { "x-ronin-capability": token },
+    body: { repo: "ant-liebre-api", workflowId: "wf-test", name: "cowork-main-health" },
+  }).then((value) => { response = value; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(response?.status, 201);
+  assert.deepEqual(events, ["launch", "ensure:ant-liebre-api", "inventory"]);
+});
+
+test("POST /api/sessions captura el rechazo tardío de ensureMeasured", async () => {
+  const token = ensureCapabilityToken();
+  const warn = mock.method(console, "warn", () => {});
+  try {
+    const watcher = fakeMainHealthWatcher({
+      ensureMeasured: async () => { throw new Error("main caído"); },
+    });
+    const app = offlineApp({
+      mainHealth: fakeMainHealth(watcher),
+      launchManagedSession: async () => ({ name: "cowork-main-reject", repo: "ant-liebre-api", mode: "workflow", workflowId: "wf-test", cwd: "/repo" }),
+      readTmuxInventory: async () => ({ sessions: [], diagnostic: null }),
+    } as Parameters<typeof createApp>[0]);
+
+    const response = await invokeRequest(app, "POST", "/api/sessions", {
+      headers: { "x-ronin-capability": token },
+      body: { repo: "ant-liebre-api", workflowId: "wf-test", name: "cowork-main-reject" },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(response.status, 201);
+    assert.equal(warn.mock.callCount(), 1);
+  } finally {
+    warn.mock.restore();
+  }
+});
+
+test("POST /api/sessions no mide main si launch falla", async () => {
+  const token = ensureCapabilityToken();
+  let ensures = 0;
+  const watcher = fakeMainHealthWatcher({
+    ensureMeasured: async (repo) => {
+      ensures += 1;
+      return { status: "ignored", reason: "disabled", repo };
+    },
+  });
+  const app = offlineApp({
+    mainHealth: fakeMainHealth(watcher),
+    launchManagedSession: async () => { throw new Error("launch roto"); },
+    readTmuxInventory: async () => ({ sessions: [], diagnostic: null }),
+  } as Parameters<typeof createApp>[0]);
+
+  const response = await invokeRequest(app, "POST", "/api/sessions", {
+    headers: { "x-ronin-capability": token },
+    body: { repo: "ant-liebre-api", workflowId: "wf-test", name: "cowork-main-fail" },
+  });
+  assert.equal(response.status, 500);
+  assert.equal(ensures, 0);
 });
 
 test("POST /api/sessions sólo reenvía inputs que sean un objeto plano de strings", async () => {
