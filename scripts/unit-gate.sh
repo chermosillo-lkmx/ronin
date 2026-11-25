@@ -25,6 +25,8 @@
 #        el veredicto de la suite completa, sin aplicar las reglas de cambio de una rama
 #      UNIT_GATE_MAX_SUITES cupos globales de suites completas; sin él lee gate.maxConcurrent de
 #        $COWORK_DATA_DIR/settings.json (default 2). UNIT_GATE_LOCK_POLL controla la espera (15 s)
+#      UNIT_GATE_MAIN_HEALTH_DEPTH (default 200) commits de primer padre de la base en los que se
+#        busca una medición de main-health antes de medir la base exacta con una suite completa
 set -u
 ROOT="${1:-$PWD}"
 BASE_REF="${UNIT_GATE_BASE:-origin/main}"
@@ -33,6 +35,8 @@ REPORTS="${UNIT_GATE_REPORTS_DIR:-reports}"
 STATE_DIR="${UNIT_GATE_STATE_DIR:-$HOME/.cowork/unit-gate}"
 MAIN_HEALTH_DIR="${MAIN_HEALTH_DIR:-$HOME/.cowork/main-health}"
 MAIN_HEALTH_AUTO="${UNIT_GATE_MAIN_HEALTH_AUTO:-1}"
+MAIN_HEALTH_DEPTH="${UNIT_GATE_MAIN_HEALTH_DEPTH:-200}"
+[[ "$MAIN_HEALTH_DEPTH" =~ ^[1-9][0-9]*$ ]] || MAIN_HEALTH_DEPTH=200
 RECORD_BASE="${UNIT_GATE_RECORD_BASE:-0}"
 fail=0; checked=0
 suite_pid=""
@@ -193,6 +197,18 @@ else:
     owner = str(data.get("owner") or data.get("session") or "main")
     print("INHERITED", len(current), base_total, incident, owner, "-", sep="\t")
 PY
+}
+
+# Medición de main-health más cercana a la base: la propia base o su ancestro de primer padre más
+# reciente medido. El watcher mide la punta de main; con main moviéndose decenas de veces al día casi
+# nunca hay medición de la base exacta, y medirla es otra suite completa dentro del gate.
+nearest_main_measurement() { # $1 base, $2 repo de main-health → ruta del .json o nada
+  local sha dir="$MAIN_HEALTH_DIR/$2"
+  [ -d "$dir" ] || return 0
+  while read -r sha; do
+    [ -f "$dir/$sha.json" ] && { printf '%s\n' "$dir/$sha.json"; return 0; }
+  done < <(git rev-list --first-parent --max-count="$MAIN_HEALTH_DEPTH" "$1" 2>/dev/null)
+  return 0
 }
 
 head_commit_time() { git log -1 --format=%ct 2>/dev/null; } # epoch del commit HEAD del repo actual
@@ -413,6 +429,8 @@ def base_measurement():
     if tree:
         paths.append(cache / f"tree-{tree}.json")
     paths.append(main_health_dir / main_repo_name / f"{base}.json")
+    if os.environ.get("GATE_NEAREST_MEASUREMENT"):
+        paths.append(Path(os.environ["GATE_NEAREST_MEASUREMENT"]))
     for path in paths:
         try:
             data = __import__("json").loads(path.read_text())
@@ -833,16 +851,30 @@ for repo in "${candidates[@]}"; do
       continue
     fi
     measurement="$MAIN_HEALTH_DIR/$main_repo_name/$base.json"
-    if [ ! -f "$measurement" ] && [ "$MAIN_HEALTH_AUTO" != "0" ]; then
-      say "   → $name: midiendo main $base para clasificar la suite roja"
-      "${UNIT_GATE_MAIN_HEALTH_CMD:-$GATE_SCRIPTS_DIR/main-health.sh}" "$main_repo_name" --sha "$base" >/dev/null 2>&1 || true
+    comparison="MISSING"
+    if [ ! -f "$measurement" ]; then
+      # Un ancestro medido basta si todas las rojas ya estaban ahí; si no, se mide la base exacta.
+      nearest="$(nearest_main_measurement "$base" "$main_repo_name")"
+      if [ -n "$nearest" ]; then
+        comparison="$(red_comparison "$junit" "$nearest" 2>/dev/null || printf 'MISSING\n')"
+        if [ "${comparison%%$'\t'*}" = "INHERITED" ]; then measurement="$nearest"; else comparison="MISSING"; fi
+      fi
     fi
-    comparison="$(red_comparison "$junit" "$measurement" 2>/dev/null || printf 'MISSING\n')"
+    if [ "${comparison%%$'\t'*}" != "INHERITED" ]; then
+      if [ ! -f "$measurement" ] && [ "$MAIN_HEALTH_AUTO" != "0" ]; then
+        say "   → $name: midiendo main $base para clasificar la suite roja"
+        "${UNIT_GATE_MAIN_HEALTH_CMD:-$GATE_SCRIPTS_DIR/main-health.sh}" "$main_repo_name" --sha "$base" >/dev/null 2>&1 || true
+      fi
+      comparison="$(red_comparison "$junit" "$measurement" 2>/dev/null || printf 'MISSING\n')"
+    fi
+    measured="$(basename "$measurement" .json)"
+    measured_note=""
+    [ "$measured" = "$base" ] || measured_note=" (ancestro medido de la base ${base:0:7})"
     IFS=$'\t' read -r inheritance_kind inherited_count inherited_base_total incident owner new_reds <<< "$comparison"
     case "$inheritance_kind" in
       INHERITED)
         inherited_red=1
-        say "   ⚠ $name: heredado de main ${base:0:7}: $inherited_count rojas (incidente $incident, dueño $owner)"
+        say "   ⚠ $name: heredado de main ${measured:0:7}$measured_note: $inherited_count rojas (incidente $incident, dueño $owner)"
         ;;
       NEW)
         bad "$name: suite en ROJO con rojas nuevas respecto a main ${base:0:7}: $new_reds"
@@ -892,6 +924,7 @@ for repo in "${candidates[@]}"; do
   # Regla 4: líneas nuevas cubiertas, piso total y trinquete de exclusiones/umbral.
   coverage_output="$(GATE_CHANGED="$changed" GATE_SRC_CHANGED="$src_changed" GATE_SRC_LABEL="$src_label" \
     GATE_MAIN_REPO="$main_repo_name" GATE_INHERITED_RED="$inherited_red" GATE_INHERITED_BASE_TOTAL="$inherited_base_total" \
+    GATE_NEAREST_MEASUREMENT="$(nearest_main_measurement "$base" "$main_repo_name")" \
     coverage_rule "$base" "$coverage_xml" "$runner" "$name" 2>&1)"
   coverage_rc=$?
   if [ "$coverage_rc" -ne 0 ]; then

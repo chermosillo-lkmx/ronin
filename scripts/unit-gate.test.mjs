@@ -1273,6 +1273,93 @@ test("60b. AUTO mide main sincrónicamente y relee la medición", (t) => {
   assert.match(r.out, /heredado de main/);
 });
 
+// Avanza main un commit y lo integra en la rama: la base nueva queda sin medir y la medición sembrada
+// en el commit inicial pasa a ser su ancestro de primer padre.
+function advanceMainPastMeasurement(fx) {
+  const measured = fx.git("merge-base", "HEAD", "origin/main").trim();
+  fx.git("checkout", "-q", "-b", "main-next", "origin/main");
+  fx.git("commit", "-q", "--allow-empty", "-m", "main avanza");
+  fx.git("push", "-q", "origin", "HEAD:main");
+  fx.git("checkout", "-q", "feat/x");
+  fx.git("merge", "-q", "--no-edit", "main-next");
+  fx.git("fetch", "-q", "origin");
+  const base = fx.git("merge-base", "HEAD", "origin/main").trim();
+  assert.notEqual(base, measured);
+  return { measured, base };
+}
+
+function fakeMainHealth(fx, measurement) {
+  const fake = join(fx.tmp, "fake-main-health.sh");
+  const marker = join(fx.tmp, "main-health-args");
+  writeFileSync(fake,
+    `#!/bin/bash\nprintf '%s\\n' "$@" > "$FAKE_MAIN_HEALTH_ARGS"\n` +
+    `mkdir -p "$MAIN_HEALTH_DIR/$1"\nprintf '%s' "$FAKE_MAIN_HEALTH_JSON" > "$MAIN_HEALTH_DIR/$1/$3.json"\nexit 1\n`);
+  chmodSync(fake, 0o755);
+  return { UNIT_GATE_MAIN_HEALTH_CMD: fake, FAKE_MAIN_HEALTH_ARGS: marker, FAKE_MAIN_HEALTH_JSON: JSON.stringify(measurement), marker };
+}
+
+test("60c. rojas ya presentes en un ancestro medido de la base → heredadas sin medir la base", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir } = seedMainHealth(fx, { incident: "INC-7", owner: "cowork-main-fix" });
+  const { measured, base } = advanceMainPastMeasurement(fx);
+  const { marker, ...fake } = fakeMainHealth(fx, {});
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "1", ...fake });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(existsSync(marker), false, "no debió correr main-health sobre la base exacta");
+  assert.match(r.out, new RegExp(`heredado de main ${measured.slice(0, 7)} \\(ancestro medido de la base ${base.slice(0, 7)}\\): 1 rojas \\(incidente INC-7, dueño cowork-main-fix\\)`));
+  assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
+test("60d. una roja que el ancestro medido no tenía → mide la base exacta y clasifica con ella", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir } = seedMainHealth(fx, { failed: [] });
+  const { base } = advanceMainPastMeasurement(fx);
+  const { marker, ...fake } = fakeMainHealth(fx, {
+    sha: base, repo: "origin", status: "red", tests: 2, total: 89, floor: 80,
+    failed: ["tests.test_other::test_other"], errors: [], skipped: 0,
+    skipped_by_reason: {}, uncovered_by_file: {}, duration: 1, at: Date.now(), gate_rc: 1,
+  });
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "1", ...fake });
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(readFileSync(marker, "utf8").trim().split("\n"), ["origin", "--sha", base]);
+  assert.match(r.out, new RegExp(`heredado de main ${base.slice(0, 7)}: 1 rojas`));
+});
+
+test("60e. ancestro sin la roja y sin AUTO → FAIL por roja nueva, no PASS", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir } = seedMainHealth(fx, { failed: [] });
+  const { base } = advanceMainPastMeasurement(fx);
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, new RegExp(`sin medición de main ${base.slice(0, 7)}`));
+  assert.doesNotMatch(r.out, /heredado de main/);
+});
+
+test("60f. UNIT_GATE_MAIN_HEALTH_DEPTH acota la búsqueda de ancestros medidos", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
+  const { healthDir } = seedMainHealth(fx, {});
+  advanceMainPastMeasurement(fx);
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0", UNIT_GATE_MAIN_HEALTH_DEPTH: "1" });
+  assert.equal(r.code, 1, r.out);
+  assert.doesNotMatch(r.out, /heredado de main/);
+});
+
+test("62c. el piso heredado acepta la medición de un ancestro de la base", (t) => {
+  const fx = fixture(t);
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  fx.write(".coveragerc", "[report]\nfail_under = 99.7\n");
+  const { healthDir } = seedMainHealth(fx, { status: "red", total: 89 });
+  advanceMainPastMeasurement(fx);
+  const r = fx.run({ ...withoutExtra, MAIN_HEALTH_DIR: healthDir, UNIT_GATE_MAIN_HEALTH_AUTO: "0" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /piso heredado de main: 90\.00 % < piso 99\.70 %, igual o mejor que la base [0-9a-f]{7} \(89\.00 %\)/);
+  assert.match(r.out, /UNIT-GATE: PASS/);
+});
+
 test("61. la medición se busca por basename del remoto origin, no por nombre del directorio", (t) => {
   const fx = fixture(t); // directorio ant-fake-api, remoto .../origin.git
   fx.setSuite([{ ...OTHER_PASS, outcome: "failure" }, APP("passed")]);
