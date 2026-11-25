@@ -134,8 +134,12 @@ tests tocados y cobertura. Esto no vuelve permisivo al gate: un test rojo nuevo 
 con rojas heredadas también falla si su cobertura total baja respecto a la medición de la base.
 El HEAD de una rama con rojas heredadas no se registra como nueva base.
 
-Sin medición, el gate intenta crearla con `scripts/main-health.sh <repo> --sha <merge-base>` y el
-lock de esa herramienta evita duplicar la suite. Para desactivar esa medición automática —por
+Sin medición de la base exacta, el gate busca primero la más reciente de sus ancestros de primer
+padre (hasta `UNIT_GATE_MAIN_HEALTH_DEPTH`, 200 commits): el monitor mide la punta de main, y con
+main moviéndose decenas de veces al día casi nunca existe la de la base exacta. Si todas las rojas
+de la rama ya estaban en ese ancestro, son heredadas y el piso de cobertura se compara contra él.
+Si no, el gate mide la base exacta con `scripts/main-health.sh <repo> --sha <merge-base>` (otra
+suite completa, ~25 min en el API) y el lock de esa herramienta evita duplicarla. Para desactivar esa medición automática —por
 ejemplo, en pruebas herméticas— se usa `UNIT_GATE_MAIN_HEALTH_AUTO=0`; en ese modo la ausencia de
 la medición falla cerrado. `MAIN_HEALTH_DIR` permite aislar tanto la lectura como la escritura de
 esta caché.
@@ -144,7 +148,8 @@ esta caché.
 
 El server vigila `origin/main` de los repos de `mainHealth.repos` (settings.json; por defecto
 `ant-liebre-api`, `ant-ms-cfdis`, `ant-liebre-data-extraction-contpaqi`, `ant-ms-permissions`,
-`ant-ms-i18n` — `ant-liebre-app` queda fuera: no somos owners) cada `mainHealth.intervalMin` (10) y
+`ant-ms-i18n` — `ant-liebre-app` queda fuera: no somos owners) cada `mainHealth.intervalMin` (60; era 10 hasta el 2026-11-25: con el API rojo, las mediciones
+de ~25 min ocupaban los 2 cupos de suite casi todo el día) y
 mide cada SHA nuevo una sola vez. Con main rojo abre un incidente por repo en
 `~/.cowork/main-health/incidents/<repo>/` con un único dueño (lease de `leaseMin` = 30 min) y lo
 cierra cuando una medición posterior queda verde. Defaults (decisión del humano, 2026-11-18):

@@ -88,7 +88,7 @@ export const DEFAULT_MAIN_HEALTH_ALIASES: Readonly<Record<string, string>> = {
 
 export const DEFAULT_MAIN_HEALTH_SETTINGS: Readonly<Omit<MainHealthSettings, "repos" | "aliases">> = {
   enabled: true,
-  intervalMin: 10,
+  intervalMin: 60,
   commentOnPr: false,
   remoteClaim: true,
   autoFix: true,

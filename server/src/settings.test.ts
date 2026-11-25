@@ -127,7 +127,7 @@ test("readMainHealthSettings devuelve defaults completos del alcance explícito"
   conSettings("{}", (file) => {
     assert.deepEqual(readMainHealthSettings(file), {
       enabled: true,
-      intervalMin: 10,
+      intervalMin: 60,
       repos: [
         "ant-liebre-api",
         "ant-ms-cfdis",
