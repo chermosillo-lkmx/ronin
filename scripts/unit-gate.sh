@@ -752,6 +752,12 @@ for repo in "${candidates[@]}"; do
   fi
   src_changed="$(printf '%s\n' "$changed" | grep -E "^($src_re)/.*\.(py|ts|tsx|js|jsx)\$" | grep -vE '/migrations/|/__pycache__/' || true)"
   test_changed="$(printf '%s\n' "$changed" | grep -E '(^|/)tests?/.*\.(py|ts|tsx|js|jsx)$|\.(test|spec)\.(ts|tsx|js|jsx)$' | grep -vE 'conftest\.py$|/fixtures?/|/support/|/__snapshots__/' || true)"
+  # Un .py bajo tests/ que pytest no recolecta (helper como tests/migration_head.py) nunca
+  # aparece en el junit: exigirlo ahí es un FAIL imposible de cumplir (ms-cfdis#471). Sólo
+  # cuentan como «test tocado» los test_*.py / *_test.py; el helper sigue entrando a la cobertura.
+  test_changed="$(printf '%s\n' "$test_changed" | grep -vE '(^|/)tests?/(.*/)?[^/]+\.py$' || true)
+$(printf '%s\n' "$test_changed" | grep -E '(^|/)tests?/(.*/)?(test_[^/]*|[^/]*_test)\.py$' || true)"
+  test_changed="$(printf '%s\n' "$test_changed" | grep -v '^$' || true)"
   # Regla 2 sólo aplica a tests que EXISTEN y traen líneas NUEVAS: un test borrado (p.ej.
   # al podar un módulo) no es nuevo ni modificado y no puede aparecer ejecutándose en el
   # junit; un archivo al que SÓLO se le quitaron funciones tampoco tiene nada nuevo que

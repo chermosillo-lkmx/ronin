@@ -1464,3 +1464,29 @@ test("cfdis: un RUN_REAL_PG explícito del llamador se respeta", (t) => {
   assert.equal(r.code, 0, r.out);
   assert.equal(readFileSync(envFile, "utf8"), "0");
 });
+
+test("helper .py bajo tests/ que no es test_*.py (p. ej. tests/migration_head.py) no se exige en el junit", (t) => {
+  // ms-cfdis#471: tests/migration_head.py es un módulo de apoyo que importan 28 pruebas; pytest
+  // nunca lo recolecta, así que jamás aparece en el junit y el gate fallaba en cada intento.
+  const fx = fixture(t);
+  fx.write("tests/migration_head.py", "HEAD = 'b'\n");
+  fx.git("add", "-A");
+  fx.git("commit", "-q", "-m", "helper");
+  fx.setSuite([OTHER_PASS, APP("passed")]);
+  const r = fx.run(withoutExtra);
+  assert.doesNotMatch(r.out, /NO aparecen ejecutados/, r.out);
+  assert.doesNotMatch(r.out, /migration_head\.py/, r.out);
+});
+
+test("un test_*.py tocado sigue exigiéndose en el junit aunque haya helpers tocados", (t) => {
+  const fx = fixture(t);
+  fx.write("tests/migration_head.py", "HEAD = 'b'\n");
+  fx.git("add", "-A");
+  fx.git("commit", "-q", "-m", "helper");
+  fx.setSuite([OTHER_PASS, APP("skipped")]);
+  const r = fx.run(withoutExtra);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /NO aparecen ejecutados/);
+  assert.match(r.out, /tests\/test_app\.py/);
+  assert.doesNotMatch(r.out, /migration_head\.py/);
+});
